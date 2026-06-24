@@ -1,0 +1,18 @@
+# --- Secrets: TUYỆT ĐỐI không đẩy lên ---
+.env
+.streamlit/secrets.toml
+
+# Môi trường / cache
+.venv/
+__pycache__/
+*.pyc
+
+# Cache & file tạo ra khi chạy (tự sinh lại)
+toss_openapi.json
+dart_corp.csv
+kci_screen_output.xlsx
+demo_output.xlsx
+
+# Hệ thống / công cụ
+.DS_Store
+.claude/

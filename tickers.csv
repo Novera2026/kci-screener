@@ -1,0 +1,79 @@
+name_en,name_kr,ticker,sector,market,theme
+Samsung Electronics,삼성전자,005930,Semiconductor,KOSPI,Bán dẫn;HBM/AI;Value-up
+SK Hynix,SK하이닉스,000660,Semiconductor,KOSPI,Bán dẫn;HBM/AI
+DB HiTek,DB하이텍,000990,Semiconductor,KOSPI,Bán dẫn
+Hanmi Semiconductor,한미반도체,042700,Semiconductor,KOSPI,Bán dẫn;HBM/AI
+Leeno Industrial,리노공업,058470,Semiconductor,KOSDAQ,Bán dẫn
+EO Technics,이오테크닉스,039030,Semiconductor,KOSDAQ,Bán dẫn
+Wonik IPS,원익IPS,240810,Semiconductor,KOSDAQ,Bán dẫn
+NAVER,NAVER,035420,Internet/Platform,KOSPI,Internet/Game;AI
+Kakao,카카오,035720,Internet/Platform,KOSPI,Internet/Game
+NCSoft,엔씨소프트,036570,Internet/Platform,KOSPI,Internet/Game
+Krafton,크래프톤,259960,Internet/Platform,KOSPI,Internet/Game
+Netmarble,넷마블,251270,Internet/Platform,KOSPI,Internet/Game
+Kakao Games,카카오게임즈,293490,Internet/Platform,KOSDAQ,Internet/Game
+Pearl Abyss,펄어비스,263750,Internet/Platform,KOSDAQ,Internet/Game
+KB Financial,KB금융,105560,Bank,KOSPI,Ngân hàng;Value-up;Cổ tức cao
+Shinhan Financial,신한지주,055550,Bank,KOSPI,Ngân hàng;Value-up;Cổ tức cao
+Hana Financial,하나금융지주,086790,Bank,KOSPI,Ngân hàng;Value-up;Cổ tức cao
+Woori Financial,우리금융지주,316140,Bank,KOSPI,Ngân hàng;Value-up;Cổ tức cao
+KakaoBank,카카오뱅크,323410,Bank,KOSPI,Ngân hàng;Internet/Game
+Samsung Life,삼성생명,032830,Insurance,KOSPI,Bảo hiểm;Value-up
+Samsung Fire & Marine,삼성화재,000810,Insurance,KOSPI,Bảo hiểm;Value-up
+DB Insurance,DB손해보험,005830,Insurance,KOSPI,Bảo hiểm
+Mirae Asset Securities,미래에셋증권,006800,Brokerage,KOSPI,Chứng khoán;Value-up
+Korea Investment Holdings,한국금융지주,071050,Brokerage,KOSPI,Chứng khoán
+Samsung Securities,삼성증권,016360,Brokerage,KOSPI,Chứng khoán;Cổ tức cao
+Kiwoom Securities,키움증권,039490,Brokerage,KOSPI,Chứng khoán
+Samsung C&T,삼성물산,028260,Holdco,KOSPI,Holdco/Chaebol;Value-up
+SK Inc,SK,034730,Holdco,KOSPI,Holdco/Chaebol
+LG Corp,LG,003550,Holdco,KOSPI,Holdco/Chaebol;Value-up
+Hanwha Corp,한화,000880,Holdco,KOSPI,Holdco/Chaebol
+HD Hyundai,HD현대,267250,Holdco,KOSPI,Holdco/Chaebol;Đóng tàu
+LG Energy Solution,LG에너지솔루션,373220,Battery,KOSPI,Pin (2차전지)
+Samsung SDI,삼성SDI,006400,Battery,KOSPI,Pin (2차전지)
+POSCO Future M,포스코퓨처엠,003670,Battery,KOSPI,Pin (2차전지);Vật liệu pin
+Ecopro BM,에코프로비엠,247540,Battery,KOSDAQ,Pin (2차전지);Vật liệu pin
+L&F,엘앤에프,066970,Battery,KOSDAQ,Pin (2차전지);Vật liệu pin
+Ecopro,에코프로,086520,Battery,KOSDAQ,Pin (2차전지)
+Hyundai Motor,현대차,005380,Auto,KOSPI,Ô tô/Phụ tùng;Value-up
+Kia,기아,000270,Auto,KOSPI,Ô tô/Phụ tùng;Value-up
+Hyundai Mobis,현대모비스,012330,Auto,KOSPI,Ô tô/Phụ tùng
+POSCO Holdings,POSCO홀딩스,005490,Steel/Chemicals,KOSPI,Thép;Holdco/Chaebol
+LG Chem,LG화학,051910,Steel/Chemicals,KOSPI,Hóa chất;Pin (2차전지)
+Lotte Chemical,롯데케미칼,011170,Steel/Chemicals,KOSPI,Hóa chất
+Korea Zinc,고려아연,010130,Steel/Chemicals,KOSPI,Vật liệu/Phi sắt
+Kumho Petrochemical,금호석유화학,011780,Steel/Chemicals,KOSPI,Hóa chất
+HD Hyundai Heavy,HD현대중공업,329180,Shipbuilding,KOSPI,Đóng tàu
+Samsung Heavy,삼성중공업,010140,Shipbuilding,KOSPI,Đóng tàu
+Hanwha Ocean,한화오션,042660,Shipbuilding,KOSPI,Đóng tàu;Quốc phòng/Vũ trụ
+HD Korea Shipbuilding,HD한국조선해양,009540,Shipbuilding,KOSPI,Đóng tàu
+Doosan Enerbility,두산에너빌리티,034020,Shipbuilding,KOSPI,Điện hạt nhân;Quốc phòng/Vũ trụ
+KEPCO,한국전력,015760,Utility,KOSPI,Tiện ích/Điện hạt nhân
+Korea Gas,한국가스공사,036460,Utility,KOSPI,Tiện ích/Điện hạt nhân
+KEPCO E&C,한전기술,052690,Utility,KOSPI,Điện hạt nhân
+Celltrion,셀트리온,068270,Pharma/Biotech,KOSPI,Dược/Bio
+Samsung Biologics,삼성바이오로직스,207940,Pharma/Biotech,KOSPI,Dược/Bio
+SK Biopharm,SK바이오팜,326030,Pharma/Biotech,KOSPI,Dược/Bio
+Yuhan,유한양행,000100,Pharma/Biotech,KOSPI,Dược/Bio
+Hanmi Pharm,한미약품,128940,Pharma/Biotech,KOSPI,Dược/Bio
+Alteogen,알테오젠,196170,Pharma/Biotech,KOSDAQ,Dược/Bio
+AmorePacific,아모레퍼시픽,090430,Consumer/Retail,KOSPI,Mỹ phẩm;Tiêu dùng
+LG H&H,LG생활건강,051900,Consumer/Retail,KOSPI,Mỹ phẩm;Tiêu dùng
+Cosmax,코스맥스,192820,Consumer/Retail,KOSPI,Mỹ phẩm
+Kolmar Korea,한국콜마,161890,Consumer/Retail,KOSPI,Mỹ phẩm
+Orion,오리온,271560,Consumer/Retail,KOSPI,Thực phẩm
+CJ CheilJedang,CJ제일제당,097950,Consumer/Retail,KOSPI,Thực phẩm
+Nongshim,농심,004370,Consumer/Retail,KOSPI,Thực phẩm
+HYBE,하이브,352820,Entertainment,KOSPI,Giải trí/IP
+JYP Entertainment,JYP Ent.,035900,Entertainment,KOSDAQ,Giải trí/IP
+SM Entertainment,에스엠,041510,Entertainment,KOSDAQ,Giải trí/IP
+CJ ENM,CJ ENM,035760,Entertainment,KOSDAQ,Giải trí/IP
+YG Entertainment,와이지엔터테인먼트,122870,Entertainment,KOSDAQ,Giải trí/IP
+SK Telecom,SK텔레콤,017670,Telecom,KOSPI,Viễn thông;Cổ tức cao;AI
+KT,KT,030200,Telecom,KOSPI,Viễn thông;Cổ tức cao;AI
+LG Uplus,LG유플러스,032640,Telecom,KOSPI,Viễn thông;Cổ tức cao
+Hanwha Aerospace,한화에어로스페이스,012450,Defense,KOSPI,Quốc phòng/Vũ trụ
+Korea Aerospace,한국항공우주,047810,Defense,KOSPI,Quốc phòng/Vũ trụ
+LIG Nex1,LIG넥스원,079550,Defense,KOSPI,Quốc phòng/Vũ trụ
+Hyundai Rotem,현대로템,064350,Defense,KOSPI,Quốc phòng/Vũ trụ

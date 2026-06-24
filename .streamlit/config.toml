@@ -1,0 +1,11 @@
+# Cấu hình Streamlit (áp dụng cả local lẫn Streamlit Community Cloud)
+[server]
+headless = true
+
+[theme]
+# Giao diện SÁNG — bảng dùng màu pastel (xanh/vàng/đỏ) nên cần nền sáng để dễ đọc.
+base = "light"
+primaryColor = "#1F3864"
+
+[browser]
+gatherUsageStats = false
