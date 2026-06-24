@@ -303,6 +303,16 @@ def _c_debt(v):
     return "background-color:#f8d7da"
 
 
+def _c_d2a(v):          # Nợ / Tổng tài sản (%): <50 an toàn · <70 vừa · ≥70 rủi ro
+    if v is None or pd.isna(v):
+        return ""
+    if v < 50:
+        return "background-color:#d7f5dd"
+    if v < 70:
+        return "background-color:#fff3cd"
+    return "background-color:#f8d7da"
+
+
 def _c_roe(v):
     if v is None or pd.isna(v):
         return ""
@@ -422,18 +432,26 @@ if "screen" in st.session_state:
 
     color_cols = {}        # tên cột -> hàm màu
     if enrich:
-        rev, net, roe, debt, epsf, rating = [], [], [], [], [], []
-        pbar = st.progress(0.0, text="Đang cào báo cáo tài chính...")
+        rev, opp, net, roe, debt = [], [], [], [], []
+        assets, liab, d2a, epsf, rating = [], [], [], [], []
+        pbar = st.progress(0.0, text="Đang cào báo cáo tài chính & cân đối...")
         for i, tk in enumerate(df["ticker"]):
             f = _fin(tk)
             la = latest_actual(f["annual"])
+            mc_i, px_i = df["market_cap"].iloc[i], df["price"].iloc[i]
+            bs_i = balance_sheet_of(la, mc_i, px_i,
+                                    la.get("bps") if la else None,
+                                    la.get("debt_ratio") if la else None)
             rev.append(la.get("revenue") if la else None)
+            opp.append(la.get("op_profit") if la else None)
             net.append(la.get("net_profit") if la else None)
             roe.append(la.get("roe") if la else None)
             debt.append(la.get("debt_ratio") if la else None)
+            assets.append(bs_i.get("assets"))
+            liab.append(bs_i.get("liabilities"))
+            d2a.append(bs_i.get("debt_to_assets"))
             epsf.append(df["fwd_eps"].iloc[i] if df["fwd_eps"].iloc[i] is not None
-                        else forecast_eps(f["annual"], df["market_cap"].iloc[i],
-                                          df["price"].iloc[i]))
+                        else forecast_eps(f["annual"], mc_i, px_i))
             rating.append(assess_financials(
                 f["annual"], df["sector"].iloc[i],
                 df["industry_kr"].iloc[i] if "industry_kr" in df.columns else None
@@ -441,13 +459,18 @@ if "screen" in st.session_state:
             pbar.progress((i + 1) / len(df))
         pbar.empty()
         disp["Doanh thu (억)"] = rev
+        disp["LN HĐ (억)"] = opp
         disp["LN thuần (억)"] = net
         disp["ROE %"] = roe
+        disp["Tổng tài sản (억)"] = assets
+        disp["Nợ (억)"] = liab
         disp["Nợ/VCSH %"] = debt
+        disp["Nợ/TS %"] = d2a
         disp["EPS dự tính"] = epsf
         disp["Đánh giá"] = rating
-        color_cols.update({"ROE %": _c_roe, "Nợ/VCSH %": _c_debt,
-                           "Đánh giá": _c_tag, "LN thuần (억)": _c_neg})
+        color_cols.update({"ROE %": _c_roe, "Nợ/VCSH %": _c_debt, "Nợ/TS %": _c_d2a,
+                           "Đánh giá": _c_tag, "LN HĐ (억)": _c_neg,
+                           "LN thuần (억)": _c_neg})
 
     disp["Định giá"] = df["valuation_tag"].values
     disp["Nguồn"] = df["source"].values
@@ -455,17 +478,22 @@ if "screen" in st.session_state:
 
     fmt = {"Giá": "{:,.0f}", "% so đỉnh": "{:+.1f}", "Vốn hóa (억)": "{:,.0f}",
            "P/E": "{:.2f}", "P/B": "{:.2f}", "EPS": "{:,.0f}", "BPS": "{:,.0f}",
-           "Tỷ suất CT %": "{:.2f}", "Doanh thu (억)": "{:,.0f}",
-           "LN thuần (억)": "{:,.0f}", "ROE %": "{:.1f}", "Nợ/VCSH %": "{:.0f}",
+           "Tỷ suất CT %": "{:.2f}", "Doanh thu (억)": "{:,.0f}", "LN HĐ (억)": "{:,.0f}",
+           "LN thuần (억)": "{:,.0f}", "ROE %": "{:.1f}", "Tổng tài sản (억)": "{:,.0f}",
+           "Nợ (억)": "{:,.0f}", "Nợ/VCSH %": "{:.0f}", "Nợ/TS %": "{:.0f}",
            "EPS dự tính": "{:,.0f}"}
     sty = disp.style.format({k: v for k, v in fmt.items() if k in disp.columns},
                             na_rep="—")
     for col, fn in color_cols.items():
         if col in disp.columns:
             sty = sty.map(fn, subset=[col])
-    st.dataframe(sty, use_container_width=True, hide_index=True)
-    st.caption("🟢 tốt/rẻ · 🟡 trung bình · 🔴 đắt/rủi ro. Vốn hóa & LN đơn vị 억원 "
-               "(×100 triệu KRW). EPS dự tính = công thức dự phóng (xem mục Chi tiết).")
+    # ghim cột Mã + Tên để cuộn ngang vẫn theo dõi được
+    col_cfg = {"Mã": st.column_config.Column(pinned=True),
+               "Tên": st.column_config.Column(pinned=True, width="medium")}
+    st.dataframe(sty, use_container_width=True, hide_index=True, column_config=col_cfg)
+    st.caption("📌 Cột Mã + Tên được ghim (cuộn ngang vẫn thấy). 🟢 tốt/rẻ · 🟡 trung bình · "
+               "🔴 đắt/rủi ro. Vốn hóa, LN, Tài sản, Nợ đơn vị 억원 (×100 triệu KRW). "
+               "Cân đối lấy số gốc DART nếu có .env key, nếu không là ước tính.")
 
     # ---- Aggregate ngành ----
     st.subheader("🏭 Chỉ số toàn ngành")
