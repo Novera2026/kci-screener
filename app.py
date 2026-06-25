@@ -15,7 +15,11 @@ import streamlit as st
 
 from screener import (TickerRegistry, fetch_batch, sector_aggregates,
                       export_excel, COLUMN_KR)
-from valuation import Assumptions, value_batch, recommend_method
+from valuation import Assumptions, value_batch, value_stock, recommend_method, _cap_conf
+try:
+    import coverage
+except Exception:
+    coverage = None
 from financials import (fetch_financials, last_n, latest_actual, forward_eps,
                         balance_sheet, balance_sheet_of, assess_financials,
                         build_annual_series, build_quarter_series,
@@ -292,6 +296,50 @@ def _fin_table_styled(cols: list[dict], fields: list[str]):
             .apply(_hl_col, axis=0).map(_neg))
 
 
+def _fin_table_combined(annual_cols: list[dict], quarter_cols: list[dict],
+                        fields: list[str]):
+    """GỘP năm + quý vào 1 bảng: cột năm trước (nhãn 'Năm YYYY'), rồi cột quý
+    ('Quý YY.MM'). Cột dự phóng nền xanh, số âm đỏ. Field nào quý không có → '—'."""
+    data, fc_cols, year_cols = {}, [], []
+
+    def _add(cols, kind):
+        for c in cols:
+            p = str(c.get("period", ""))
+            if kind == "Y":
+                lbl = ("Năm " + p[:4]) if p[:4].isdigit() else f"Năm {p}"
+            else:
+                lbl = "Quý " + (f"{p[2:4]}.{p[4:6]}" if len(p) >= 6 and p[:4].isdigit()
+                                else p)
+            if c.get("is_forecast"):
+                lbl += " (DP)"
+            elif c.get("is_consensus"):
+                lbl += " (E)"
+            while lbl in data:          # tránh trùng nhãn
+                lbl += " "
+            data[lbl] = [c.get(f) for f in fields]
+            if c.get("is_forecast"):
+                fc_cols.append(lbl)
+            if kind == "Y":
+                year_cols.append(lbl)
+
+    _add(annual_cols, "Y")
+    _add(quarter_cols, "Q")
+    df = pd.DataFrame(data, index=[LABELS_VI.get(f, f) for f in fields])
+
+    def _hl_col(s):
+        if s.name in fc_cols:
+            return ["background-color:#eef2ff" for _ in s]      # dự phóng: xanh
+        if s.name in year_cols:
+            return ["background-color:#fafafa" for _ in s]      # cột năm: xám nhạt
+        return ["" for _ in s]                                   # cột quý: trắng
+
+    def _neg(v):
+        return "color:#c0392b;font-weight:600" if isinstance(v, (int, float)) and v < 0 else ""
+
+    return (df.style.format(_cell_fmt, na_rep="—")
+            .apply(_hl_col, axis=0).map(_neg))
+
+
 # ---- màu cho bảng chính ----
 def _c_debt(v):
     if v is None or pd.isna(v):
@@ -347,16 +395,16 @@ if run_btn:
     if not queries:
         st.error("Chưa nhập mã nào.")
         st.stop()
-    prog = st.progress(0.0, text="Đang resolve & cào dữ liệu...")
-    rows, unresolved = [], []
-    from screener import fetch_one
-    for i, q in enumerate(queries):
-        tk = reg.resolve(q)
-        if tk is None:
-            unresolved.append(q)
-        else:
-            rows.append(fetch_one(tk, registry=reg, prefer=prefer).to_dict())
-        prog.progress((i + 1) / len(queries), text=f"{i+1}/{len(queries)}: {q}")
+    prog = st.progress(0.0, text="Đang resolve & cào dữ liệu (5 luồng song song)...")
+    from screener import fetch_many
+    n_q = len(queries)
+
+    def _on_prog(done, total):
+        prog.progress(done / total if total else 1.0,
+                      text=f"Đang cào song song: {done}/{total} mã")
+
+    rows, unresolved = fetch_many(queries, registry=reg, prefer=prefer,
+                                  max_workers=5, retries=1, progress=_on_prog)
     prog.empty()
     if not rows:
         st.error("Không cào được mã nào. Kiểm tra tên/ticker hoặc kết nối mạng.")
@@ -531,6 +579,28 @@ if "screen" in st.session_state:
     r = names[pick]
     drow = df[df["ticker"] == r.ticker].iloc[0].to_dict()
 
+    # Cyclical (bán dẫn/thép/đóng tàu/ô tô/pin): nạp lịch sử DART → định giá MID-CYCLE
+    # (median ROE qua chu kỳ, khử đỉnh/đáy) đáng tin hơn trailing 1 năm ở bảng nhanh.
+    try:
+        _hist = [c for c in build_annual_series(
+                    r.ticker, _fin(r.ticker)["annual"],
+                    drow.get("market_cap"), drow.get("price"), years=6)
+                 if not c.get("is_consensus")]
+        _m = _med.get(drow.get("sector"), {}) if isinstance(_med, dict) else {}
+        if _hist:
+            r = value_stock(drow, assume, _m.get("pe"), _m.get("pb"), history=_hist)
+    except Exception:
+        pass
+
+    # Độ phủ dữ liệu (Naver+DART) → chặn trần confidence cho mã mới niêm yết/thiếu lịch sử
+    cov = None
+    if coverage is not None:
+        try:
+            cov = coverage.assess_coverage(r.ticker, r.sector)
+        except Exception:
+            cov = None
+    disp_conf = _cap_conf(r.confidence, cov.get("confidence_cap")) if cov else r.confidence
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Giá hiện tại", f"{r.price:,.0f}" if r.price else "—")
     c2.metric(f"Fair value ({r.auto_method})",
@@ -539,10 +609,20 @@ if "screen" in st.session_state:
     c3.metric("Fair value dự phóng (Fwd)",
               f"{r.fwd_fair:,.0f}" if r.fwd_fair else "—",
               f"{r.fwd_upside_pct:+.1f}%" if r.fwd_upside_pct is not None else None)
-    c4.metric("Độ tin cậy định giá", r.confidence)
+    c4.metric("Độ tin cậy định giá", disp_conf,
+              "↓ chặn trần" if disp_conf != r.confidence else None)
+    if cov:
+        st.caption("📊 Độ phủ dữ liệu: " + coverage.coverage_badge(cov))
+        if cov.get("is_new_listing"):
+            st.warning("🆕 Mã mới niêm yết — " + cov["note"])
     st.markdown(f"**PP chuẩn cho ngành _{r.sector}_:** {r.primary} "
                 f"· _cross-check:_ {', '.join(r.cross)}")
     st.info(r.note)
+    if getattr(r, "implied_roe", None) is not None:
+        cur = f" · ROE hiện tại ~{r.roe*100:.0f}%" if r.roe else ""
+        st.caption(f"🔁 **Reverse check:** thị giá đang ngụ ý **ROE ~{r.implied_roe*100:.0f}%**{cur}. "
+                   "Chênh càng lớn = thị trường định giá tăng trưởng/siêu chu kỳ mà fair value proxy "
+                   "(P/B-ROE quá khứ) KHÔNG bắt được — đừng đọc upside âm như lệnh 'bán'.")
     method_tbl = pd.DataFrame(
         [{"Phương pháp": k, "Fair value": (round(v) if v else None),
           "Upside %": (round((v / r.price - 1) * 100, 1) if (v and r.price) else None)}
@@ -585,16 +665,14 @@ if "screen" in st.session_state:
 
         fields = ["revenue", "op_profit", "net_profit", "roe", "net_margin",
                   "debt_ratio", "assets", "liabilities", "eps", "bps", "per", "pbr"]
-        st.markdown("**5 năm gần nhất + dự phóng** (nền xanh = cột dự phóng bằng công thức)")
-        st.dataframe(_fin_table_styled(annual_series, fields),
-                     use_container_width=True)
-        st.markdown("**4 quý gần nhất + dự phóng** (nền xanh = cột dự phóng bằng công thức, "
-                    "có tính mùa vụ YoY)")
-        qfields = ["revenue", "op_profit", "net_profit", "roe", "net_margin",
-                   "debt_ratio", "eps", "bps", "per", "pbr"]
-        st.dataframe(_fin_table_styled(build_quarter_series(fin["quarter"], mc, px, 4),
-                                       qfields),
-                     use_container_width=True)
+        st.markdown("**Tài chính tổng hợp — 5 năm + 4 quý gần nhất + dự phóng** "
+                    "(cột _Năm_ nền xám, cột _Quý_ nền trắng, cột _dự phóng_ nền xanh; "
+                    "quý không có Tổng tài sản/Nợ → hiển thị —)")
+        st.dataframe(
+            _fin_table_combined(annual_series,
+                                build_quarter_series(fin["quarter"], mc, px, 4),
+                                fields),
+            use_container_width=True)
 
         # --- Đánh giá cân đối theo tiêu chuẩn đầu tư ---
         asmt = assess_financials(fin["annual"], drow.get("sector"),
@@ -613,3 +691,56 @@ if "screen" in st.session_state:
         st.download_button("⬇️ Tải Excel", f.read(), file_name=tmp,
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.success(f"Xong: {len(df)} mã · {df['per'].notna().sum()} mã có P/E")
+
+
+# ============================================================================
+# 🔬 Backtest — kiểm định độ tin cậy thực nghiệm (top-level, luôn hiển thị)
+# ============================================================================
+st.divider()
+with st.expander("🔬 Backtest — đo sai số & tín hiệu của hệ thống (chạy chậm, cần mạng KRX)"):
+    st.caption("Định giá tại thời điểm QUÁ KHỨ bằng dữ liệu có-tại-lúc-đó rồi so với "
+               "GIÁ THỰC sau N tháng. Đo: sai số định giá · IC (upside có dự báo được "
+               "return không) · hiệu lực theo confidence. Đây là bằng chứng độ tin cậy.")
+    try:
+        import backtest as _bt
+    except Exception as _e:
+        _bt = None
+        st.error(f"Không nạp được backtest.py: {_e}")
+    if _bt is not None:
+        cba, cbb = st.columns(2)
+        bt_universe = cba.text_area(
+            "Mã backtest (mỗi dòng 1 ticker)",
+            value="005930\n000660\n035420\n105560\n055550\n005380\n000270\n"
+                  "005490\n051910\n207940\n068270\n012450\n015760\n017670",
+            height=160)
+        bt_asof = cbb.text_input("Mốc as-of (YYYY-MM-DD, cách nhau dấu phẩy)",
+                                 value="2023-06-30, 2023-12-29, 2024-06-28")
+        bt_h = cbb.slider("Horizon (tháng)", 3, 24, 12, 3)
+        cbb.caption("⚠️ Chạy mất vài phút. Cần mạng KRX (pykrx fundamental).")
+        if st.button("🚀 Chạy backtest", type="primary"):
+            tickers = [x.strip().zfill(6) for x in
+                       bt_universe.replace(",", "\n").splitlines() if x.strip()]
+            asofs = [x.strip() for x in bt_asof.split(",") if x.strip()]
+            bdf, bm = None, None
+            with st.spinner(f"Đang chạy {len(tickers)}×{len(asofs)} điểm..."):
+                try:
+                    bdf, bm = _bt.run_backtest(tickers, asofs, horizon_months=bt_h,
+                                               a=assume, verbose=False)
+                except Exception as e:
+                    st.error(f"Lỗi backtest: {e}")
+            if bm and bm.get("n"):
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Số điểm", bm["n"])
+                k2.metric("Sai số (median)", f"{bm.get('median_abs_error')}")
+                k3.metric("IC (Spearman)", f"{bm.get('IC_spearman')}")
+                k4.metric("Spread rẻ−đắt",
+                          f"{bm.get('spread_rẻ_trừ_đắt', '—')}")
+                st.markdown(_bt.report_markdown(bdf, bm, bt_h))
+                st.dataframe(bdf, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Tải CSV backtest",
+                    bdf.to_csv(index=False).encode("utf-8-sig"),
+                    file_name="backtest_results.csv", mime="text/csv")
+            elif bm is not None:
+                st.warning("Không thu được điểm dữ liệu nào — kiểm tra mạng KRX, "
+                           "danh sách mã, hoặc mốc as-of.")

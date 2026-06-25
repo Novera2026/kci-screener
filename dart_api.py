@@ -196,6 +196,113 @@ def annual_financials(ticker: str, years: int = 4,
     return out
 
 
+# ---------------------------------------------------------------------------
+# Báo cáo quý/bán niên + đánh giá độ phủ dữ liệu (cho DN MỚI NIÊM YẾT)
+# ---------------------------------------------------------------------------
+_REPRT = {"11013": "Q1", "11012": "반기", "11014": "Q3", "11011": "년"}
+
+
+def _fetch_report(corp_code: str, year: int, reprt_code: str) -> Optional[dict]:
+    """Như _fetch_year nhưng cho reprt_code bất kỳ (quý/bán niên/năm).
+    11011=년(사업보고서) · 11012=반기 · 11013=1분기 · 11014=3분기."""
+    key = api_key()
+    for fs_div in ("CFS", "OFS"):
+        try:
+            r = requests.get(
+                f"{_BASE}/fnlttSinglAcntAll.json",
+                params={"crtfc_key": key, "corp_code": corp_code,
+                        "bsns_year": str(year), "reprt_code": reprt_code,
+                        "fs_div": fs_div}, timeout=_TIMEOUT)
+            j = r.json()
+        except Exception:
+            continue
+        if j.get("status") != "000":
+            continue
+        rec = {"period": f"{year}-{_REPRT.get(reprt_code, reprt_code)}",
+               "year": year, "reprt_code": reprt_code,
+               "is_consensus": False, "fs_div": fs_div}
+        found = False
+        for item in j.get("list", []):
+            nm = (item.get("account_nm") or "").strip()
+            for field, names in _ACCOUNTS.items():
+                if nm in names and rec.get(field) is None:
+                    v = _num(item.get("thstrm_amount"))
+                    if v is not None:
+                        rec[field] = v / 1e8           # 원 -> 억원
+                        found = True
+        if not found:
+            continue
+        if rec.get("liabilities") is not None and rec.get("equity"):
+            rec["debt_ratio"] = round(rec["liabilities"] / rec["equity"] * 100, 1)
+        return rec
+    return None
+
+
+def quarterly_financials(ticker: str, max_reports: int = 4) -> list[dict]:
+    """Các báo cáo quý/bán niên gần nhất (thứ tự thời gian tăng dần).
+
+    HỮU ÍCH cho DN MỚI NIÊM YẾT: chưa có 사업보고서 năm nhưng đã nộp 분기/반기 →
+    vẫn lấy được số thực gần nhất thay vì rỗng.
+    """
+    if not available():
+        return []
+    cc = corp_code_of(ticker)
+    if not cc:
+        return []
+    this_year = time.localtime().tm_year
+    seq = [(y, rc) for y in (this_year, this_year - 1)
+           for rc in ("11014", "11012", "11013", "11011")]  # Q3 → 반기 → Q1 → năm
+    out, miss = [], 0
+    for y, rc in seq:
+        if len(out) >= max_reports or miss >= 6:
+            break
+        rec = _fetch_report(cc, y, rc)
+        if rec:
+            out.append(rec); miss = 0
+        else:
+            miss += 1
+    out.reverse()
+    return out
+
+
+def data_status(ticker: str) -> dict:
+    """Đánh giá độ phủ dữ liệu DART → định tuyến phương pháp + trần confidence.
+
+    Trả: {available, corp_code, dart_annual_years, has_quarterly, coverage,
+          is_new_listing, suggested_mode, confidence_cap, note}.
+    coverage: full | thin | quarterly_only | none | no_corp_code.
+    """
+    if not available():
+        return {"available": False, "note": "Chưa có DART_API_KEY trong .env"}
+    cc = corp_code_of(ticker)
+    if not cc:
+        return {"available": True, "corp_code": None, "dart_annual_years": 0,
+                "has_quarterly": False, "coverage": "no_corp_code",
+                "is_new_listing": None, "suggested_mode": "peer_only",
+                "confidence_cap": "Low",
+                "note": "Không có corp_code — chưa map hoặc chưa hiện diện trên DART."}
+    annual = annual_financials(ticker, years=6)
+    n = len(annual)
+    q = quarterly_financials(ticker) if n < 2 else []
+    if n >= 3:
+        cov, new, mode, cap = "full", False, "intrinsic_ok", None
+        note = f"{n} năm BCTC năm → đủ chạy DCF/RIM intrinsic."
+    elif n in (1, 2):
+        cov, new, mode, cap = "thin", True, "relative_forward", "Medium"
+        note = f"Chỉ {n} năm BCTC năm → ưu tiên multiples forward + peer; trần Medium."
+    elif q:
+        cov, new, mode, cap = "quarterly_only", True, "relative_forward", "Low"
+        note = (f"Chưa có BCTC năm; có {len(q)} báo cáo quý/bán niên → annualize thận "
+                "trọng + consensus + peer; KHÔNG ép DCF; trần Low.")
+    else:
+        cov, new, mode, cap = "none", True, "peer_only", "Low"
+        note = ("DART chưa có số kết cấu → dùng bản cáo bạch IPO (증권신고서/투자설명서) + "
+                "consensus Naver + peer-relative; KHÔNG chạy DCF/RIM; trần Low.")
+    return {"available": True, "corp_code": cc, "dart_annual_years": n,
+            "has_quarterly": bool(q), "coverage": cov, "is_new_listing": new,
+            "suggested_mode": mode, "confidence_cap": cap, "note": note}
+
+
 if __name__ == "__main__":            # tự kiểm tra nhanh: python dart_api.py 005930
     import sys
     tk = sys.argv[1] if len(sys.argv) > 1 else "005930"

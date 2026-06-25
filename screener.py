@@ -20,24 +20,33 @@ import time
 import json
 import os
 import contextlib
+import threading
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 import pandas as pd
 
 
+# _quiet đổi stdout/stderr + logging ở mức TOÀN CỤC → không an toàn đa luồng.
+# Khóa này đảm bảo mỗi lúc chỉ 1 luồng ở trong vùng "im lặng" (chỉ ảnh hưởng
+# pykrx — nguồn fallback hiếm khi gọi ở chế độ naver, nên gần như không nghẽn).
+_QUIET_LOCK = threading.Lock()
+
+
 @contextlib.contextmanager
 def _quiet():
     """Nuốt stdout/stderr + logging của pykrx (nó tự in 'KRX 로그인 실패',
-    'Error occurred...' khi một endpoint KRX bị chặn — vô hại vì có fallback Naver)."""
+    'Error occurred...' khi một endpoint KRX bị chặn — vô hại vì có fallback Naver).
+    Có khóa để dùng an toàn trong cào đa luồng."""
     import logging
-    with open(os.devnull, "w") as dn, \
-            contextlib.redirect_stdout(dn), contextlib.redirect_stderr(dn):
-        logging.disable(logging.CRITICAL)
-        try:
-            yield
-        finally:
-            logging.disable(logging.NOTSET)
+    with _QUIET_LOCK:
+        with open(os.devnull, "w") as dn, \
+                contextlib.redirect_stdout(dn), contextlib.redirect_stderr(dn):
+            logging.disable(logging.CRITICAL)
+            try:
+                yield
+            finally:
+                logging.disable(logging.NOTSET)
 
 # ----------------------------------------------------------------------------
 # Cấu hình
@@ -479,6 +488,57 @@ def fetch_batch(queries: list[str], registry: Optional[TickerRegistry] = None,
         df = df.reindex(columns=COLUMN_ORDER)
     df.attrs["unresolved"] = unresolved
     return df
+
+
+def fetch_many(queries: list[str], registry: Optional[TickerRegistry] = None,
+               prefer: str = "naver", max_workers: int = 5, retries: int = 1,
+               progress=None) -> tuple[list[dict], list[str]]:
+    """Cào nhiều mã SONG SONG (mặc định 5 luồng) — nhanh hơn nhiều mà vẫn lịch sự
+    với máy chủ Naver. KHÔNG đổi độ chính xác: mỗi mã cào độc lập, kết quả giữ
+    đúng ánh xạ mã↔dòng và đúng THỨ TỰ nhập.
+
+    - retries: số lần thử lại thêm cho mã trả về RỖNG (mất giá) — lấp chỗ thiếu.
+    - progress(done, total): callback cập nhật tiến trình (gọi mỗi mã xong).
+    Trả (list[dict] theo thứ tự nhập, list[str] mã không resolve được).
+    """
+    import concurrent.futures as _cf
+    registry = registry or TickerRegistry()
+
+    resolved: list[tuple[int, str]] = []   # (vị trí trong kết quả, ticker)
+    unresolved: list[str] = []
+    for q in queries:
+        tk = registry.resolve(q)
+        if tk is None:
+            unresolved.append(q)
+        else:
+            resolved.append((len(resolved), tk))
+
+    rows: list[Optional[dict]] = [None] * len(resolved)
+
+    def _work(tk: str) -> dict:
+        last = None
+        for attempt in range(retries + 1):
+            try:
+                r = fetch_one(tk, registry=registry, prefer=prefer)
+                if r.price is not None:        # có giá = coi như thành công
+                    return r.to_dict()
+                last = r
+            except Exception as ex:
+                last = StockRow(ticker=tk, note=f"err: {str(ex)[:40]}")
+            if attempt < retries:
+                time.sleep(RETRY_WAIT)         # nghỉ rồi thử lại mã bị rỗng
+        return (last or StockRow(ticker=tk, note="no data")).to_dict()
+
+    done = 0
+    total = len(resolved)
+    with _cf.ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
+        futs = {ex.submit(_work, tk): idx for idx, tk in resolved}
+        for fut in _cf.as_completed(futs):
+            rows[futs[fut]] = fut.result()
+            done += 1
+            if progress:
+                progress(done, total)
+    return [r for r in rows if r is not None], unresolved
 
 
 def sector_aggregates(df: pd.DataFrame) -> pd.DataFrame:

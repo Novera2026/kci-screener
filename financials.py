@@ -215,6 +215,18 @@ def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
     bps_fc = (bps_last + eps_fc - dps) if (bps_last is not None and eps_fc is not None) \
         else bps_last
     roe_fc = eps_fc / bps_fc * 100 if (eps_fc and bps_fc) else None
+
+    # Dự phóng CÂN ĐỐI (억원): VCSH = VCSH cũ + LN giữ lại; Nợ theo 부채비율 gần nhất.
+    eq_last = last.get("equity")
+    dr_last = last.get("debt_ratio")
+    equity_fc = assets_fc = liab_fc = None
+    if eq_last is not None and net_fc is not None:
+        div_total = (dps * shares / 1e8) if (dps and shares) else 0.0   # 원 -> 억
+        equity_fc = eq_last + net_fc - div_total
+        if dr_last is not None and equity_fc:
+            liab_fc = equity_fc * dr_last / 100
+            assets_fc = equity_fc + liab_fc
+
     return {
         "period": _next_label(reals), "label": _next_label(reals)[:4],
         "is_consensus": True, "is_forecast": True, "_cagr": round(g * 100, 1),
@@ -227,6 +239,9 @@ def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
         "bps": round(bps_fc) if bps_fc is not None else None,
         "roe": round(roe_fc, 2) if roe_fc is not None else None,
         "debt_ratio": last.get("debt_ratio"),
+        "equity": round(equity_fc) if equity_fc is not None else None,
+        "assets": round(assets_fc) if assets_fc is not None else None,
+        "liabilities": round(liab_fc) if liab_fc is not None else None,
     }
 
 

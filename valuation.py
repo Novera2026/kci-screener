@@ -102,6 +102,60 @@ def justified_pb_value(bps: float, roe: float, ke: float, g: float) -> Optional[
 
 
 # ----------------------------------------------------------------------------
+# Normalized / mid-cycle (cho CYCLICAL) — dùng MEDIAN qua chu kỳ, khử đỉnh/đáy (§3.1/§6.6)
+# ----------------------------------------------------------------------------
+# Ngành cyclical: ROE/biên 1 năm vô nghĩa (đỉnh hoặc đáy chu kỳ) → phải normalize.
+CYCLICAL_SECTORS = {"Semiconductor", "Steel/Chemicals", "Shipbuilding",
+                    "Auto", "Battery"}
+
+
+def _median(xs: list) -> Optional[float]:
+    xs = sorted(v for v in xs if v is not None)
+    if not xs:
+        return None
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def normalized_metrics(history: Optional[list]) -> dict:
+    """Từ chuỗi BCTC nhiều năm (history) → MEDIAN ROE/biên qua chu kỳ.
+
+    history: list dict năm THỰC có net_profit, equity, revenue, op_profit
+    (đơn vị bất kỳ — ratio là không thứ nguyên). Median khử năm đỉnh/đáy.
+    """
+    reals = [h for h in (history or []) if not h.get("is_consensus")]
+    roes, nms, oms = [], [], []
+    for h in reals:
+        np_, eq = h.get("net_profit"), h.get("equity")
+        rev, op = h.get("revenue"), h.get("op_profit")
+        if np_ is not None and eq:
+            roes.append(np_ / eq)
+        if np_ is not None and rev:
+            nms.append(np_ / rev)
+        if op is not None and rev:
+            oms.append(op / rev)
+    return {"median_roe": _median(roes), "median_net_margin": _median(nms),
+            "median_op_margin": _median(oms), "n_years": len(reals),
+            "mean_roe": (sum(roes) / len(roes)) if roes else None}
+
+
+def implied_roe_from_price(price: float, bps: float, ke: float, g: float) -> Optional[float]:
+    """REVERSE của justified P/B–ROE: thị giá đang NGỤ Ý mức ROE nào?
+
+        price = BPS × (ROE_implied − g)/(Ke − g)
+        ⇒ ROE_implied = (price/BPS) × (Ke − g) + g
+
+    Dùng cho boom premium: so ROE thị trường ngụ ý với ROE hiện tại để biết
+    thị trường đang kỳ vọng siêu chu kỳ tới mức nào (§6.3 reverse DCF).
+    """
+    price = _pos(price)
+    bps = _pos(bps)
+    if price is None or bps is None or ke is None:
+        return None
+    return (price / bps) * (ke - g) + g
+
+
+# ----------------------------------------------------------------------------
 # §3.3 — DDM (Gordon 1 giai đoạn & 2 giai đoạn)
 # ----------------------------------------------------------------------------
 def ddm_gordon(dps: float, ke: float, g: float) -> Optional[float]:
@@ -344,6 +398,7 @@ class ValuationResult:
     upside_pct: Optional[float] = None
     fwd_fair: Optional[float] = None              # fair theo EPS/ROE dự phóng
     fwd_upside_pct: Optional[float] = None
+    implied_roe: Optional[float] = None           # ROE thị giá đang ngụ ý (reverse)
     confidence: str = "Medium"
     note: str = ""
     flags: list = field(default_factory=list)
@@ -359,6 +414,8 @@ class ValuationResult:
             "upside_%": self.upside_pct,
             "fwd_fair": round(self.fwd_fair) if self.fwd_fair else None,
             "fwd_upside_%": self.fwd_upside_pct,
+            "ROE_thị_trường_ngụ_ý": round(self.implied_roe * 100, 1)
+                if self.implied_roe is not None else None,
             "confidence": self.confidence,
         }
         for k, v in self.methods.items():
@@ -377,10 +434,29 @@ _AUTO_LABEL = {
 }
 
 
+# Thứ hạng confidence để áp "trần" (cap không cho vượt mức cho phép).
+_CONF_RANK = {"High": 3, "Medium": 2, "Low": 1}
+
+
+def _cap_conf(conf: str, cap: Optional[str]) -> str:
+    """Hạ conf xuống `cap` nếu conf đang cao hơn cap (dùng cho mã mới niêm yết)."""
+    if not cap:
+        return conf
+    if _CONF_RANK.get(cap, 99) < _CONF_RANK.get(conf, 0):
+        return cap
+    return conf
+
+
 def value_stock(row: dict, a: Assumptions,
                 sector_median_pe: Optional[float] = None,
-                sector_median_pb: Optional[float] = None) -> ValuationResult:
-    """Định giá 1 mã từ 1 dòng StockRow.to_dict() + giả định + median ngành."""
+                sector_median_pb: Optional[float] = None,
+                coverage_cap: Optional[str] = None,
+                history: Optional[list] = None) -> ValuationResult:
+    """Định giá 1 mã từ 1 dòng StockRow.to_dict() + giả định + median ngành.
+
+    coverage_cap: trần confidence ('Medium'/'Low') theo độ phủ dữ liệu
+    (coverage.assess_coverage(...)['confidence_cap']). Dùng cho mã mới niêm yết /
+    thiếu lịch sử — không cho confidence vượt trần dù method có hội tụ."""
     ke = a.ke()
     g_term = a.g_term_capped()
     eps = _num(row.get("eps"))
@@ -393,6 +469,7 @@ def value_stock(row: dict, a: Assumptions,
     sector_disp = sector or industry_kr   # hiển thị: EN curated, else 업종 KRV
 
     roe = (eps / bps) if (eps and bps and bps != 0) else None
+    implied_roe = implied_roe_from_price(price, bps, ke, g_term)
 
     methods: dict = {}
     methods["S-RIM"] = srim(bps, roe, ke, w=a.persistence) if roe is not None else None
@@ -412,37 +489,66 @@ def value_stock(row: dict, a: Assumptions,
     if fwd_roe is not None:
         methods["S-RIM (ROE dự phóng)"] = srim(bps, fwd_roe, ke, w=a.persistence)
 
+    # --- Mid-cycle (normalized) cho CYCLICAL: median ROE qua chu kỳ (khử đỉnh/đáy) ---
+    norm = normalized_metrics(history) if history else {"median_roe": None, "n_years": 0}
+    mid_roe = norm.get("median_roe")
+    used_midcycle = False
+    if mid_roe is not None and bps is not None:
+        methods["S-RIM (mid-cycle)"] = srim(bps, mid_roe, ke, w=a.persistence)
+        methods["P/B-ROE (mid-cycle)"] = justified_pb_value(bps, mid_roe, ke, g_term)
+        methods["EPS chuẩn hóa × P/E ngành"] = relative_pe_value(mid_roe * bps, sector_median_pe)
+
+    is_cyclical = sec_eff in CYCLICAL_SECTORS
+
     guide = recommend_method(sector, industry_kr)
     auto_key = guide["auto"]
     auto_label = _AUTO_LABEL.get(auto_key, "S-RIM")
     fair = methods.get(auto_label)
 
     flags: list = []
-    # Fallback chuỗi nếu method auto thiếu data: S-RIM -> P/B-ROE -> DCF -> P/E
+    # Cyclical + đủ lịch sử (≥3 năm) → ƯU TIÊN mid-cycle thay cho trailing 1 năm (§3.1)
+    if is_cyclical and norm.get("n_years", 0) >= 3:
+        for mc in ("P/B-ROE (mid-cycle)", "S-RIM (mid-cycle)"):
+            if methods.get(mc) is not None:
+                auto_label, fair, used_midcycle = mc, methods[mc], True
+                flags.append(f"cyclical → mid-cycle ROE median {mid_roe*100:.0f}% "
+                             f"qua {norm['n_years']} năm (khử đỉnh/đáy chu kỳ)")
+                break
+
+    # Fallback chuỗi nếu method auto thiếu data
     if fair is None:
-        for fb in ("S-RIM", "P/B-ROE (justified)", "DCF earnings (thô)",
-                   "P/E vs median ngành"):
+        for fb in ("P/B-ROE (mid-cycle)", "S-RIM (mid-cycle)", "S-RIM",
+                   "P/B-ROE (justified)", "DCF earnings (thô)", "P/E vs median ngành"):
             if methods.get(fb) is not None:
                 auto_label, fair = fb, methods[fb]
                 flags.append(f"method chính thiếu data → dùng {fb}")
                 break
 
-    # Confidence heuristic (§9 rút gọn)
+    # --- Confidence (§9) ---
     conf = "Medium"
-    if not guide.get("data_ok", False):
+    if not used_midcycle and not guide.get("data_ok", False):
         conf = "Low"
         flags.append("entity cần data sâu hơn (DCF/SOTP/EV/rNPV) — đây chỉ là proxy")
-    if roe is None or (eps is not None and eps <= 0):
+    if used_midcycle:
+        flags.append("đã chuẩn hóa earnings qua chu kỳ → tin cậy hơn trailing 1 năm")
+    # data gap THẬT: không có cả ROE thường lẫn mid-cycle
+    if (roe is None and mid_roe is None) or (eps is not None and eps <= 0 and mid_roe is None):
         conf = "Low"
-        flags.append("EPS/ROE âm hoặc thiếu → định giá earnings-based kém tin cậy")
+        flags.append("EPS/ROE âm hoặc thiếu → earnings-based kém tin cậy")
+
+    ref_roe = mid_roe if mid_roe is not None else roe   # ROE chuẩn để reverse-check
 
     upside = None
     if fair and price:
         upside = round((fair / price - 1) * 100, 1)
-        # §6.3: gap rất lớn là TÍN HIỆU (boom premium / value trap), không phải bug
+        # §6.3: gap lớn là TÍN HIỆU (boom premium/value trap) — CẢNH BÁO, KHÔNG tự hạ Low
         if upside <= -40:
-            flags.append("thị giá ≫ fair: khả năng boom premium — reverse-check, đừng ép khớp")
-            conf = "Low"
+            if implied_roe is not None and ref_roe is not None and ref_roe > 0:
+                flags.append(
+                    f"thị giá ngụ ý ROE ~{implied_roe*100:.0f}% vs chuẩn ~{ref_roe*100:.0f}% "
+                    "→ thị trường định giá siêu chu kỳ/tăng trưởng")
+            else:
+                flags.append("thị giá ≫ fair: khả năng boom premium — reverse-check, đừng ép khớp")
         elif upside >= 60:
             flags.append("fair ≫ thị giá: khả năng value trap/data méo — kiểm lại")
 
@@ -450,12 +556,18 @@ def value_stock(row: dict, a: Assumptions,
                 or methods.get("S-RIM (ROE dự phóng)"))
     fwd_upside = round((fwd_fair / price - 1) * 100, 1) if (fwd_fair and price) else None
 
+    # §9/§14: trần confidence theo độ phủ dữ liệu (mã mới niêm yết / thiếu lịch sử)
+    capped = _cap_conf(conf, coverage_cap)
+    if capped != conf:
+        flags.append(f"trần confidence theo độ phủ dữ liệu: {coverage_cap}")
+        conf = capped
+
     return ValuationResult(
         ticker=row.get("ticker"), name=row.get("name"), sector=sector_disp,
         price=price, ke=ke, roe=roe, methods=methods,
         primary=guide["primary"], cross=guide["cross"], auto_method=auto_label,
         fair_value=fair, upside_pct=upside, fwd_fair=fwd_fair,
-        fwd_upside_pct=fwd_upside, confidence=conf,
+        fwd_upside_pct=fwd_upside, implied_roe=implied_roe, confidence=conf,
         note=guide["note"], flags=flags,
     )
 
