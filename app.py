@@ -13,6 +13,15 @@ import os
 import pandas as pd
 import streamlit as st
 
+# Trên Streamlit Cloud KHÔNG có .env → nạp key từ Streamlit Secrets vào os.environ
+# để dart_api / toss_api (đọc os.environ) hoạt động. Local có .env thì bỏ qua.
+try:
+    for _k in ("DART_API_KEY", "TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET"):
+        if _k not in os.environ and _k in st.secrets:
+            os.environ[_k] = str(st.secrets[_k])
+except Exception:
+    pass
+
 from screener import (TickerRegistry, fetch_batch, sector_aggregates,
                       export_excel, COLUMN_KR)
 from valuation import Assumptions, value_batch, value_stock, recommend_method, _cap_conf
@@ -457,6 +466,21 @@ if "screen" in st.session_state:
     enrich = st.checkbox(
         "📑 Bổ sung số liệu tài chính (doanh thu, LN thuần, ROE, nợ, EPS dự tính, đánh giá "
         f"— cào thêm ~0.5s/mã · {len(df)} mã)", value=len(df) <= 60)
+    expand_ts = st.checkbox(
+        "📅 Gộp số liệu tài chính THEO KỲ (năm/quý) thành cột trong bảng này — "
+        "mỗi mã thêm cột theo từng năm/quý (chỉ nên bật khi ÍT mã, nếu không rất nhiều cột)",
+        value=False)
+    if expand_ts:
+        _tm = st.multiselect(
+            "Chỉ tiêu hiển thị theo kỳ",
+            ["revenue", "op_profit", "net_profit", "roe", "net_margin",
+             "debt_ratio", "assets", "liabilities", "eps", "bps"],
+            default=["revenue", "net_profit", "roe"],
+            format_func=lambda k: LABELS_VI.get(k, k))
+        _tscope = st.radio("Phạm vi kỳ", ["Năm", "Năm + Quý"], horizontal=True,
+                           key="ts_scope")
+    else:
+        _tm, _tscope = [], "Năm"
 
     def _ind(i):
         s = df["sector"].iloc[i]
@@ -520,6 +544,40 @@ if "screen" in st.session_state:
                            "Đánh giá": _c_tag, "LN HĐ (억)": _c_neg,
                            "LN thuần (억)": _c_neg})
 
+    # ---- Tùy chọn: trải số liệu tài chính theo kỳ thành cột (gộp vào bảng chính) ----
+    _ts_fmt: dict = {}
+    if expand_ts and _tm:
+        ylabels, qlabels, cellmap = [], [], {}
+        with st.spinner("Đang nạp chuỗi tài chính theo kỳ..."):
+            for i, tk in enumerate(df["ticker"]):
+                f = _fin(tk)
+                mc_i, px_i = df["market_cap"].iloc[i], df["price"].iloc[i]
+                seq = [("Y", c) for c in
+                       build_annual_series(tk, f["annual"], mc_i, px_i, years=4)]
+                if _tscope == "Năm + Quý":
+                    seq += [("Q", c) for c in
+                            build_quarter_series(f["quarter"], mc_i, px_i, 4)]
+                for kind, c in seq:
+                    p = str(c.get("period", ""))
+                    e = "E" if c.get("is_forecast") else ""
+                    if kind == "Y":
+                        plabel = f"'{p[2:4]}{e}"
+                        if plabel not in ylabels:
+                            ylabels.append(plabel)
+                    else:
+                        plabel = (f"Q{p[2:4]}.{p[4:6]}" if len(p) >= 6 else f"Q{p}") + e
+                        if plabel not in qlabels:
+                            qlabels.append(plabel)
+                    for m in _tm:
+                        cellmap.setdefault((m, plabel), {})[tk] = c.get(m)
+        for m in _tm:
+            for plabel in ylabels + qlabels:
+                if (m, plabel) in cellmap:
+                    col = f"{LABELS_VI.get(m, m)} {plabel}"
+                    disp[col] = [cellmap[(m, plabel)].get(tk) for tk in df["ticker"]]
+                    _ts_fmt[col] = "{:.1f}" if m in ("roe", "net_margin", "debt_ratio") \
+                        else "{:,.0f}"
+
     disp["Định giá"] = df["valuation_tag"].values
     disp["Nguồn"] = df["source"].values
     color_cols.update({"Định giá": _c_tag, "% so đỉnh": _c_neg, "EPS": _c_neg})
@@ -530,6 +588,7 @@ if "screen" in st.session_state:
            "LN thuần (억)": "{:,.0f}", "ROE %": "{:.1f}", "Tổng tài sản (억)": "{:,.0f}",
            "Nợ (억)": "{:,.0f}", "Nợ/VCSH %": "{:.0f}", "Nợ/TS %": "{:.0f}",
            "EPS dự tính": "{:,.0f}"}
+    fmt.update(_ts_fmt)
     sty = disp.style.format({k: v for k, v in fmt.items() if k in disp.columns},
                             na_rep="—")
     for col, fn in color_cols.items():
