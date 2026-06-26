@@ -492,6 +492,10 @@ def _style_table(d):
                        "#fff3cd" if ("Trung bình" in t or "🟡" in t) else "")
                 if css:
                     _set_bg(c, "background-color:" + css)
+        # cờ độ tin P/E: ⚠ chu kỳ → vàng nhạt (cảnh báo earnings-based không hợp)
+        if "PP P/E?" in d.columns and isinstance(d.at[idx, "PP P/E?"], str):
+            _set_bg("PP P/E?", "background-color:" +
+                    ("#fff3cd" if "⚠" in d.at[idx, "PP P/E?"] else "#eef7ee"))
         # số âm: đỏ chữ
         for c in ("LN HĐ (억)", "LN thuần (억)", "EPS", "Upside P/E %", "% so đỉnh"):
             if c in d.columns and isinstance(d.at[idx, c], (int, float)) and d.at[idx, c] < 0:
@@ -531,7 +535,14 @@ if "screen" in st.session_state:
         if r.get("price") and r.get("high_52w") else None, axis=1)
     agg = sector_aggregates(df)
 
-    med = df.groupby("sector")["per"].transform("median")
+    # Median P/E ngành ROBUST: gom theo sector (hoặc industry_kr nếu trống) và
+    # LOẠI outlier (P/E ≤ 0 hoặc > 60) trước khi lấy median — nếu không, 1 mã LN teo
+    # (vd Doosan P/E 336) hay mã lỗ sẽ bóp méo "rẻ/đắt vs ngành" & "giá hợp lý".
+    PE_CAP = 60.0
+    _eff_sec = (df["sector"].where(df["sector"].notna(), df["industry_kr"])
+                if "industry_kr" in df.columns else df["sector"])
+    _per_clean = df["per"].where((df["per"] > 0) & (df["per"] <= PE_CAP))
+    med = _per_clean.groupby(_eff_sec).transform("median")
     def _tag(per, m):
         if per is None or m is None or pd.isna(per) or pd.isna(m):
             return ""
@@ -684,6 +695,11 @@ if "screen" in st.session_state:
                                for fe, mp in zip(_fe, _mp)]
     disp["Upside P/E %"] = [round((tp / px - 1) * 100, 1) if (tp and px) else None
                            for tp, px in zip(disp["Giá hợp lý (P/E)"], _px)]
+    # Cờ độ tin: ngành chu kỳ/đặc thù (data_ok=False trong valuation: đóng tàu, bán dẫn,
+    # pin, dược, holdco…) thì định giá theo P/E earnings-based KHÔNG đáng tin → cảnh báo.
+    _ik = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
+    disp["PP P/E?"] = ["✓ hợp" if recommend_method(s, ik).get("data_ok", False)
+                       else "⚠ chu kỳ" for s, ik in zip(df["sector"], _ik)]
 
     disp["Định giá"] = df["valuation_tag"].values
     disp["Nguồn"] = df["source"].values
@@ -724,7 +740,7 @@ if "screen" in st.session_state:
         # EPS
         "EPS", "EPS dự tính",
         # ĐỊNH GIÁ
-        "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %",
+        "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %", "PP P/E?",
         # Đánh giá tổng hợp
         "Đánh giá", "Định giá",
     ]
@@ -745,6 +761,11 @@ if "screen" in st.session_state:
     st.caption("📌 Cột Mã + Tên được ghim (cuộn ngang vẫn thấy). 🟢 tốt/rẻ · 🟡 trung bình · "
                "🔴 đắt/rủi ro. Vốn hóa, LN, Tài sản, Nợ đơn vị 억원 (×100 triệu KRW). "
                "Cân đối lấy số gốc DART nếu có .env key, nếu không là ước tính.")
+    st.caption("⚠️ **Đọc kỹ:** *EPS dự tính* dự phóng theo XU HƯỚNG biên LN (đơn điệu→bám "
+               "năm gần đây, nhiễu→median). *Median P/E ngành* đã LOẠI P/E âm & >60 (outlier). "
+               "Cột **PP P/E?**: ⚠ chu kỳ = ngành định giá theo P/E earnings-based KHÔNG đáng "
+               "tin (đóng tàu/bán dẫn/pin/dược…) — *Giá hợp lý & Upside P/E* chỉ tham khảo "
+               "tương đối, nên xem backlog/DCF.")
 
     # ---- Aggregate ngành ----
     st.subheader("🏭 Chỉ số toàn ngành")

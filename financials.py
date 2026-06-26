@@ -160,6 +160,27 @@ def _median(xs: list[float]) -> Optional[float]:
     return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
 
 
+def _trend_value(xs: list[float]) -> Optional[float]:
+    """Giá trị đại diện CÓ XÉT XU HƯỚNG (cho biên LN dự phóng).
+
+    - Chuỗi ĐƠN ĐIỆU (tăng dần / giảm dần rõ): trung bình có trọng số nghiêng về
+      năm gần đây (1,2,…,n) → bám xu hướng, không bị 'kéo về giữa' như median.
+      Tránh được lỗi: ngành chu kỳ đang hồi phục bị dự phóng tụt lợi nhuận.
+    - Chuỗi NHIỄU (lên xuống thất thường): dùng median (bền với năm bất thường).
+    """
+    xs = [v for v in xs if v is not None]
+    if not xs:
+        return None
+    if len(xs) == 1:
+        return xs[0]
+    inc = all(xs[i] <= xs[i + 1] for i in range(len(xs) - 1))
+    dec = all(xs[i] >= xs[i + 1] for i in range(len(xs) - 1))
+    if inc or dec:                       # xu hướng rõ → ưu tiên năm gần đây
+        w = list(range(1, len(xs) + 1))
+        return sum(v * wi for v, wi in zip(xs, w)) / sum(w)
+    return _median(xs)                   # nhiễu → median
+
+
 def _shares_estimate(reals: list[dict], market_cap: Optional[float],
                      price: Optional[float]) -> Optional[float]:
     """Số cổ phiếu: ưu tiên suy từ LN thuần / EPS (cùng kỳ), fallback vốn hóa/giá."""
@@ -186,7 +207,8 @@ def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
     """Dự phóng 1 năm tới bằng CÔNG THỨC minh bạch (không dùng consensus Naver):
 
       • Doanh thu: CAGR các năm thực, kẹp [-20%, +40%]  →  DT(t+1) = DT(t)·(1+g)
-      • LN HĐ / LN thuần: biên LN median (ổn định, loại năm bất thường) × DT dự phóng
+      • LN HĐ / LN thuần: biên LN theo XU HƯỚNG (đơn điệu→nghiêng năm gần đây;
+        nhiễu→median) × DT dự phóng — tránh under/over-forecast ngành chu kỳ
       • EPS: LN thuần dự phóng / số cp (suy từ LN/EPS cùng kỳ)
       • BPS: BPS(t) + EPS dự phóng − cổ tức/cp(t)   (lợi nhuận giữ lại)
       • ROE: EPS/BPS dự phóng
@@ -201,10 +223,12 @@ def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
     g = (revs[-1] / revs[0]) ** (1 / (n - 1)) - 1 if revs[0] and revs[0] > 0 else 0.0
     g = max(-0.20, min(0.40, g))
     rev_fc = revs[-1] * (1 + g)
-    opm = _median([c["op_profit"] / c["revenue"] for c in reals
-                   if c.get("op_profit") is not None and c.get("revenue")])
-    npm = _median([c["net_profit"] / c["revenue"] for c in reals
-                   if c.get("net_profit") is not None and c.get("revenue")])
+    # Biên LN dự phóng theo XU HƯỚNG (đơn điệu→nghiêng gần đây; nhiễu→median).
+    # Giữ thứ tự thời gian để nhận diện xu hướng.
+    opm = _trend_value([c["op_profit"] / c["revenue"] for c in reals
+                        if c.get("op_profit") is not None and c.get("revenue")])
+    npm = _trend_value([c["net_profit"] / c["revenue"] for c in reals
+                        if c.get("net_profit") is not None and c.get("revenue")])
     op_fc = rev_fc * opm if opm is not None else None
     net_fc = rev_fc * npm if npm is not None else None
     shares = _shares_estimate(reals, market_cap, price)
