@@ -59,13 +59,18 @@ with st.sidebar:
     st.header("⚙️ Cấu hình")
     prefer = st.selectbox(
         "Nguồn giá ưu tiên",
-        ["pykrx", "toss", "naver"],
-        help="toss = Toss Open API (cần .env). Fundamentals luôn lấy từ pykrx/Naver.",
+        ["naver", "toss", "pykrx"],
+        help="naver (mặc định) = nhanh nhất ~0.1s/mã, đủ giá+52T+P/E+P/B+EPS+BPS+cổ tức, "
+             "chạy được cả trên cloud. toss = giá realtime (cần .env). "
+             "pykrx = KRX chính thức nhưng chậm (~13s/mã) & bị chặn trên server/cloud.",
     )
     if prefer == "toss":
         ok = bool(os.environ.get("TOSS_CLIENT_ID")) or os.path.exists(".env")
         st.success("Đã thấy cấu hình Toss (.env)") if ok else \
-            st.warning("Chưa có .env cho Toss — sẽ tự fallback pykrx/Naver")
+            st.warning("Chưa có .env cho Toss — sẽ tự fallback Naver")
+    if prefer == "pykrx":
+        st.warning("pykrx chậm (~13s/mã) và thường bị KRX chặn trên cloud. "
+                   "Khuyến nghị dùng **naver** cho nhanh.")
 
     st.divider()
     st.subheader("💰 Giả định định giá")

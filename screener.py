@@ -166,9 +166,9 @@ class TickerRegistry:
         if self._krx_loaded:
             return
         try:
-            from pykrx import stock
             d = _today_kr()
             with _quiet():
+                from pykrx import stock    # import trong _quiet để nuốt log login KRX
                 for mkt in ("KOSPI", "KOSDAQ"):
                     tks = _retry(lambda m=mkt: stock.get_market_ticker_list(d, market=m)) or []
                     for t in tks:
@@ -412,10 +412,12 @@ def fetch_one(ticker: str, registry: Optional[TickerRegistry] = None,
     được ưu tiên cho field đã có)."""
     orders = {
         "pykrx": ["pykrx", "naver"],
-        "naver": ["naver", "pykrx"],
-        "toss":  ["toss", "pykrx", "naver"],   # Toss giá, pykrx/naver fundamentals
+        "naver": ["naver"],            # Naver tự đủ (giá/52T/PER/PBR/EPS/BPS/cổ tức);
+                                       # KHÔNG fallback pykrx (chậm, bị KRX chặn, vô dụng
+                                       # trên cloud — mã lỗ có per=None là ĐÚNG, đừng cào lại).
+        "toss":  ["toss", "naver"],    # Toss giá realtime, Naver fundamentals (bỏ pykrx)
     }
-    order = orders.get(prefer, ["pykrx", "naver"])
+    order = orders.get(prefer, ["naver"])
 
     row = StockRow(ticker=ticker)
     used = []
