@@ -907,6 +907,14 @@ if "screen" in st.session_state:
                        "**FCFF** = CFO + lãi×(1−thuế) − CapEx, chiết khấu WACC. Dùng EBIT (DART "
                        "không tách khấu hao). Đóng tàu net-cash nên EV/EBIT thường thấp = rẻ.")
 
+    # Sắp xếp lại cho dễ đọc: ĐỊNH DANH → GIÁ → các KẾT QUẢ ĐỊNH GIÁ (cùng nhóm) →
+    # META (phương pháp & độ tin cậy) đẩy xuống CUỐI.
+    _vorder = ["Mã", "Tên", "Ngành", "Giá",
+               "Fair value", "Upside %", "Fwd upside %",      # nội tại + forward
+               "EV/EBIT", "Upside EV/EBIT %", "Upside FCFF %",  # EV/dòng tiền (khi bật)
+               "PP áp dụng", "Độ tin cậy"]                     # chú thích → cuối
+    vsum = vsum[[c for c in _vorder if c in vsum.columns]]
+
     _vfmt = {"Giá": "{:,.0f}", "Fair value": "{:,.0f}", "Upside %": "{:+.1f}",
              "Fwd upside %": "{:+.1f}", "EV/EBIT": "{:.1f}",
              "Upside EV/EBIT %": "{:+.1f}", "Upside FCFF %": "{:+.1f}"}
