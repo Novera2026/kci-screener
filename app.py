@@ -288,6 +288,18 @@ def _dart_extras(ticker: str) -> dict:
     return e
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _mktcap_eok(query: str):
+    """Vốn hóa (억) của 1 mã (cho SOTP — định giá phần niêm yết). None nếu không thấy."""
+    try:
+        from screener import fetch_one
+        tk = reg.resolve(query) or query
+        mc = fetch_one(tk, registry=reg, prefer="naver").to_dict().get("market_cap")
+        return round(mc / 1e8) if mc else None
+    except Exception:
+        return None
+
+
 def _period_label(c: dict) -> str:
     p = c["period"]
     base = f"{p[:4]}.{p[4:6]}" if len(p) >= 6 and p[:4].isdigit() else str(p)
@@ -1027,6 +1039,69 @@ if "screen" in st.session_state:
                    "EV/EBIT & FCFF (số gốc DART) cho mã này.")
     if r.flags:
         st.warning("⚠️ " + " · ".join(r.flags))
+
+    # --- SOTP (định giá tổng từng phần) — bán tự động cho holdco/tập đoàn ---
+    with st.expander("🧩 SOTP — định giá tổng từng phần (cho holdco/tập đoàn)"):
+        st.caption("Nhập từng mảng: **mã niêm yết + % sở hữu** → tự lấy vốn hóa × %; "
+                   "mảng CHƯA niêm yết thì để trống mã và **nhập Giá trị (억)** tay. "
+                   "Tool cộng lại − nợ ròng holdco − chiết khấu holdco → NAV/cp.")
+        _sotp_key = "sotp_" + r.ticker
+        if _sotp_key not in st.session_state:
+            st.session_state[_sotp_key] = pd.DataFrame(
+                [{"Mảng/Công ty con": "", "Mã niêm yết": "", "% sở hữu": 100.0,
+                  "Giá trị (억) — nếu chưa niêm yết": None}])
+        edited = st.data_editor(st.session_state[_sotp_key], num_rows="dynamic",
+                                use_container_width=True, key=_sotp_key + "_ed",
+                                column_config={
+                                    "% sở hữu": st.column_config.NumberColumn(
+                                        format="%.1f", min_value=0.0, max_value=100.0)})
+        disc = st.slider("Chiết khấu holdco (%)", 0, 70, 40, 5,
+                         help="Korea discount điển hình 30–60%.") / 100
+
+        parts, warns = [], []
+        for _, prow in edited.iterrows():
+            nm = str(prow.get("Mảng/Công ty con") or "").strip()
+            sub = str(prow.get("Mã niêm yết") or "").strip()
+            stake = prow.get("% sở hữu")
+            manual = prow.get("Giá trị (억) — nếu chưa niêm yết")
+            if not (nm or sub or (manual and not pd.isna(manual))):
+                continue
+            if sub and stake and not pd.isna(stake):
+                mc = _mktcap_eok(sub)
+                val = round(mc * stake / 100) if mc else None
+                if mc is None:
+                    warns.append(f"không lấy được vốn hóa của '{sub}'")
+            else:
+                val = None if (manual is None or pd.isna(manual)) else float(manual)
+            parts.append({"Mảng": nm or sub, "Mã": sub,
+                          "% sở hữu": stake, "Giá trị (억)": val})
+
+        if any(p["Giá trị (억)"] for p in parts):
+            gav = sum(p["Giá trị (억)"] for p in parts if p["Giá trị (억)"])
+            ndebt = (_dart_extras(r.ticker) or {}).get("net_debt")
+            mc_h = drow.get("market_cap")
+            px_h = drow.get("price")
+            shares = (mc_h / px_h) if (mc_h and px_h) else None
+            nav = gav - (ndebt or 0)
+            sotp_eq = nav * (1 - disc)
+            fair_ps = sotp_eq * 1e8 / shares if (shares and sotp_eq > 0) else None
+            st.dataframe(pd.DataFrame(parts), use_container_width=True, hide_index=True)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Tổng giá trị mảng (억)", f"{round(gav):,}")
+            m2.metric("Nợ ròng holdco (억)",
+                      f"{ndebt:,}" if ndebt is not None else "— (nhập tay?)")
+            m3.metric(f"NAV sau chiết khấu {disc*100:.0f}% (억)", f"{round(sotp_eq):,}")
+            m4.metric("NAV/cp", f"{fair_ps:,.0f}" if fair_ps else "—",
+                      f"{(fair_ps/px_h-1)*100:+.1f}%" if (fair_ps and px_h) else None)
+            if ndebt is None:
+                st.caption("⚠️ Chưa có nợ ròng từ DART (cần DART_API_KEY) → đang coi = 0. "
+                           "Thêm 1 dòng 'Nợ ròng' giá trị ÂM để trừ tay nếu muốn.")
+            if warns:
+                st.warning("⚠️ " + " · ".join(warns))
+            st.caption("Lưu ý: TRÁNH đếm trùng (đừng vừa tính lợi nhuận hợp nhất của sub vừa "
+                       "cộng vốn hóa của nó). Holdco discount là giả định — chỉnh slider để soi độ nhạy.")
+        else:
+            st.info("Thêm ít nhất 1 mảng có giá trị (mã niêm yết + % sở hữu, hoặc nhập Giá trị tay).")
 
     # --- Báo cáo tài chính ---
     st.markdown("#### 🧾 Báo cáo tài chính & Cân đối")
