@@ -625,6 +625,8 @@ if "screen" in st.session_state:
     # ---- Cột tài chính theo KỲ: 3 NĂM + 4 QUÝ — nguồn Naver (đã cache, KHÔNG gọi DART) ----
     _ts_fmt: dict = {}
     _PMETRICS = ["revenue", "net_profit", "roe"]   # cụm hiển thị theo kỳ
+    _Q_METRICS = {"revenue", "net_profit"}         # chỉ các chỉ tiêu này có cột QUÝ
+    #   → ROE chỉ hiện theo NĂM (3 năm + DP): ROE quý nhiễu/mùa vụ, không so sánh được.
     _period_on = len(df) <= 40
     if not _period_on:
         _period_on = st.checkbox(
@@ -653,6 +655,8 @@ if "screen" in st.session_state:
                         if plabel not in qlabels:
                             qlabels.append(plabel)
                     for m in _PMETRICS:
+                        if kind == "Q" and m not in _Q_METRICS:
+                            continue            # bỏ ROE (và metric khác) ở cột quý
                         cellmap.setdefault((m, plabel), {})[tk] = c.get(m)
         for m in _PMETRICS:
             for plabel in ylabels + qlabels:
