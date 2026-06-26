@@ -803,6 +803,7 @@ if "screen" in st.session_state:
 
     # ---- Tùy chọn: EV/EBIT + FCFF qua DART (số gốc, chậm thêm ~1 gọi/mã) ----
     _adv_cols = []
+    adv_detail = {}          # ticker -> {fv_ev, fv_fcff, ev_ebit, net_debt, fcff0}
     if not dart_unavailable:
         adv = st.checkbox("🏗️ Thêm EV/EBIT + FCFF (số gốc DART — chậm thêm ~1 gọi/mã)",
                           value=False, key="adv_dart")
@@ -817,7 +818,7 @@ if "screen" in st.session_state:
                     zip(df["ticker"], df["price"], df["market_cap"], df["sector"], _ikc)):
                 e = _dart_extras(tk)
                 shares = (mc / px) if (mc and px and px > 0) else None
-                d = {"sec": sec or ik, "px": px, "shares": shares}
+                d = {"tk": tk, "sec": sec or ik, "px": px, "shares": shares}
                 if e and e.get("ebit") and shares and mc:
                     d.update(e); d["mc_eok"] = mc / 1e8
                     d["ev_ebit"] = ((mc / 1e8 + (e.get("net_debt") or 0)) / e["ebit"]
@@ -843,6 +844,10 @@ if "screen" in st.session_state:
                 evb.append(round(x["ev_ebit"], 1) if x.get("ev_ebit") else None)
                 ev_up.append(round((fv1 / pxv - 1) * 100, 1) if (fv1 and pxv) else None)
                 fc_up.append(round((fv2 / pxv - 1) * 100, 1) if (fv2 and pxv) else None)
+                adv_detail[x["tk"]] = {
+                    "fv_ev": fv1, "fv_fcff": fv2,
+                    "ev_ebit": x.get("ev_ebit"), "net_debt": x.get("net_debt"),
+                    "ebit": x.get("ebit"), "cfo": x.get("cfo"), "capex": x.get("capex")}
             vsum["EV/EBIT"] = evb
             vsum["Upside EV/EBIT %"] = ev_up
             vsum["Upside FCFF %"] = fc_up
@@ -912,11 +917,31 @@ if "screen" in st.session_state:
         st.caption(f"🔁 **Reverse check:** thị giá đang ngụ ý **ROE ~{r.implied_roe*100:.0f}%**{cur}. "
                    "Chênh càng lớn = thị trường định giá tăng trưởng/siêu chu kỳ mà fair value proxy "
                    "(P/B-ROE quá khứ) KHÔNG bắt được — đừng đọc upside âm như lệnh 'bán'.")
+    # gộp thêm EV/EBIT + FCFF (số gốc DART) nếu đã bật mục 🏗️
+    _all_methods = dict(r.methods)
+    _ad = adv_detail.get(r.ticker)
+    if _ad:
+        if _ad.get("fv_ev") is not None:
+            _all_methods["EV/EBIT (vs ngành) — DART"] = _ad["fv_ev"]
+        if _ad.get("fv_fcff") is not None:
+            _all_methods["FCFF-DCF — DART"] = _ad["fv_fcff"]
     method_tbl = pd.DataFrame(
         [{"Phương pháp": k, "Fair value": (round(v) if v else None),
           "Upside %": (round((v / r.price - 1) * 100, 1) if (v and r.price) else None)}
-         for k, v in r.methods.items()])
+         for k, v in _all_methods.items()])
     st.dataframe(method_tbl, use_container_width=True, hide_index=True)
+    if _ad:
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("EV/EBIT", f"{_ad['ev_ebit']:.1f}" if _ad.get("ev_ebit") else "—")
+        e2.metric("Nợ ròng (억)", f"{_ad['net_debt']:,.0f}" if _ad.get("net_debt") is not None else "—")
+        _fcff0 = ((_ad.get("cfo") or 0) - (_ad.get("capex") or 0)) if _ad.get("cfo") is not None else None
+        e3.metric("CFO − CapEx (억)", f"{_fcff0:,.0f}" if _fcff0 is not None else "—")
+        e4.metric("EBIT (억)", f"{_ad['ebit']:,.0f}" if _ad.get("ebit") else "—")
+        st.caption("EV/EBIT & FCFF từ số gốc DART. Nợ ròng âm = **net cash** (nhiều tiền hơn nợ vay). "
+                   "FCFF-DCF nhạy giả định (g/WACC) → dùng cross-check, không phải số chính.")
+    elif not dart_unavailable:
+        st.caption("💡 Bật **🏗️ Thêm EV/EBIT + FCFF** ở mục Định giá phía trên để xem thêm "
+                   "EV/EBIT & FCFF (số gốc DART) cho mã này.")
     if r.flags:
         st.warning("⚠️ " + " · ".join(r.flags))
 
