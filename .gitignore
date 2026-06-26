@@ -9,9 +9,9 @@ __pycache__/
 
 # Cache & file tạo ra khi chạy (tự sinh lại)
 toss_openapi.json
-dart_corp.csv
 kci_screen_output.xlsx
 demo_output.xlsx
+# dart_corp.csv: CÓ commit (map corp-code công khai) để cloud khỏi phải tải corpCode.xml
 
 # Hệ thống / công cụ
 .DS_Store

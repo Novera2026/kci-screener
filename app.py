@@ -826,6 +826,15 @@ if "screen" in st.session_state:
                 rec.append(d)
                 pbar.progress((i + 1) / len(df))
             pbar.empty()
+            _got = sum(1 for x in rec if x.get("ebit"))
+            if _got == 0:
+                st.warning("📡 DART không trả số liệu cho mã nào. Kiểm tra: (1) DART_API_KEY "
+                           "đúng (Secrets nếu chạy cloud); (2) corp-code map tải được. "
+                           "Tải lại corp-code: xóa file dart_corp.csv rồi chạy lại.")
+            else:
+                st.caption(f"📡 DART: lấy được EV/EBIT cho **{_got}/{len(rec)}** mã "
+                           "(mã có mảng tài chính lớn — vd Hyundai Motor — net debt khổng lồ "
+                           "làm cầu nối EV→vốn chủ vỡ → để trống là đúng).")
             byk = _dd(list)
             for x in rec:
                 if x.get("ev_ebit") and 0 < x["ev_ebit"] <= 40:   # loại outlier

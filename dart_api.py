@@ -62,11 +62,9 @@ def available() -> bool:
 _corp_map: Optional[dict] = None
 
 
-def _load_corp_cache() -> Optional[dict]:
+def _read_corp_csv() -> Optional[dict]:
+    """Đọc cache CSV (kể cả CŨ) — không xét tuổi."""
     if not os.path.exists(_CORP_CACHE):
-        return None
-    # cache quá 30 ngày thì coi như cũ (DN mới niêm yết)
-    if time.time() - os.path.getmtime(_CORP_CACHE) > 30 * 86400:
         return None
     out = {}
     try:
@@ -77,6 +75,11 @@ def _load_corp_cache() -> Optional[dict]:
         return out or None
     except Exception:
         return None
+
+
+def _cache_fresh() -> bool:
+    return (os.path.exists(_CORP_CACHE)
+            and time.time() - os.path.getmtime(_CORP_CACHE) <= 30 * 86400)
 
 
 def _download_corp_map() -> dict:
@@ -111,12 +114,15 @@ def _download_corp_map() -> dict:
 def corp_code_of(ticker: str) -> Optional[str]:
     global _corp_map
     if _corp_map is None:
-        _corp_map = _load_corp_cache()
-        if _corp_map is None:
+        if _cache_fresh():                       # cache mới → dùng luôn
+            _corp_map = _read_corp_csv() or {}
+        else:                                    # cũ/thiếu → thử tải lại
             try:
-                _corp_map = _download_corp_map()
+                _corp_map = _download_corp_map() or {}
             except Exception:
                 _corp_map = {}
+            if not _corp_map:                    # tải fail → DÙNG cache cũ nếu có
+                _corp_map = _read_corp_csv() or {}
     return _corp_map.get(str(ticker).zfill(6))
 
 
