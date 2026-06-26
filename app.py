@@ -558,28 +558,6 @@ if "screen" in st.session_state:
     enrich = st.checkbox(
         "📑 Bổ sung số liệu tài chính (doanh thu, LN thuần, ROE, nợ, EPS dự tính, đánh giá "
         f"— cào thêm ~0.5s/mã · {len(df)} mã)", value=len(df) <= 60)
-    # Tự động gộp cột theo kỳ NGAY khi cào xong (không cần set tay).
-    # Danh sách lớn (>40 mã) mới phải bật thủ công để tránh chậm/quá nhiều cột.
-    if len(df) <= 40:
-        expand_ts = True
-    else:
-        expand_ts = st.checkbox(
-            f"📅 Gộp số liệu tài chính THEO KỲ vào bảng ({len(df)} mã — bật thủ công "
-            "vì danh sách lớn)", value=False)
-    _tm, _tscope = ["revenue", "net_profit", "roe"], "Năm + Quý"   # mặc định
-    if expand_ts:
-        with st.expander("⚙️ Tùy chỉnh cột theo kỳ "
-                         "(mặc định: Doanh thu / LN thuần / ROE · Năm + Quý)"):
-            _tm = st.multiselect(
-                "Chỉ tiêu hiển thị theo kỳ",
-                ["revenue", "op_profit", "net_profit", "roe", "net_margin",
-                 "debt_ratio", "assets", "liabilities", "eps", "bps"],
-                default=["revenue", "net_profit", "roe"],
-                format_func=lambda k: LABELS_VI.get(k, k))
-            _tscope = st.radio("Phạm vi kỳ", ["Năm", "Năm + Quý"], index=1,
-                               horizontal=True, key="ts_scope")
-    else:
-        _tm = []
 
     def _ind(i):
         s = df["sector"].iloc[i]
@@ -643,59 +621,7 @@ if "screen" in st.session_state:
                            "Đánh giá": _c_tag, "LN HĐ (억)": _c_neg,
                            "LN thuần (억)": _c_neg})
 
-    # ---- Tùy chọn: trải số liệu tài chính theo kỳ thành cột (gộp vào bảng chính) ----
-    _ts_fmt: dict = {}
-    if expand_ts and _tm:
-        import concurrent.futures as _cf
-        _tks = list(df["ticker"])
-        _mc = list(df["market_cap"])
-        _pxs = list(df["price"])
-        _fins = {tk: _fin(tk) for tk in _tks}        # Naver (cache) — nhanh
-        # hâm nóng bảng corp_code (DART) 1 lần ở luồng chính để tránh tải trùng
-        try:
-            if not dart_unavailable:
-                dart_api.corp_code_of(_tks[0])
-        except Exception:
-            pass
-
-        def _series_for(i):
-            tk = _tks[i]
-            f = _fins[tk]
-            ann = build_annual_series(tk, f["annual"], _mc[i], _pxs[i], years=4)
-            q = (build_quarter_series(f["quarter"], _mc[i], _pxs[i], 4)
-                 if _tscope == "Năm + Quý" else [])
-            return tk, ann, q
-
-        ann_q = {}
-        with st.spinner(f"Đang nạp chuỗi tài chính theo kỳ ({len(_tks)} mã, chạy song song)..."):
-            with _cf.ThreadPoolExecutor(max_workers=min(8, max(1, len(_tks)))) as ex:
-                for tk, ann, q in ex.map(_series_for, range(len(_tks))):
-                    ann_q[tk] = (ann, q)
-
-        ylabels, qlabels, cellmap = [], [], {}
-        for tk in _tks:
-            ann, q = ann_q[tk]
-            seq = [("Y", c) for c in ann] + [("Q", c) for c in q]
-            for kind, c in seq:
-                p = str(c.get("period", ""))
-                e = "E" if c.get("is_forecast") else ""
-                if kind == "Y":
-                    plabel = f"'{p[2:4]}{e}"
-                    if plabel not in ylabels:
-                        ylabels.append(plabel)
-                else:
-                    plabel = (f"Q{p[2:4]}.{p[4:6]}" if len(p) >= 6 else f"Q{p}") + e
-                    if plabel not in qlabels:
-                        qlabels.append(plabel)
-                for m in _tm:
-                    cellmap.setdefault((m, plabel), {})[tk] = c.get(m)
-        for m in _tm:
-            for plabel in ylabels + qlabels:
-                if (m, plabel) in cellmap:
-                    col = f"{LABELS_VI.get(m, m)} {plabel}"
-                    disp[col] = [cellmap[(m, plabel)].get(tk) for tk in df["ticker"]]
-                    _ts_fmt[col] = "{:.1f}" if m in ("roe", "net_margin", "debt_ratio") \
-                        else "{:,.0f}"
+    _ts_fmt: dict = {}   # (đã gỡ tính năng gộp cột theo kỳ để định giá nhanh hơn)
 
     # ---- Định giá theo P/E DỰ KIẾN (forward): dùng EPS dự phóng ----
     _fe = list(df["fwd_eps"])
