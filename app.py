@@ -616,13 +616,12 @@ if "screen" in st.session_state:
     _TAIL = [
         # Giá & thị trường
         "Giá", "% so đỉnh", "Vốn hóa (억)",
-        # Định giá (multiples + P/E dự kiến)
-        "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %", "Định giá",
-        "Tỷ suất CT %",
         # Lợi nhuận & sinh lời (tổng quan)
         "EPS", "EPS dự tính", "BPS", "ROE %", "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)",
         # Cân đối & sức khỏe
-        "Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %", "Đánh giá",
+        "Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %", "Đánh giá", "Tỷ suất CT %",
+        # ĐỊNH GIÁ — để CUỐI cùng (ngay trước Nguồn)
+        "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %", "Định giá",
     ]
     _known = set(_HEAD) | set(_TAIL) | {"Nguồn"}
     _period = [c for c in disp.columns if c not in _known]   # cột theo kỳ (động) → ĐỨNG TRƯỚC
