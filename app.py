@@ -272,14 +272,20 @@ def _fin(ticker: str) -> dict:
     return fetch_financials(ticker)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def _dart_extras(ticker: str) -> dict:
-    """Số liệu DART cho EV/EBIT + FCFF (EBIT, nợ ròng, CFO, CapEx, thuế). {} nếu thiếu key."""
+    """Số liệu DART cho EV/EBIT + FCFF. Cache thủ công CHỈ khi có data (tránh kẹt {}
+    rỗng từ lần lỗi trước — không như st.cache_data cache cả kết quả rỗng)."""
+    cache = st.session_state.setdefault("_dart_cache", {})
+    if ticker in cache:
+        return cache[ticker]
     try:
         import dart_api
-        return dart_api.valuation_extras(ticker)
+        e = dart_api.valuation_extras(ticker)
     except Exception:
-        return {}
+        e = {}
+    if e:                       # chỉ lưu khi CÓ dữ liệu → lần sau lỗi sẽ tự thử lại
+        cache[ticker] = e
+    return e
 
 
 def _period_label(c: dict) -> str:
