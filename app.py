@@ -554,29 +554,49 @@ if "screen" in st.session_state:
     # ---- Tùy chọn: trải số liệu tài chính theo kỳ thành cột (gộp vào bảng chính) ----
     _ts_fmt: dict = {}
     if expand_ts and _tm:
+        import concurrent.futures as _cf
+        _tks = list(df["ticker"])
+        _mc = list(df["market_cap"])
+        _pxs = list(df["price"])
+        _fins = {tk: _fin(tk) for tk in _tks}        # Naver (cache) — nhanh
+        # hâm nóng bảng corp_code (DART) 1 lần ở luồng chính để tránh tải trùng
+        try:
+            if not dart_unavailable:
+                dart_api.corp_code_of(_tks[0])
+        except Exception:
+            pass
+
+        def _series_for(i):
+            tk = _tks[i]
+            f = _fins[tk]
+            ann = build_annual_series(tk, f["annual"], _mc[i], _pxs[i], years=4)
+            q = (build_quarter_series(f["quarter"], _mc[i], _pxs[i], 4)
+                 if _tscope == "Năm + Quý" else [])
+            return tk, ann, q
+
+        ann_q = {}
+        with st.spinner(f"Đang nạp chuỗi tài chính theo kỳ ({len(_tks)} mã, chạy song song)..."):
+            with _cf.ThreadPoolExecutor(max_workers=min(8, max(1, len(_tks)))) as ex:
+                for tk, ann, q in ex.map(_series_for, range(len(_tks))):
+                    ann_q[tk] = (ann, q)
+
         ylabels, qlabels, cellmap = [], [], {}
-        with st.spinner("Đang nạp chuỗi tài chính theo kỳ..."):
-            for i, tk in enumerate(df["ticker"]):
-                f = _fin(tk)
-                mc_i, px_i = df["market_cap"].iloc[i], df["price"].iloc[i]
-                seq = [("Y", c) for c in
-                       build_annual_series(tk, f["annual"], mc_i, px_i, years=4)]
-                if _tscope == "Năm + Quý":
-                    seq += [("Q", c) for c in
-                            build_quarter_series(f["quarter"], mc_i, px_i, 4)]
-                for kind, c in seq:
-                    p = str(c.get("period", ""))
-                    e = "E" if c.get("is_forecast") else ""
-                    if kind == "Y":
-                        plabel = f"'{p[2:4]}{e}"
-                        if plabel not in ylabels:
-                            ylabels.append(plabel)
-                    else:
-                        plabel = (f"Q{p[2:4]}.{p[4:6]}" if len(p) >= 6 else f"Q{p}") + e
-                        if plabel not in qlabels:
-                            qlabels.append(plabel)
-                    for m in _tm:
-                        cellmap.setdefault((m, plabel), {})[tk] = c.get(m)
+        for tk in _tks:
+            ann, q = ann_q[tk]
+            seq = [("Y", c) for c in ann] + [("Q", c) for c in q]
+            for kind, c in seq:
+                p = str(c.get("period", ""))
+                e = "E" if c.get("is_forecast") else ""
+                if kind == "Y":
+                    plabel = f"'{p[2:4]}{e}"
+                    if plabel not in ylabels:
+                        ylabels.append(plabel)
+                else:
+                    plabel = (f"Q{p[2:4]}.{p[4:6]}" if len(p) >= 6 else f"Q{p}") + e
+                    if plabel not in qlabels:
+                        qlabels.append(plabel)
+                for m in _tm:
+                    cellmap.setdefault((m, plabel), {})[tk] = c.get(m)
         for m in _tm:
             for plabel in ylabels + qlabels:
                 if (m, plabel) in cellmap:
