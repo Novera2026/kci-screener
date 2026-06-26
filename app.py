@@ -467,9 +467,9 @@ if "screen" in st.session_state:
         "📑 Bổ sung số liệu tài chính (doanh thu, LN thuần, ROE, nợ, EPS dự tính, đánh giá "
         f"— cào thêm ~0.5s/mã · {len(df)} mã)", value=len(df) <= 60)
     expand_ts = st.checkbox(
-        "📅 Gộp số liệu tài chính THEO KỲ (năm/quý) thành cột trong bảng này — "
-        "mỗi mã thêm cột theo từng năm/quý (chỉ nên bật khi ÍT mã, nếu không rất nhiều cột)",
-        value=False)
+        "📅 Gộp số liệu tài chính THEO KỲ (năm/quý) thành cột trong bảng này "
+        "(tự động bật khi ≤ 30 mã; tắt nếu danh sách lớn để tránh quá nhiều cột)",
+        value=len(df) <= 30)
     if expand_ts:
         _tm = st.multiselect(
             "Chỉ tiêu hiển thị theo kỳ",
@@ -578,17 +578,52 @@ if "screen" in st.session_state:
                     _ts_fmt[col] = "{:.1f}" if m in ("roe", "net_margin", "debt_ratio") \
                         else "{:,.0f}"
 
+    # ---- Định giá theo P/E DỰ KIẾN (forward): dùng EPS dự phóng ----
+    _fe = list(df["fwd_eps"])
+    _px = list(df["price"])
+    _mp = list(med)   # median P/E ngành (theo cross-section)
+    disp["P/E dự kiến"] = [round(px / fe, 2) if (fe and fe > 0 and px) else None
+                          for fe, px in zip(_fe, _px)]
+    disp["Giá hợp lý (P/E)"] = [round(fe * mp) if (fe and fe > 0 and mp and mp > 0) else None
+                               for fe, mp in zip(_fe, _mp)]
+    disp["Upside P/E %"] = [round((tp / px - 1) * 100, 1) if (tp and px) else None
+                           for tp, px in zip(disp["Giá hợp lý (P/E)"], _px)]
+
     disp["Định giá"] = df["valuation_tag"].values
     disp["Nguồn"] = df["source"].values
-    color_cols.update({"Định giá": _c_tag, "% so đỉnh": _c_neg, "EPS": _c_neg})
+    color_cols.update({"Định giá": _c_tag, "% so đỉnh": _c_neg, "EPS": _c_neg,
+                       "Upside P/E %": _c_neg})
 
     fmt = {"Giá": "{:,.0f}", "% so đỉnh": "{:+.1f}", "Vốn hóa (억)": "{:,.0f}",
            "P/E": "{:.2f}", "P/B": "{:.2f}", "EPS": "{:,.0f}", "BPS": "{:,.0f}",
            "Tỷ suất CT %": "{:.2f}", "Doanh thu (억)": "{:,.0f}", "LN HĐ (억)": "{:,.0f}",
            "LN thuần (억)": "{:,.0f}", "ROE %": "{:.1f}", "Tổng tài sản (억)": "{:,.0f}",
            "Nợ (억)": "{:,.0f}", "Nợ/VCSH %": "{:.0f}", "Nợ/TS %": "{:.0f}",
-           "EPS dự tính": "{:,.0f}"}
+           "EPS dự tính": "{:,.0f}",
+           "P/E dự kiến": "{:.2f}", "Giá hợp lý (P/E)": "{:,.0f}",
+           "Upside P/E %": "{:+.1f}"}
     fmt.update(_ts_fmt)
+
+    # ---- Sắp xếp lại cột theo nhóm cho dễ nhìn (cột theo kỳ dồn về cuối) ----
+    _ORDER = [
+        # Định danh
+        "Mã", "Tên", "Ngành",
+        # Giá & thị trường
+        "Giá", "% so đỉnh", "Vốn hóa (억)",
+        # Định giá (multiples + P/E dự kiến)
+        "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %", "Định giá",
+        "Tỷ suất CT %",
+        # Lợi nhuận & sinh lời
+        "EPS", "EPS dự tính", "BPS", "ROE %", "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)",
+        # Cân đối & sức khỏe
+        "Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %", "Đánh giá",
+    ]
+    _known = set(_ORDER) | {"Nguồn"}
+    _period = [c for c in disp.columns if c not in _known]   # cột theo kỳ (động)
+    _final = [c for c in _ORDER if c in disp.columns] + _period \
+        + (["Nguồn"] if "Nguồn" in disp.columns else [])
+    disp = disp[_final]
+
     sty = disp.style.format({k: v for k, v in fmt.items() if k in disp.columns},
                             na_rep="—")
     for col, fn in color_cols.items():
