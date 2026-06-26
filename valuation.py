@@ -255,6 +255,64 @@ def relative_pb_value(bps: float, sector_median_pb: Optional[float]) -> Optional
 
 
 # ----------------------------------------------------------------------------
+# EV/EBIT (relative) + FCFF-DCF (số liệu DART). EBIT/EV/CFO/CapEx đơn vị 억원;
+# shares = số cp; trả GIÁ/cp (원). EBITDA→dùng EBIT vì DART không tách khấu hao.
+# ----------------------------------------------------------------------------
+def _wacc(ke: float, kd: float, tax: float, equity_val: float, debt_val: float) -> float:
+    """WACC = (E/V)·Ke + (D/V)·Kd·(1−thuế). E=vốn hóa, D=nợ vay (cùng đơn vị)."""
+    e = max(equity_val or 0.0, 0.0)
+    d = max(debt_val or 0.0, 0.0)
+    if e + d <= 0:
+        return ke
+    return e / (e + d) * ke + d / (e + d) * kd * (1 - tax)
+
+
+def ev_ebit_value(ebit: float, net_debt: float, shares: float,
+                  sector_median_ev_ebit: Optional[float]) -> Optional[float]:
+    """Định giá tương đối: Fair EV = median(EV/EBIT ngành)×EBIT; Fair equity = EV − Nợ ròng.
+
+    EBIT, net_debt theo 억원; shares = số cp → trả giá/cp (원). Cần EBIT > 0.
+    """
+    ebit = _pos(ebit)
+    m = _num(sector_median_ev_ebit)
+    if ebit is None or m is None or m <= 0 or not shares or shares <= 0:
+        return None
+    fair_eq = m * ebit - (net_debt or 0.0)        # 억원
+    return fair_eq * 1e8 / shares if fair_eq > 0 else None
+
+
+def fcff_value(cfo: float, capex: float, debt_val: float, net_debt: float,
+               shares: float, ke: float, kd: float, tax: float,
+               g_high: float, years: int, g_term: float,
+               equity_val: float) -> Optional[float]:
+    """FCFF-DCF (FCFF tính từ CFO — không cần tách khấu hao):
+
+        FCFF = CFO + Lãi vay×(1−thuế) − CapEx      (Lãi vay ≈ Nợ vay×Kd, ổn định)
+        EV   = Σ FCFF·(1+g)^t/(1+WACC)^t + Terminal
+        Fair equity = EV − Nợ ròng ;  Giá/cp = equity/số cp
+
+    CFO/CapEx/nợ theo 억원; trả giá/cp (원). None nếu FCFF gốc ≤ 0 hoặc model vỡ.
+    """
+    if cfo is None or capex is None or not shares or shares <= 0:
+        return None
+    interest = (debt_val or 0.0) * kd
+    fcff0 = cfo + interest * (1 - tax) - capex      # 억원
+    if fcff0 <= 0:                                   # đốt tiền → DCF earnings vô nghĩa
+        return None
+    w = _wacc(ke, kd, tax, equity_val, debt_val)
+    if w <= g_term:
+        return None
+    pv, f = 0.0, fcff0
+    for t in range(1, years + 1):
+        f *= (1 + g_high)
+        pv += f / (1 + w) ** t
+    tv = f * (1 + g_term) / (w - g_term)
+    pv += tv / (1 + w) ** years
+    equity = pv - (net_debt or 0.0)                 # EV − nợ ròng
+    return equity * 1e8 / shares if equity > 0 else None
+
+
+# ----------------------------------------------------------------------------
 # §2 / §8 — Engine khuyến nghị method theo entity type (sector)
 # ----------------------------------------------------------------------------
 # Mỗi sector: primary, cross-check, ghi chú chí mạng (rút gọn từ §7/§8),

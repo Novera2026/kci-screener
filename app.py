@@ -24,7 +24,8 @@ except Exception:
 
 from screener import (TickerRegistry, fetch_batch, sector_aggregates,
                       export_excel, COLUMN_KR)
-from valuation import Assumptions, value_batch, value_stock, recommend_method, _cap_conf
+from valuation import (Assumptions, value_batch, value_stock, recommend_method,
+                       _cap_conf, ev_ebit_value, fcff_value)
 try:
     import coverage
 except Exception:
@@ -269,6 +270,16 @@ with col2:
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fin(ticker: str) -> dict:
     return fetch_financials(ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _dart_extras(ticker: str) -> dict:
+    """Số liệu DART cho EV/EBIT + FCFF (EBIT, nợ ròng, CFO, CapEx, thuế). {} nếu thiếu key."""
+    try:
+        import dart_api
+        return dart_api.valuation_extras(ticker)
+    except Exception:
+        return {}
 
 
 def _period_label(c: dict) -> str:
@@ -789,11 +800,65 @@ if "screen" in st.session_state:
                     "fwd_upside_%", "auto_method", "confidence"]
     vsum = vdf[summary_cols].copy()
     vsum.columns = [VAL_KR.get(c, c) for c in summary_cols]
-    vsty = vsum.style.format({"Giá": "{:,.0f}", "Fair value": "{:,.0f}",
-                              "Upside %": "{:+.1f}", "Fwd upside %": "{:+.1f}"},
+
+    # ---- Tùy chọn: EV/EBIT + FCFF qua DART (số gốc, chậm thêm ~1 gọi/mã) ----
+    _adv_cols = []
+    if not dart_unavailable:
+        adv = st.checkbox("🏗️ Thêm EV/EBIT + FCFF (số gốc DART — chậm thêm ~1 gọi/mã)",
+                          value=False, key="adv_dart")
+        if adv:
+            import statistics as _stt
+            from collections import defaultdict as _dd
+            kd = assume.rf + 0.015           # chi phí nợ ≈ Rf + 1.5%
+            ke_v, gt = assume.ke(), assume.g_term_capped()
+            _ikc = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
+            rec, pbar = [], st.progress(0.0, text="Đang lấy EV/EBIT + FCFF từ DART...")
+            for i, (tk, px, mc, sec, ik) in enumerate(
+                    zip(df["ticker"], df["price"], df["market_cap"], df["sector"], _ikc)):
+                e = _dart_extras(tk)
+                shares = (mc / px) if (mc and px and px > 0) else None
+                d = {"sec": sec or ik, "px": px, "shares": shares}
+                if e and e.get("ebit") and shares and mc:
+                    d.update(e); d["mc_eok"] = mc / 1e8
+                    d["ev_ebit"] = ((mc / 1e8 + (e.get("net_debt") or 0)) / e["ebit"]
+                                    if e["ebit"] > 0 else None)
+                rec.append(d)
+                pbar.progress((i + 1) / len(df))
+            pbar.empty()
+            byk = _dd(list)
+            for x in rec:
+                if x.get("ev_ebit") and 0 < x["ev_ebit"] <= 40:   # loại outlier
+                    byk[x["sec"]].append(x["ev_ebit"])
+            med_ev = {k: _stt.median(v) for k, v in byk.items() if v}
+            evb, ev_up, fc_up = [], [], []
+            for x in rec:
+                m = med_ev.get(x["sec"])
+                fv1 = ev_ebit_value(x.get("ebit"), x.get("net_debt"), x.get("shares"), m)
+                fv2 = (fcff_value(x.get("cfo"), x.get("capex"), x.get("debt"),
+                                  x.get("net_debt"), x.get("shares"), ke_v, kd,
+                                  x.get("tax_rate", 0.22), assume.g_high,
+                                  assume.years_high, gt, x.get("mc_eok"))
+                       if x.get("cfo") is not None else None)
+                pxv = x.get("px")
+                evb.append(round(x["ev_ebit"], 1) if x.get("ev_ebit") else None)
+                ev_up.append(round((fv1 / pxv - 1) * 100, 1) if (fv1 and pxv) else None)
+                fc_up.append(round((fv2 / pxv - 1) * 100, 1) if (fv2 and pxv) else None)
+            vsum["EV/EBIT"] = evb
+            vsum["Upside EV/EBIT %"] = ev_up
+            vsum["Upside FCFF %"] = fc_up
+            _adv_cols = ["EV/EBIT", "Upside EV/EBIT %", "Upside FCFF %"]
+            st.caption("EV = Vốn hóa + Nợ ròng (DART). **EV/EBIT** so median ngành (loại outlier); "
+                       "**FCFF** = CFO + lãi×(1−thuế) − CapEx, chiết khấu WACC. Dùng EBIT (DART "
+                       "không tách khấu hao). Đóng tàu net-cash nên EV/EBIT thường thấp = rẻ.")
+
+    _vfmt = {"Giá": "{:,.0f}", "Fair value": "{:,.0f}", "Upside %": "{:+.1f}",
+             "Fwd upside %": "{:+.1f}", "EV/EBIT": "{:.1f}",
+             "Upside EV/EBIT %": "{:+.1f}", "Upside FCFF %": "{:+.1f}"}
+    vsty = vsum.style.format({k: v for k, v in _vfmt.items() if k in vsum.columns},
                              na_rep="—")
-    for c in ("Upside %", "Fwd upside %"):
-        vsty = vsty.map(_c_neg, subset=[c])
+    for c in ("Upside %", "Fwd upside %", "Upside EV/EBIT %", "Upside FCFF %"):
+        if c in vsum.columns:
+            vsty = vsty.map(_c_neg, subset=[c])
     st.dataframe(vsty, use_container_width=True, hide_index=True)
 
     # ---- Chi tiết 1 mã: định giá + tài chính 4 năm/4 quý + cân đối ----

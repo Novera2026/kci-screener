@@ -197,6 +197,82 @@ def annual_financials(ticker: str, years: int = 4,
 
 
 # ---------------------------------------------------------------------------
+# Số liệu cho EV/EBIT + FCFF (1 lần gọi/mã, năm gần nhất)
+# ---------------------------------------------------------------------------
+def _norm(s) -> str:
+    return (s or "").replace(" ", "").strip()
+
+
+# (field, các sj_div hợp lệ, tập tên tài khoản). Báo cáo KQKD nằm ở IS (2 báo cáo)
+# HOẶC CIS (1 báo cáo gộp — holdco như HD한국조선해양). _debt/_capex = cộng dồn.
+_FIELDS = [
+    ("cash",         {"BS"},         {"현금및현금성자산"}),
+    ("_debt",        {"BS"},         {"단기차입금", "유동성장기부채", "사채", "장기차입금"}),
+    ("ebit",         {"IS", "CIS"},  {"영업이익", "영업이익(손실)"}),
+    ("finance_cost", {"IS", "CIS"},  {"금융비용"}),
+    ("tax",          {"IS", "CIS"},  {"법인세비용", "법인세비용(수익)"}),
+    ("pretax",       {"IS", "CIS"},  {"법인세비용차감전순이익",
+                                      "법인세비용차감전순이익(손실)", "법인세차감전순이익"}),
+    ("cfo",          {"CF"},         {"영업활동현금흐름", "영업활동으로 인한 현금흐름",
+                                      "영업활동으로 인한 순현금흐름"}),
+    ("_capex",       {"CF"},         {"유형자산의취득", "무형자산의취득"}),
+]
+_FIELDS_NORM = [(f, sj, {_norm(x) for x in names}) for f, sj, names in _FIELDS]
+
+
+def valuation_extras(ticker: str, year: Optional[int] = None) -> dict:
+    """Lấy số (억원) cho EV/EBIT + FCFF từ DART trong 1 lần gọi/năm gần nhất.
+
+    Trả {year, ebit, cash, debt, net_debt, cfo, capex, finance_cost, tax_rate, ...}
+    hoặc {} nếu không có key / không đủ dữ liệu. Đơn vị: 억원; tax_rate dạng thập phân.
+    """
+    if not available():
+        return {}
+    cc = corp_code_of(ticker)
+    if not cc:
+        return {}
+    yrs = [year] if year else [time.localtime().tm_year - 1, time.localtime().tm_year - 2]
+    for y in yrs:
+        for fs_div in ("CFS", "OFS"):
+            try:
+                j = requests.get(
+                    f"{_BASE}/fnlttSinglAcntAll.json",
+                    params={"crtfc_key": api_key(), "corp_code": cc, "bsns_year": str(y),
+                            "reprt_code": "11011", "fs_div": fs_div},
+                    timeout=_TIMEOUT).json()
+            except Exception:
+                continue
+            if j.get("status") != "000":
+                continue
+            out = {"year": y, "fs_div": fs_div, "debt": 0.0, "capex": 0.0}
+            for it in j.get("list", []):
+                sj = it.get("sj_div")
+                nm = _norm(it.get("account_nm"))
+                v = _num(it.get("thstrm_amount"))
+                if v is None:
+                    continue
+                v8 = v / 1e8
+                for field, sj_ok, nset in _FIELDS_NORM:
+                    if sj in sj_ok and nm in nset:
+                        if field == "_debt":
+                            out["debt"] += v8
+                        elif field == "_capex":
+                            out["capex"] += abs(v8)
+                        elif out.get(field) is None:
+                            out[field] = v8
+            if out.get("ebit") is None or out.get("cfo") is None:   # thiếu cốt lõi
+                continue
+            out["net_debt"] = round((out.get("debt") or 0) - (out.get("cash") or 0))
+            out["debt"] = round(out["debt"])
+            out["capex"] = round(out["capex"])
+            pre, tax = out.get("pretax"), out.get("tax")
+            tr = (tax / pre) if (pre and pre > 0 and tax is not None) else 0.22
+            out["tax_rate"] = round(min(max(tr, 0.0), 0.40), 3)
+            return out
+    return {}
+
+
+# ---------------------------------------------------------------------------
 # Báo cáo quý/bán niên + đánh giá độ phủ dữ liệu (cho DN MỚI NIÊM YẾT)
 # ---------------------------------------------------------------------------
 _REPRT = {"11013": "Q1", "11012": "반기", "11014": "Q3", "11011": "년"}
