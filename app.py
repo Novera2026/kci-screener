@@ -421,6 +421,42 @@ def _c_neg(v):
     return "color:#c0392b;font-weight:600" if isinstance(v, (int, float)) and v < 0 else ""
 
 
+def _c_upside(v):
+    """Nền theo upside: 🟢 hấp dẫn · 🟡 cao bất thường (nghi méo/chu kỳ) · 🔴 đắt."""
+    if v is None or pd.isna(v):
+        return ""
+    if v >= 60:
+        return "background-color:#fff3cd"          # vàng: quá cao → kiểm tra
+    if v >= 15:
+        return "background-color:#d7f5dd"          # xanh: hấp dẫn
+    if v <= -15:
+        return "background-color:#f8d7da"          # đỏ: đắt
+    return ""                                       # trung tính (±15%)
+
+
+def _c_conf(v):
+    if not isinstance(v, str):
+        return ""
+    if "High" in v or "Cao" in v:
+        return "background-color:#d7f5dd"
+    if "Medium" in v or "TB" in v or "Trung" in v:
+        return "background-color:#fff3cd"
+    if "Low" in v or "Thấp" in v:
+        return "background-color:#f8d7da"
+    return ""
+
+
+def _c_evebit(v):
+    """EV/EBIT thấp = rẻ (xanh), cao = đắt (đỏ). Chỉ gợi ý, tuỳ ngành."""
+    if v is None or pd.isna(v):
+        return ""
+    if v <= 12:
+        return "background-color:#d7f5dd"
+    if v >= 30:
+        return "background-color:#f8d7da"
+    return ""
+
+
 # nền cho TỪNG CỤM cột (dễ phân biệt bằng mắt)
 def _cluster_bg(col: str) -> str:
     if col in ("Mã", "Tên", "Ngành"):
@@ -878,8 +914,19 @@ if "screen" in st.session_state:
                              na_rep="—")
     for c in ("Upside %", "Fwd upside %", "Upside EV/EBIT %", "Upside FCFF %"):
         if c in vsum.columns:
-            vsty = vsty.map(_c_neg, subset=[c])
+            vsty = vsty.map(_c_upside, subset=[c])
+    if "Độ tin cậy" in vsum.columns:
+        vsty = vsty.map(_c_conf, subset=["Độ tin cậy"])
+    if "EV/EBIT" in vsum.columns:
+        vsty = vsty.map(_c_evebit, subset=["EV/EBIT"])
     st.dataframe(vsty, use_container_width=True, hide_index=True)
+    st.caption(
+        "🎨 **Chú thích màu** (các cột Upside): 🟢 xanh = **hấp dẫn** (định giá cao hơn "
+        "giá +15…60%) · 🟡 vàng = **upside >60%, cẩn trọng** (dễ do số liệu méo/chu kỳ) · "
+        "⚪ trắng = **hợp lý** (±15%) · 🔴 đỏ = **đắt/định giá thấp hơn giá** (≤ −15%). "
+        "Cột **Độ tin cậy**: 🟢 High · 🟡 Medium · 🔴 Low. "
+        "Cột **EV/EBIT**: 🟢 ≤12 (rẻ) · 🔴 ≥30 (đắt). "
+        "Màu chỉ GỢI Ý — luôn đọc kèm cảnh báo ngành chu kỳ (PP P/E?, ghi chú dưới).")
 
     # ---- Chi tiết 1 mã: định giá + tài chính 4 năm/4 quý + cân đối ----
     st.subheader("🔎 Chi tiết 1 mã")
