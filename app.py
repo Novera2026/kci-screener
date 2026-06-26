@@ -398,6 +398,98 @@ def _c_neg(v):
     return "color:#c0392b;font-weight:600" if isinstance(v, (int, float)) and v < 0 else ""
 
 
+# nền cho TỪNG CỤM cột (dễ phân biệt bằng mắt)
+def _cluster_bg(col: str) -> str:
+    if col in ("Mã", "Tên", "Ngành"):
+        return ""
+    if col in ("Giá", "% so đỉnh", "Vốn hóa (억)"):
+        return "#eef4ff"                                   # giá: xanh dương nhạt
+    if col.startswith("Doanh thu '") or col.startswith("Doanh thu Q"):
+        return "#eafaf0"                                   # cụm Doanh thu: xanh lá nhạt
+    if col.startswith("LN thuần '") or col.startswith("LN thuần Q"):
+        return "#fff6e8"                                   # cụm LN thuần: cam nhạt
+    if col.startswith("ROE % '") or col.startswith("ROE % Q") \
+            or col.startswith("Biên LN ròng % ") or col.startswith("Nợ/VCSH % '"):
+        return "#f4eefb"                                   # cụm chỉ số % theo kỳ: tím nhạt
+    if col in ("ROE %", "BPS", "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)"):
+        return "#f6f7f9"                                   # tài chính trailing: xám
+    if col in ("Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %"):
+        return "#fdeef0"                                   # cân đối: hồng nhạt
+    if col in ("EPS", "EPS dự tính"):
+        return "#eef9f3"
+    if col in ("P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %"):
+        return "#eef9fb"                                   # định giá: xanh cyan nhạt
+    return ""
+
+
+def _style_table(d):
+    """Trả DataFrame style cùng shape: nền theo cụm + tô màu tăng trưởng (xanh mạnh/đỏ)."""
+    styles = pd.DataFrame("", index=d.index, columns=d.columns)
+    # 1) nền theo cụm
+    for col in d.columns:
+        bg = _cluster_bg(col)
+        if bg:
+            styles[col] = f"background-color:{bg}"
+
+    def _seq(prefix):
+        ys = [c for c in d.columns if c.startswith(prefix + " '")]
+        qs = [c for c in d.columns if c.startswith(prefix + " Q")]
+        return ys, qs
+
+    # 2) tăng trưởng theo kỳ (Doanh thu, LN thuần): so với kỳ liền trước cùng loại
+    for prefix in ("Doanh thu", "LN thuần"):
+        for seq in _seq(prefix):
+            for j in range(len(seq)):
+                cur = seq[j]
+                prev = seq[j - 1] if j > 0 else None
+                for idx in d.index:
+                    v = d.at[idx, cur]
+                    if not isinstance(v, (int, float)):
+                        continue
+                    if v < 0:                              # lỗ / âm
+                        styles.at[idx, cur] += ";color:#c0392b;font-weight:700"
+                        continue
+                    if prev is not None:
+                        p = d.at[idx, prev]
+                        if isinstance(p, (int, float)) and p > 0:
+                            g = v / p - 1
+                            if g >= 0.20:                  # tăng mạnh
+                                styles.at[idx, cur] += ";color:#137333;font-weight:700"
+                            elif g <= -0.20:               # giảm mạnh
+                                styles.at[idx, cur] += ";color:#c0392b;font-weight:700"
+
+    # 3) màu ngữ nghĩa cho các cột tổng quan / định giá
+    for idx in d.index:
+        def _set_bg(col, css):
+            if col in d.columns:
+                styles.at[idx, col] = css
+        if "ROE %" in d.columns and isinstance(d.at[idx, "ROE %"], (int, float)):
+            v = d.at[idx, "ROE %"]
+            _set_bg("ROE %", "background-color:" + ("#b7e9c4" if v >= 15 else
+                    "#d7f5dd" if v >= 10 else "#f8d7da" if v < 0 else "#f6f7f9"))
+        if "Nợ/VCSH %" in d.columns and isinstance(d.at[idx, "Nợ/VCSH %"], (int, float)):
+            v = d.at[idx, "Nợ/VCSH %"]
+            _set_bg("Nợ/VCSH %", "background-color:" + ("#d7f5dd" if v < 100 else
+                    "#fff3cd" if v < 200 else "#f8d7da"))
+        if "Nợ/TS %" in d.columns and isinstance(d.at[idx, "Nợ/TS %"], (int, float)):
+            v = d.at[idx, "Nợ/TS %"]
+            _set_bg("Nợ/TS %", "background-color:" + ("#d7f5dd" if v < 50 else
+                    "#fff3cd" if v < 70 else "#f8d7da"))
+        for c in ("Đánh giá", "Định giá"):
+            if c in d.columns and isinstance(d.at[idx, c], str):
+                t = d.at[idx, c]
+                css = ("#d7f5dd" if ("Rẻ" in t or "🟢" in t or "An toàn" in t) else
+                       "#f8d7da" if ("Đắt" in t or "🔴" in t or "thận trọng" in t) else
+                       "#fff3cd" if ("Trung bình" in t or "🟡" in t) else "")
+                if css:
+                    _set_bg(c, "background-color:" + css)
+        # số âm: đỏ chữ
+        for c in ("LN HĐ (억)", "LN thuần (억)", "EPS", "Upside P/E %", "% so đỉnh"):
+            if c in d.columns and isinstance(d.at[idx, c], (int, float)) and d.at[idx, c] < 0:
+                styles.at[idx, c] += ";color:#c0392b;font-weight:600"
+    return styles
+
+
 # ---- Run: chỉ cào dữ liệu (network) rồi lưu vào session_state ----
 if run_btn:
     queries = [x.strip() for x in raw.replace(",", "\n").splitlines() if x.strip()]
@@ -632,16 +724,21 @@ if "screen" in st.session_state:
     fmt.update(_ts_fmt)
 
     # ---- Sắp xếp lại: ĐỊNH DANH → cột theo KỲ (Năm/Quý) → ĐỊNH GIÁ & TỔNG QUAN → Nguồn ----
-    _HEAD = ["Mã", "Tên", "Ngành"]
+    _HEAD = ["Mã", "Tên", "Ngành", "Giá", "% so đỉnh", "Vốn hóa (억)"]
     _TAIL = [
-        # Giá & thị trường
-        "Giá", "% so đỉnh", "Vốn hóa (억)",
-        # Lợi nhuận & sinh lời (tổng quan)
-        "EPS", "EPS dự tính", "BPS", "ROE %", "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)",
+        # Sinh lời & giá trị sổ sách
+        "ROE %", "BPS",
+        # Tài chính trailing (kỳ gần nhất)
+        "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)",
         # Cân đối & sức khỏe
-        "Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %", "Đánh giá", "Tỷ suất CT %",
-        # ĐỊNH GIÁ — để CUỐI cùng (ngay trước Nguồn)
-        "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %", "Định giá",
+        "Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %",
+        "Tỷ suất CT %",
+        # EPS
+        "EPS", "EPS dự tính",
+        # ĐỊNH GIÁ
+        "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %",
+        # Đánh giá tổng hợp
+        "Đánh giá", "Định giá",
     ]
     _known = set(_HEAD) | set(_TAIL) | {"Nguồn"}
     _period = [c for c in disp.columns if c not in _known]   # cột theo kỳ (động) → ĐỨNG TRƯỚC
@@ -650,11 +747,9 @@ if "screen" in st.session_state:
         + (["Nguồn"] if "Nguồn" in disp.columns else [])
     disp = disp[_final]
 
-    sty = disp.style.format({k: v for k, v in fmt.items() if k in disp.columns},
-                            na_rep="—")
-    for col, fn in color_cols.items():
-        if col in disp.columns:
-            sty = sty.map(fn, subset=[col])
+    sty = (disp.style
+           .format({k: v for k, v in fmt.items() if k in disp.columns}, na_rep="—")
+           .apply(_style_table, axis=None))
     # ghim cột Mã + Tên để cuộn ngang vẫn theo dõi được
     col_cfg = {"Mã": st.column_config.Column(pinned=True),
                "Tên": st.column_config.Column(pinned=True, width="medium")}
