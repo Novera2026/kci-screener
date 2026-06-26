@@ -405,13 +405,16 @@ def _cluster_bg(col: str) -> str:
         return ""
     if col in ("Giá", "% so đỉnh", "Vốn hóa (억)"):
         return "#eef4ff"                                   # giá: xanh dương nhạt
-    if col.startswith("Doanh thu '") or col.startswith("Doanh thu Q"):
-        return "#eafaf0"                                   # cụm Doanh thu: xanh lá nhạt
-    if col.startswith("LN thuần '") or col.startswith("LN thuần Q"):
-        return "#fff6e8"                                   # cụm LN thuần: cam nhạt
-    if col.startswith("ROE % '") or col.startswith("ROE % Q") \
-            or col.startswith("Biên LN ròng % ") or col.startswith("Nợ/VCSH % '"):
-        return "#f4eefb"                                   # cụm chỉ số % theo kỳ: tím nhạt
+    if col.startswith("Doanh thu '"):
+        return "#eafaf0"                                   # Doanh thu — NĂM: xanh lá nhạt
+    if col.startswith("Doanh thu Q"):
+        return "#cdebd8"                                   # Doanh thu — QUÝ: xanh lá đậm hơn
+    if col.startswith("LN thuần '"):
+        return "#fff6e8"                                   # LN thuần — NĂM: cam nhạt
+    if col.startswith("LN thuần Q"):
+        return "#ffe6c4"                                   # LN thuần — QUÝ: cam đậm hơn
+    if col.startswith("ROE % '") or col.startswith("ROE % Q"):
+        return "#f4eefb"                                   # ROE (chỉ năm): tím nhạt
     if col in ("ROE %", "BPS", "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)"):
         return "#f6f7f9"                                   # tài chính trailing: xám
     if col in ("Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %"):
