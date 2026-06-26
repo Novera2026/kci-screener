@@ -101,6 +101,36 @@ def justified_pb_value(bps: float, roe: float, ke: float, g: float) -> Optional[
     return bps * (roe - g) / (ke - g)
 
 
+def rim_multistage(bps: float, roe: float, ke: float, years: int, g_term: float,
+                   payout: Optional[float] = None, g_cap: float = 0.15) -> Optional[float]:
+    """RIM NHIỀU GIAI ĐOẠN (tường minh, đúng mô hình sách giáo khoa):
+
+      • Lăn vốn chủ:   B(t) = B(t-1) × (1 + g),  g = ROE×(1−payout) (tăng trưởng bền vững)
+      • Thặng dư:      RI(t) = (ROE − Ke) × B(t-1)
+      • Giá trị:       Fair = BPS + Σ RI(t)/(1+Ke)^t  +  TV/(1+Ke)^N
+                       TV   = RI(N+1)/(Ke − g_term)   (terminal tăng đều g_term)
+
+    Khác S-RIM/justified ở chỗ DÙNG tăng trưởng vốn chủ THỰC trong N năm rồi mới về
+    g_term — nên cho kết quả KHÁC (thường cao hơn cho DN ROE cao, giữ lại nhiều LN).
+    g (giai đoạn cao) bị kẹp ≤ g_cap (mặc định 15%) để tránh nổ. Trả None nếu model vỡ.
+    """
+    bps = _pos(bps)
+    roe = _num(roe)
+    if bps is None or roe is None or ke is None or ke <= g_term:
+        return None
+    payout = 0.0 if payout is None else min(max(payout, 0.0), 1.0)
+    g = min(roe * (1 - payout), g_cap)
+    excess = roe - ke                       # có thể âm (ROE < Ke → định giá dưới book)
+    B, pv = bps, 0.0
+    for t in range(1, years + 1):
+        pv += excess * B / (1 + ke) ** t    # RI(t) trên vốn ĐẦU kỳ
+        B *= (1 + g)                         # lăn vốn chủ sang năm sau
+    tv = excess * B / (ke - g_term)         # RI(N+1) trên vốn cuối, Gordon
+    pv += tv / (1 + ke) ** years
+    v = bps + pv
+    return v if v > 0 else None
+
+
 # ----------------------------------------------------------------------------
 # Normalized / mid-cycle (cho CYCLICAL) — dùng MEDIAN qua chu kỳ, khử đỉnh/đáy (§3.1/§6.6)
 # ----------------------------------------------------------------------------
@@ -475,6 +505,11 @@ def value_stock(row: dict, a: Assumptions,
     methods["S-RIM"] = srim(bps, roe, ke, w=a.persistence) if roe is not None else None
     methods["P/B-ROE (justified)"] = justified_pb_value(bps, roe, ke, g_term) \
         if roe is not None else None
+    # RIM nhiều giai đoạn (tường minh): payout suy từ DPS/EPS (mặc định giữ lại hết).
+    _payout = (dps / eps) if (eps and dps and eps > 0) else \
+        (a.payout if a.payout is not None else 0.0)
+    methods["RIM nhiều giai đoạn"] = rim_multistage(
+        bps, roe, ke, a.years_high, g_term, payout=_payout) if roe is not None else None
     methods["DDM (Gordon)"] = ddm_gordon(dps, ke, g_term)
     methods["DDM 2 giai đoạn"] = ddm_two_stage(dps, ke, a.g_high, a.years_high, g_term)
     methods["DCF earnings (thô)"] = dcf_earnings(eps, ke, a.g_high, a.years_high, g_term)
