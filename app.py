@@ -466,21 +466,28 @@ if "screen" in st.session_state:
     enrich = st.checkbox(
         "📑 Bổ sung số liệu tài chính (doanh thu, LN thuần, ROE, nợ, EPS dự tính, đánh giá "
         f"— cào thêm ~0.5s/mã · {len(df)} mã)", value=len(df) <= 60)
-    expand_ts = st.checkbox(
-        "📅 Gộp số liệu tài chính THEO KỲ (năm/quý) thành cột trong bảng này "
-        "(tự động bật khi ≤ 30 mã; tắt nếu danh sách lớn để tránh quá nhiều cột)",
-        value=len(df) <= 30)
-    if expand_ts:
-        _tm = st.multiselect(
-            "Chỉ tiêu hiển thị theo kỳ",
-            ["revenue", "op_profit", "net_profit", "roe", "net_margin",
-             "debt_ratio", "assets", "liabilities", "eps", "bps"],
-            default=["revenue", "net_profit", "roe"],
-            format_func=lambda k: LABELS_VI.get(k, k))
-        _tscope = st.radio("Phạm vi kỳ", ["Năm", "Năm + Quý"], horizontal=True,
-                           key="ts_scope")
+    # Tự động gộp cột theo kỳ NGAY khi cào xong (không cần set tay).
+    # Danh sách lớn (>40 mã) mới phải bật thủ công để tránh chậm/quá nhiều cột.
+    if len(df) <= 40:
+        expand_ts = True
     else:
-        _tm, _tscope = [], "Năm"
+        expand_ts = st.checkbox(
+            f"📅 Gộp số liệu tài chính THEO KỲ vào bảng ({len(df)} mã — bật thủ công "
+            "vì danh sách lớn)", value=False)
+    _tm, _tscope = ["revenue", "net_profit", "roe"], "Năm + Quý"   # mặc định
+    if expand_ts:
+        with st.expander("⚙️ Tùy chỉnh cột theo kỳ "
+                         "(mặc định: Doanh thu / LN thuần / ROE · Năm + Quý)"):
+            _tm = st.multiselect(
+                "Chỉ tiêu hiển thị theo kỳ",
+                ["revenue", "op_profit", "net_profit", "roe", "net_margin",
+                 "debt_ratio", "assets", "liabilities", "eps", "bps"],
+                default=["revenue", "net_profit", "roe"],
+                format_func=lambda k: LABELS_VI.get(k, k))
+            _tscope = st.radio("Phạm vi kỳ", ["Năm", "Năm + Quý"], index=1,
+                               horizontal=True, key="ts_scope")
+    else:
+        _tm = []
 
     def _ind(i):
         s = df["sector"].iloc[i]
@@ -604,23 +611,23 @@ if "screen" in st.session_state:
            "Upside P/E %": "{:+.1f}"}
     fmt.update(_ts_fmt)
 
-    # ---- Sắp xếp lại cột theo nhóm cho dễ nhìn (cột theo kỳ dồn về cuối) ----
-    _ORDER = [
-        # Định danh
-        "Mã", "Tên", "Ngành",
+    # ---- Sắp xếp lại: ĐỊNH DANH → cột theo KỲ (Năm/Quý) → ĐỊNH GIÁ & TỔNG QUAN → Nguồn ----
+    _HEAD = ["Mã", "Tên", "Ngành"]
+    _TAIL = [
         # Giá & thị trường
         "Giá", "% so đỉnh", "Vốn hóa (억)",
         # Định giá (multiples + P/E dự kiến)
         "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %", "Định giá",
         "Tỷ suất CT %",
-        # Lợi nhuận & sinh lời
+        # Lợi nhuận & sinh lời (tổng quan)
         "EPS", "EPS dự tính", "BPS", "ROE %", "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)",
         # Cân đối & sức khỏe
         "Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %", "Đánh giá",
     ]
-    _known = set(_ORDER) | {"Nguồn"}
-    _period = [c for c in disp.columns if c not in _known]   # cột theo kỳ (động)
-    _final = [c for c in _ORDER if c in disp.columns] + _period \
+    _known = set(_HEAD) | set(_TAIL) | {"Nguồn"}
+    _period = [c for c in disp.columns if c not in _known]   # cột theo kỳ (động) → ĐỨNG TRƯỚC
+    _final = [c for c in _HEAD if c in disp.columns] + _period \
+        + [c for c in _TAIL if c in disp.columns] \
         + (["Nguồn"] if "Nguồn" in disp.columns else [])
     disp = disp[_final]
 
