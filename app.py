@@ -32,7 +32,8 @@ except Exception:
 from financials import (fetch_financials, last_n, latest_actual, forward_eps,
                         balance_sheet, balance_sheet_of, assess_financials,
                         build_annual_series, build_quarter_series,
-                        project_forecast, forecast_eps, LABELS_VI)
+                        project_forecast, project_forecast_quarter,
+                        forecast_eps, LABELS_VI)
 
 try:
     import dart_api
@@ -621,7 +622,45 @@ if "screen" in st.session_state:
                            "Đánh giá": _c_tag, "LN HĐ (억)": _c_neg,
                            "LN thuần (억)": _c_neg})
 
-    _ts_fmt: dict = {}   # (đã gỡ tính năng gộp cột theo kỳ để định giá nhanh hơn)
+    # ---- Cột tài chính theo KỲ: 3 NĂM + 4 QUÝ — nguồn Naver (đã cache, KHÔNG gọi DART) ----
+    _ts_fmt: dict = {}
+    _PMETRICS = ["revenue", "net_profit", "roe"]   # cụm hiển thị theo kỳ
+    _period_on = len(df) <= 40
+    if not _period_on:
+        _period_on = st.checkbox(
+            f"📅 Gộp cột tài chính theo kỳ (3 năm + 4 quý) — {len(df)} mã", value=False)
+    if _period_on:
+        ylabels, qlabels, cellmap = [], [], {}
+        for i, tk in enumerate(df["ticker"]):
+            f = _fin(tk)                                   # Naver, cached → nhanh
+            mc_i, px_i = df["market_cap"].iloc[i], df["price"].iloc[i]
+            a_real = [c for c in f["annual"] if not c.get("is_consensus")][-3:]   # 3 năm
+            a_fc = project_forecast(a_real, mc_i, px_i)                            # + dự phóng
+            a_seq = a_real + ([a_fc] if a_fc else [])
+            q_real = [c for c in f["quarter"] if not c.get("is_consensus")][-4:]   # 4 quý
+            q_fc = project_forecast_quarter(f["quarter"], mc_i, px_i)             # + dự phóng
+            q_seq = q_real + ([q_fc] if q_fc else [])
+            for kind, seq in (("Y", a_seq), ("Q", q_seq)):
+                for c in seq:
+                    p = str(c.get("period", ""))
+                    e = "E" if c.get("is_forecast") else ""
+                    if kind == "Y":
+                        plabel = f"'{p[2:4]}{e}"
+                        if plabel not in ylabels:
+                            ylabels.append(plabel)
+                    else:
+                        plabel = (f"Q{p[2:4]}.{p[4:6]}" if len(p) >= 6 else f"Q{p}") + e
+                        if plabel not in qlabels:
+                            qlabels.append(plabel)
+                    for m in _PMETRICS:
+                        cellmap.setdefault((m, plabel), {})[tk] = c.get(m)
+        for m in _PMETRICS:
+            for plabel in ylabels + qlabels:
+                if (m, plabel) in cellmap:
+                    col = f"{LABELS_VI.get(m, m)} {plabel}"
+                    disp[col] = [cellmap[(m, plabel)].get(tk) for tk in df["ticker"]]
+                    _ts_fmt[col] = "{:.1f}" if m in ("roe", "net_margin", "debt_ratio") \
+                        else "{:,.0f}"
 
     # ---- Định giá theo P/E DỰ KIẾN (forward): dùng EPS dự phóng ----
     _fe = list(df["fwd_eps"])
@@ -648,6 +687,17 @@ if "screen" in st.session_state:
            "P/E dự kiến": "{:.2f}", "Giá hợp lý (P/E)": "{:,.0f}",
            "Upside P/E %": "{:+.1f}"}
     fmt.update(_ts_fmt)
+
+    # ---- Bỏ cột TRÙNG: khi đã có cột theo kỳ, bỏ bản trailing trùng lặp ----
+    if _period_on:
+        _dups = []
+        if "revenue" in _PMETRICS:
+            _dups.append("Doanh thu (억)")      # = Doanh thu năm gần nhất
+        if "net_profit" in _PMETRICS:
+            _dups.append("LN thuần (억)")       # = LN thuần năm gần nhất
+        if "roe" in _PMETRICS:
+            _dups.append("ROE %")              # = ROE kỳ gần nhất
+        disp = disp.drop(columns=[c for c in _dups if c in disp.columns], errors="ignore")
 
     # ---- Sắp xếp lại: ĐỊNH DANH → cột theo KỲ (Năm/Quý) → ĐỊNH GIÁ & TỔNG QUAN → Nguồn ----
     _HEAD = ["Mã", "Tên", "Ngành", "Giá", "% so đỉnh", "Vốn hóa (억)"]
