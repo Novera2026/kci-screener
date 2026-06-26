@@ -706,7 +706,10 @@ if "screen" in st.session_state:
         _period_on = st.checkbox(
             f"📅 Gộp cột tài chính theo kỳ (3 năm + 4 quý) — {len(df)} mã", value=False)
     if _period_on:
-        ylabels, qlabels, cellmap = [], [], {}
+        # ymeta/qmeta: nhãn -> (sortkey theo kỳ, is_forecast). Các mã lệch lịch báo cáo
+        # nhau → ta CHỐT theo toàn cục: 3 năm + 4 quý thực GẦN NHẤT + 1 dự phóng,
+        # tránh sinh cột thừa (vd 1 mã có Q25.03 làm cả bảng mọc cột None).
+        ymeta, qmeta, cellmap = {}, {}, {}
         for i, tk in enumerate(df["ticker"]):
             f = _fin(tk)                                   # Naver, cached → nhanh
             mc_i, px_i = df["market_cap"].iloc[i], df["price"].iloc[i]
@@ -719,21 +722,29 @@ if "screen" in st.session_state:
             for kind, seq in (("Y", a_seq), ("Q", q_seq)):
                 for c in seq:
                     p = str(c.get("period", ""))
-                    e = "E" if c.get("is_forecast") else ""
+                    fc = bool(c.get("is_forecast"))
+                    e = "E" if fc else ""
                     if kind == "Y":
                         plabel = f"'{p[2:4]}{e}"
-                        if plabel not in ylabels:
-                            ylabels.append(plabel)
+                        ymeta[plabel] = (int(p[:4]) if p[:4].isdigit() else 0, fc)
                     else:
                         plabel = (f"Q{p[2:4]}.{p[4:6]}" if len(p) >= 6 else f"Q{p}") + e
-                        if plabel not in qlabels:
-                            qlabels.append(plabel)
+                        qmeta[plabel] = (int(p[:6]) if p[:6].isdigit() else 0, fc)
                     for m in _PMETRICS:
                         if kind == "Q" and m not in _Q_METRICS:
                             continue            # bỏ ROE (và metric khác) ở cột quý
                         cellmap.setdefault((m, plabel), {})[tk] = c.get(m)
+
+        def _pick(meta, n_actual):
+            act = sorted((l for l, (k, fc) in meta.items() if not fc),
+                         key=lambda l: meta[l][0])[-n_actual:]
+            fcl = sorted((l for l, (k, fc) in meta.items() if fc),
+                         key=lambda l: meta[l][0])[-1:]     # 1 cột dự phóng mới nhất
+            return act + fcl
+
+        labels = _pick(ymeta, 3) + _pick(qmeta, 4)         # 3 năm + DP, 4 quý + DP
         for m in _PMETRICS:
-            for plabel in ylabels + qlabels:
+            for plabel in labels:
                 if (m, plabel) in cellmap:
                     col = f"{LABELS_VI.get(m, m)} {plabel}"
                     disp[col] = [cellmap[(m, plabel)].get(tk) for tk in df["ticker"]]
