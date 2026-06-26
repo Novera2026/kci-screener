@@ -317,6 +317,7 @@ def _fin_table_styled(cols: list[dict], fields: list[str]):
         if c.get("is_forecast"):
             fc_cols.append(lbl)
     df = pd.DataFrame(data, index=[LABELS_VI.get(f, f) for f in fields])
+    df = df.where(df.notna(), "—")          # None → "—" (Streamlit grid hay hiện 'None')
 
     def _hl_col(s):
         return ["background-color:#eef2ff" if s.name in fc_cols else "" for _ in s]
@@ -357,6 +358,7 @@ def _fin_table_combined(annual_cols: list[dict], quarter_cols: list[dict],
     _add(annual_cols, "Y")
     _add(quarter_cols, "Q")
     df = pd.DataFrame(data, index=[LABELS_VI.get(f, f) for f in fields])
+    df = df.where(df.notna(), "—")          # None → "—" (tránh Streamlit hiện 'None')
 
     def _hl_col(s):
         if s.name in fc_cols:

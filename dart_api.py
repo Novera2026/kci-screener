@@ -37,7 +37,13 @@ _TIMEOUT = 15
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CORP_CACHE = os.path.join(_HERE, "dart_corp.csv")     # stock_code,corp_code,corp_name
 
-# account_nm (Hàn) -> field. Có nhiều biến thể tên tài khoản giữa các DN.
+def _norm(s) -> str:
+    """Bỏ MỌI dấu cách + strip — DN nộp tên tài khoản khác nhau giữa các năm
+    (vd '자산총계' vs '자산 총계'), khớp chính xác sẽ trượt nếu không chuẩn hóa."""
+    return (s or "").replace(" ", "").strip()
+
+
+# account_nm (Hàn) -> field. Có nhiều biến thể tên tài khoản giữa các DN/năm.
 _ACCOUNTS = {
     "revenue":     {"매출액", "수익(매출액)", "영업수익", "매출"},
     "op_profit":   {"영업이익", "영업이익(손실)"},
@@ -46,6 +52,8 @@ _ACCOUNTS = {
     "liabilities": {"부채총계"},
     "equity":      {"자본총계"},
 }
+# bản chuẩn hóa (bỏ dấu cách) để so khớp bền vững
+_ACCOUNTS_NORM = {f: {_norm(x) for x in names} for f, names in _ACCOUNTS.items()}
 
 
 def api_key() -> Optional[str]:
@@ -158,8 +166,8 @@ def _fetch_year(corp_code: str, year: int) -> Optional[dict]:
                "is_consensus": False, "fs_div": fs_div}
         found = False
         for item in j.get("list", []):
-            nm = (item.get("account_nm") or "").strip()
-            for field, names in _ACCOUNTS.items():
+            nm = _norm(item.get("account_nm"))       # bỏ dấu cách → khớp bền
+            for field, names in _ACCOUNTS_NORM.items():
                 if nm in names and rec.get(field) is None:
                     v = _num(item.get("thstrm_amount"))
                     if v is not None:
@@ -205,8 +213,6 @@ def annual_financials(ticker: str, years: int = 4,
 # ---------------------------------------------------------------------------
 # Số liệu cho EV/EBIT + FCFF (1 lần gọi/mã, năm gần nhất)
 # ---------------------------------------------------------------------------
-def _norm(s) -> str:
-    return (s or "").replace(" ", "").strip()
 
 
 # (field, các sj_div hợp lệ, tập tên tài khoản). Báo cáo KQKD nằm ở IS (2 báo cáo)
@@ -305,8 +311,8 @@ def _fetch_report(corp_code: str, year: int, reprt_code: str) -> Optional[dict]:
                "is_consensus": False, "fs_div": fs_div}
         found = False
         for item in j.get("list", []):
-            nm = (item.get("account_nm") or "").strip()
-            for field, names in _ACCOUNTS.items():
+            nm = _norm(item.get("account_nm"))       # bỏ dấu cách → khớp bền
+            for field, names in _ACCOUNTS_NORM.items():
                 if nm in names and rec.get(field) is None:
                     v = _num(item.get("thstrm_amount"))
                     if v is not None:
