@@ -37,7 +37,12 @@ class Assumptions:
 
     def ke(self) -> float:
         """Cost of equity (CAPM): Ke = Rf + β×ERP, β kẹp [0.5, 1.8]."""
-        b = min(max(self.beta, 0.5), 1.8)
+        return self.ke_with(self.beta)
+
+    def ke_with(self, beta: Optional[float] = None) -> float:
+        """Ke với beta tùy chọn (per-stock). None → dùng beta mặc định. β kẹp [0.5, 1.8]."""
+        b = self.beta if beta is None else beta
+        b = min(max(b, 0.5), 1.8)
         return self.rf + b * self.erp
 
     def g_term_capped(self) -> float:
@@ -545,7 +550,8 @@ def value_stock(row: dict, a: Assumptions,
     coverage_cap: trần confidence ('Medium'/'Low') theo độ phủ dữ liệu
     (coverage.assess_coverage(...)['confidence_cap']). Dùng cho mã mới niêm yết /
     thiếu lịch sử — không cho confidence vượt trần dù method có hội tụ."""
-    ke = a.ke()
+    _beta = _num(row.get("beta"))            # beta riêng từng mã (52T) nếu có
+    ke = a.ke_with(_beta)
     g_term = a.g_term_capped()
     eps = _num(row.get("eps"))
     bps = _num(row.get("bps"))

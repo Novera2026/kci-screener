@@ -543,6 +543,63 @@ def fetch_many(queries: list[str], registry: Optional[TickerRegistry] = None,
     return [r for r in rows if r is not None], unresolved
 
 
+# ----------------------------------------------------------------------------
+# Tham số thị trường LIVE: Rf (TPCP 10Y) + Beta (52 tuần vs KOSPI)
+# ----------------------------------------------------------------------------
+def fetch_kgb10y() -> Optional[float]:
+    """Lợi suất TPCP Hàn 10 năm (Rf) dạng THẬP PHÂN, từ FRED (OECD, không cần key).
+    Series IRLTLT01KRM156N (theo tháng). None nếu lỗi."""
+    try:
+        import requests
+        r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv"
+                         "?id=IRLTLT01KRM156N", timeout=10)
+        r.raise_for_status()
+        vals = [ln.split(",") for ln in r.text.strip().splitlines()[1:]]
+        last = [v for v in vals if len(v) == 2 and v[1] not in (".", "")][-1]
+        return float(last[1]) / 100.0
+    except Exception:
+        return None
+
+
+def fetch_weekly_closes(symbol: str) -> list[float]:
+    """Giá đóng cửa TUẦN ~1.5 năm từ Naver chart (symbol mã hoặc 'KOSPI'). [] nếu lỗi."""
+    try:
+        import requests
+        import json as _json
+        s, e = _last_n_days(540)
+        u = (f"https://api.finance.naver.com/siseJson.naver?symbol={symbol}"
+             f"&requestType=1&startTime={s}&endTime={e}&timeframe=week")
+        r = requests.get(u, headers={"User-Agent": "Mozilla/5.0",
+                                     "Referer": "https://finance.naver.com/"}, timeout=10)
+        rows = _json.loads(r.text.replace("'", '"'))
+        return [float(x[4]) for x in rows[1:] if x and x[4] not in (None, "")]
+    except Exception:
+        return []
+
+
+def beta_vs_market(stock_closes: list[float], market_closes: list[float],
+                   lo: float = 0.5, hi: float = 1.8) -> Optional[float]:
+    """Beta = cov(r_stock, r_market)/var(r_market) trên lợi suất TUẦN (giống 52주베타
+    của WISEreport). Kẹp [lo, hi] theo house assumption. None nếu thiếu dữ liệu."""
+    n = min(len(stock_closes), len(market_closes))
+    if n < 30:
+        return None
+    s, m = stock_closes[-n:], market_closes[-n:]
+    rs = [s[i] / s[i - 1] - 1 for i in range(1, n) if s[i - 1]]
+    rm = [m[i] / m[i - 1] - 1 for i in range(1, n) if m[i - 1]]
+    k = min(len(rs), len(rm))
+    if k < 30:
+        return None
+    rs, rm = rs[-k:], rm[-k:]
+    mb = sum(rm) / k
+    var = sum((x - mb) ** 2 for x in rm) / k
+    if var <= 0:
+        return None
+    ms = sum(rs) / k
+    cov = sum((rs[i] - ms) * (rm[i] - mb) for i in range(k)) / k
+    return max(lo, min(hi, cov / var))
+
+
 def sector_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     """Chỉ số toàn ngành. Aggregate P/E = ΣVốn hóa / ΣLN ròng (đúng chuẩn,
     không phải trung bình cộng P/E). Kèm median để tham chiếu."""

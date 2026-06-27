@@ -76,9 +76,15 @@ with st.sidebar:
     st.divider()
     st.subheader("💰 Giả định định giá")
     st.caption("House Korea (KRW nominal) — chỉnh nếu cần. Để mặc định cũng OK.")
-    rf = st.slider("Rf — TPCP Hàn 10Y (%)", 1.0, 6.0, 3.2, 0.1) / 100
+    _rf0 = _rf_live()                       # TPCP 10Y live (FRED)
+    _rf_def = round(_rf0 * 100, 2) if _rf0 else 3.2
+    rf = st.slider("Rf — TPCP Hàn 10Y (%)", 1.0, 6.0, _rf_def, 0.1) / 100
+    st.caption(f"🛰️ Rf mặc định LIVE từ FRED: **{_rf_def}%**" if _rf0 else
+               "⚠️ Không lấy được Rf live → mặc định 3.2%. Chỉnh tay nếu cần.")
     erp = st.slider("ERP — phần bù rủi ro VCSH (%)", 4.0, 9.0, 6.5, 0.1) / 100
-    beta = st.slider("Beta (kẹp 0.5–1.8)", 0.5, 1.8, 1.0, 0.05)
+    beta_auto = st.checkbox("β riêng từng mã (52 tuần vs KOSPI, tự tính)", value=True,
+                            help="Bật: mỗi mã dùng beta thực 52T. Tắt: dùng beta phẳng dưới đây.")
+    beta = st.slider("Beta mặc định (khi tắt β riêng / thiếu dữ liệu)", 0.5, 1.8, 1.0, 0.05)
     g_term = st.slider("g vĩnh viễn (%) — cap 2.5", 0.0, 2.5, 2.0, 0.1) / 100
     with st.expander("Tham số nâng cao (DCF/DDM 2 giai đoạn)"):
         g_high = st.slider("g giai đoạn đầu (%)", 0.0, 25.0, 8.0, 0.5) / 100
@@ -286,6 +292,26 @@ def _dart_extras(ticker: str) -> dict:
     if e:                       # chỉ lưu khi CÓ dữ liệu → lần sau lỗi sẽ tự thử lại
         cache[ticker] = e
     return e
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _rf_live():
+    """Rf live = TPCP Hàn 10Y (FRED). (giá trị thập phân, kỳ) hoặc (None, None)."""
+    from screener import fetch_kgb10y
+    return fetch_kgb10y()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _kospi_weekly():
+    from screener import fetch_weekly_closes
+    return fetch_weekly_closes("KOSPI")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _beta(ticker: str):
+    """Beta 52T (vs KOSPI) của 1 mã, kẹp [0.5,1.8]. None nếu thiếu dữ liệu."""
+    from screener import fetch_weekly_closes, beta_vs_market
+    return beta_vs_market(fetch_weekly_closes(ticker), _kospi_weekly())
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -636,6 +662,21 @@ if "screen" in st.session_state:
         fwd_roe_col = [None] * len(df)
     df["fwd_eps"] = fwd_eps_col
     df["fwd_roe"] = fwd_roe_col
+
+    # Beta riêng từng mã (52T vs KOSPI) → vào CAPM/Ke. Tắt hoặc lỗi → None (dùng beta phẳng).
+    if beta_auto and len(df) <= 80:
+        bcol = []
+        bp = st.progress(0.0, text="Đang tính beta 52 tuần...")
+        for i, tk in enumerate(df["ticker"]):
+            try:
+                bcol.append(_beta(tk))
+            except Exception:
+                bcol.append(None)
+            bp.progress((i + 1) / len(df))
+        bp.empty()
+        df["beta"] = bcol
+    else:
+        df["beta"] = [None] * len(df)
 
     if unresolved:
         st.warning(f"Chưa resolve được: {', '.join(unresolved)}")
@@ -1018,6 +1059,10 @@ if "screen" in st.session_state:
             st.warning("🆕 Mã mới niêm yết — " + cov["note"])
     st.markdown(f"**PP chuẩn cho ngành _{r.sector}_:** {r.primary} "
                 f"· _cross-check:_ {', '.join(r.cross)}")
+    _bv = drow.get("beta")
+    st.caption(f"📐 CAPM: **Ke = {r.ke*100:.2f}%** · Rf = {assume.rf*100:.2f}% (FRED) · "
+               f"ERP = {assume.erp*100:.1f}% · β = "
+               + (f"**{_bv:.2f}** (52T riêng mã)" if _bv else f"{assume.beta:.2f} (phẳng)"))
     st.info(r.note)
     if getattr(r, "implied_roe", None) is not None:
         cur = f" · ROE hiện tại ~{r.roe*100:.0f}%" if r.roe else ""
