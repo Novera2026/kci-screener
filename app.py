@@ -895,9 +895,21 @@ if "screen" in st.session_state:
             pbar.empty()
             _got = sum(1 for x in rec if x.get("ebit"))
             if _got == 0:
-                st.warning("📡 DART không trả số liệu cho mã nào. Kiểm tra: (1) DART_API_KEY "
-                           "đúng (Secrets nếu chạy cloud); (2) corp-code map tải được. "
-                           "Tải lại corp-code: xóa file dart_corp.csv rồi chạy lại.")
+                import dart_api as _Dx
+                _keyok = _Dx.available()
+                _ccok = bool(_Dx.corp_code_of("005930"))   # Samsung: map OK thì phải ra
+                if not _keyok:
+                    _why = ("❌ **Thiếu DART_API_KEY.** Local: thêm vào `.env`. "
+                            "Cloud: Settings → Secrets thêm `DART_API_KEY=...` rồi Reboot.")
+                elif not _ccok:
+                    _why = ("Key ✓ nhưng **corp-code map chưa tải** (cloud chặn tải corpCode.xml, "
+                            "hoặc bản deploy cũ thiếu `dart_corp.csv`). Đảm bảo repo có "
+                            "`dart_corp.csv` (commit `5138cdc+`) rồi Reboot.")
+                else:
+                    _why = ("Key ✓, map ✓ → có thể **DART chặn tạm (rate limit)** do gọi nhiều, "
+                            "hoặc các mã này chưa có BCTC. Đợi ít phút rồi thử lại.")
+                st.warning(f"📡 DART trả 0 mã. Chẩn đoán: Key **{'✓' if _keyok else '✗'}** · "
+                           f"corp-map(Samsung) **{'✓' if _ccok else '✗'}**. {_why}")
             else:
                 st.caption(f"📡 DART: lấy được EV/EBIT cho **{_got}/{len(rec)}** mã "
                            "(mã có mảng tài chính lớn — vd Hyundai Motor — net debt khổng lồ "
