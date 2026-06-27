@@ -55,6 +55,28 @@ def _get_registry():
 
 reg = _get_registry()
 
+
+# ---- Tham số thị trường live (định nghĩa TRƯỚC sidebar vì sidebar dùng ngay) ----
+@st.cache_data(ttl=86400, show_spinner=False)
+def _rf_live():
+    """Rf live = TPCP Hàn 10Y (FRED), dạng thập phân. None nếu lỗi."""
+    from screener import fetch_kgb10y
+    return fetch_kgb10y()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _kospi_weekly():
+    from screener import fetch_weekly_closes
+    return fetch_weekly_closes("KOSPI")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _beta(ticker: str):
+    """Beta 52T (vs KOSPI) của 1 mã, kẹp [0.5,1.8]. None nếu thiếu dữ liệu."""
+    from screener import fetch_weekly_closes, beta_vs_market
+    return beta_vs_market(fetch_weekly_closes(ticker), _kospi_weekly())
+
+
 # ---- Sidebar: cấu hình ----
 with st.sidebar:
     st.header("⚙️ Cấu hình")
@@ -292,26 +314,6 @@ def _dart_extras(ticker: str) -> dict:
     if e:                       # chỉ lưu khi CÓ dữ liệu → lần sau lỗi sẽ tự thử lại
         cache[ticker] = e
     return e
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _rf_live():
-    """Rf live = TPCP Hàn 10Y (FRED). (giá trị thập phân, kỳ) hoặc (None, None)."""
-    from screener import fetch_kgb10y
-    return fetch_kgb10y()
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _kospi_weekly():
-    from screener import fetch_weekly_closes
-    return fetch_weekly_closes("KOSPI")
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _beta(ticker: str):
-    """Beta 52T (vs KOSPI) của 1 mã, kẹp [0.5,1.8]. None nếu thiếu dữ liệu."""
-    from screener import fetch_weekly_closes, beta_vs_market
-    return beta_vs_market(fetch_weekly_closes(ticker), _kospi_weekly())
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
