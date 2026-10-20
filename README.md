@@ -175,5 +175,7 @@ Trang **Sieu co phieu** trong thanh điều hướng quét cổ phiếu đang c�
 **Giai đoạn** (lọc đu đỉnh): 🔥 Đã chạy xa = cách MA50 > 25% / tăng > 200% từ đáy 52T / > +100% trong 3 tháng / RSI > 80 → mặc định LOẠI (liệt kê riêng kèm lý do); 🌿 Đang chạy; 🌱 Sớm (gần nền).
 **Meta** (nhóm dẫn dắt): xếp hạng 259 chủ đề Naver + ngành theo RS trung vị & % thành viên đạt xu hướng (co nhóm ít mã về trung bình); mặc định chỉ hiện mã thuộc top chủ đề / top 5 ngành.
 
-Điểm tiềm năng = 35% biểu đồ + 35% tăng trưởng + 20% meta + 10% tin tức. Quét toàn sàn (vốn hóa ≥ 1.000억, ~1.300 mã) mất khoảng 1 phút, theo 2 bước: lọc biểu đồ toàn bộ → phân tích sâu N mã mạnh nhất.
+Điểm tiềm năng = 35% biểu đồ + 35% tăng trưởng + 20% meta + 10% tin tức.
+
+**Rà soát lựa chọn** (lớp kiểm tra cuối, 0–100, hạng A/B/C/D): mỗi mã có câu giải thích *vì sao được chọn* và bảng điểm từng hạng mục (Xu hướng 25 · Điểm vào 20 · Tăng trưởng 25 · Meta 15 · Tin 10 · Dòng tiền 5), trừ điểm rủi ro: LN đột biến từ nền thấp, LN tăng mà DT đứng yên, biên LN thu hẹp, tin nghiêm trọng (유상증자/전환사채/소송/횡령…), RSI > 70, dấu hiệu phân phối, thanh khoản < 10억/phiên, bị sàn cảnh báo (Toss). A ≥ 80 Chọn mạnh · B ≥ 65 Đáng cân nhắc · C ≥ 50 Theo dõi · D Yếu. Quét toàn sàn (vốn hóa ≥ 1.000억, ~1.300 mã) mất khoảng 1 phút, theo 2 bước: lọc biểu đồ toàn bộ → phân tích sâu N mã mạnh nhất.
 Toss (tùy chọn): giá realtime + cảnh báo mã của sàn (투자경고, 단기과열, VI…). Toss **không** có tin tức hay BCTC nên các phần đó lấy từ Naver.

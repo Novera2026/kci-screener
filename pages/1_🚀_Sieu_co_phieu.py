@@ -48,6 +48,13 @@ DT năm ≥ 15% · đồng thuận LN năm tới tăng.
 **5. Tin tức (Naver)**: từ khóa xúc tác tích cực/tiêu cực trong tiêu đề; tin tổng hợp thị trường tính trung tính.
 
 **Điểm tiềm năng** = 35% Biểu đồ + 35% Tăng trưởng + 20% Meta + 10% Tin tức.
+
+**6. Rà soát lựa chọn (điểm 0–100, xếp loại A/B/C/D)** — lớp kiểm tra cuối, giải thích vì sao mã được chọn:
+cộng điểm Xu hướng (25) · Điểm vào chưa giãn (20) · Tăng trưởng (25) · Meta (15) · Tin tức (10) · Dòng tiền (5),
+rồi **trừ điểm rủi ro**: LN tăng đột biến từ nền thấp/vừa chuyển lãi (−5) · LN tăng mà DT đứng yên (−5) ·
+biên LN thu hẹp (−3) · tin rủi ro nghiêm trọng như 유상증자/전환사채/소송/횡령 (−10) · tin xấu nhiều hơn tốt (−5) ·
+RSI > 70 (−3) · dấu hiệu phân phối (−5) · thanh khoản < 10억/phiên (−5) · bị sàn cảnh báo qua Toss (−15).
+**A ≥ 80** Chọn mạnh · **B ≥ 65** Đáng cân nhắc · **C ≥ 50** Theo dõi thêm · **D** Yếu — cân nhắc loại.
 🚀 **Siêu cổ phiếu tiềm năng** = biểu đồ ≥ 7/8 · tăng trưởng ≥ 80% · RS ≥ 80 · đúng meta · chưa chạy xa.
 """)
 
@@ -241,8 +248,13 @@ if run:
         meta_pct = mt["meta_pct"] or 0
         total = 0.35 * chart_pct + 0.35 * (g_pct or 0) + 0.20 * meta_pct + 0.10 * (n_pct or 0)
         in_meta = mt["in_meta"] if mt["in_meta"] is not None else True
+        rv = G.review(m, g, nm, rev_th, np_th)
         rows.append({
             "Mã": tk, "Tên": names.get(tk, tk),
+            "Xếp loại": f"{rv['grade']} · {rv['grade_txt']}",
+            "Điểm rà soát": rv["score"],
+            "Vì sao chọn": "; ".join(rv["pros"][:2]) or "—",
+            "Rủi ro chính": rv["cons"][0] if rv["cons"] else "—",
             "Nhãn": G.label(m["chart_pass"], g_pct, m.get("rs"), m["stage"], in_meta),
             "Điểm tiềm năng": round(total),
             "Giai đoạn": m["stage"],
@@ -262,9 +274,8 @@ if run:
             "Ngành": ind_of.get(tk) or "",
             "Vốn hóa (억)": round(caps[tk]) if caps.get(tk) else None,
         })
-        details[tk] = {"m": m, "g": g, "gc": gc, "nm": nm, "d": daily.get(tk)}
-    _tier = {"🚀": 0, "📈": 1, "👀": 2, "🔥": 3}
-    rows.sort(key=lambda r: (_tier.get(r["Nhãn"][:1], 4), -r["Điểm tiềm năng"]))
+        details[tk] = {"m": m, "g": g, "gc": gc, "nm": nm, "d": daily.get(tk), "rv": rv}
+    rows.sort(key=lambda r: (-r["Điểm rà soát"], -r["Điểm tiềm năng"]))
 
     ext_rows = sorted(({"Mã": tk, "Tên": names.get(tk, tk), "RS": mets[tk]["rs"],
                         "Biểu đồ /8": mets[tk]["chart_pass"],
@@ -298,7 +309,7 @@ if res:
     k2.metric("Có xu hướng tăng", f"{res['n_trend']:,}")
     k3.metric("🔥 Loại vì chạy xa", f"{res['n_ext']:,}")
     k4.metric("Ứng viên tiềm năng", f"{res['n_cand']:,}")
-    k5.metric("🚀 Siêu CP tiềm năng", sum(1 for r in rows if r["Nhãn"].startswith("🚀")))
+    k5.metric("Hạng A (chọn mạnh)", sum(1 for r in rows if r["Xếp loại"].startswith("A")))
     st.caption(f"Tìm lúc {res['at']} · giá đóng cửa gần nhất (Naver) · "
                f"RS xếp hạng so với **{res['rs_basis']}**.")
     if not res["meta_ok"]:
@@ -329,6 +340,13 @@ if res:
                 df.insert(df.columns.get_loc("Giá") + 1, "Giá Toss",
                           [prices.get(t) for t in df["Mã"]])
                 df["Cảnh báo Toss"] = [", ".join(warns.get(t, [])) for t in df["Mã"]]
+                for i, t in enumerate(df["Mã"]):
+                    if t in warns:
+                        dt_ = details[t]
+                        rv2 = G.review(dt_["m"], dt_["g"], dt_["nm"], rev_th, np_th, warns[t])
+                        df.at[i, "Điểm rà soát"] = rv2["score"]
+                        df.at[i, "Xếp loại"] = f"{rv2['grade']} · {rv2['grade_txt']}"
+                        df.at[i, "Rủi ro chính"] = rv2["cons"][-1]
                 if warns:
                     st.warning(f"⚠️ {len(warns)} mã đang bị sàn cảnh báo — xem cột 'Cảnh báo Toss'.")
 
@@ -337,8 +355,12 @@ if res:
             column_config={
                 "Mã": st.column_config.TextColumn(pinned=True),
                 "Tên": st.column_config.TextColumn(pinned=True),
+                "Điểm rà soát": st.column_config.ProgressColumn(
+                    min_value=0, max_value=100, format="%d"),
                 "Điểm tiềm năng": st.column_config.ProgressColumn(
                     min_value=0, max_value=100, format="%d"),
+                "Vì sao chọn": st.column_config.TextColumn(width="large"),
+                "Rủi ro chính": st.column_config.TextColumn(width="medium"),
                 "Tăng trưởng %": st.column_config.ProgressColumn(
                     min_value=0, max_value=100, format="%d%%"),
                 "Tin tức %": st.column_config.ProgressColumn(
@@ -362,10 +384,29 @@ if res:
     # ------------------------------------------------ chi tiết
     if rows:
         st.subheader("🔎 Chi tiết 1 mã")
-        pick = st.selectbox("Chọn mã", [f"{r['Mã']} · {r['Tên']} · {r['Nhãn']}" for r in rows])
+        pick = st.selectbox("Chọn mã", [f"{r['Mã']} · {r['Tên']} · {r['Xếp loại']}" for r in rows])
         tk = pick.split(" · ")[0]
         dt = details[tk]
         m, g, gc, nm, d = dt["m"], dt["g"], dt["gc"], dt["nm"], dt["d"]
+
+        rv = dt["rv"]
+        st.markdown("#### 🧾 Vì sao mã này được chọn?")
+        r1, r2 = st.columns([1, 3])
+        r1.metric("Điểm rà soát", f"{rv['score']}/100", f"Hạng {rv['grade']} · {rv['grade_txt']}",
+                  delta_color="off")
+        r2.info(rv["summary"])
+        st.dataframe(pd.DataFrame(rv["parts"]), hide_index=True, width="stretch",
+                     column_config={"Diễn giải": st.column_config.TextColumn(width="large")})
+        p1, p2 = st.columns(2)
+        with p1:
+            st.markdown("**✅ Điểm cộng**")
+            for x in rv["pros"] or ["—"]:
+                st.write("• " + x)
+        with p2:
+            st.markdown("**⚠️ Điểm trừ / rủi ro**")
+            for x in rv["cons"] or ["Không phát hiện rủi ro theo bộ quy tắc"]:
+                st.write("• " + x)
+        st.divider()
 
         mt = m["meta"]
         st.markdown(f"**Giai đoạn: {m['stage']}** — {'; '.join(m['stage_why'])} · "

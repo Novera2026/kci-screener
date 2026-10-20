@@ -167,7 +167,9 @@ def chart_metrics(d: dict) -> Optional[dict]:
         return 100 - 100 / (1 + gains / losses)
     prior_hi = max(h[-60:-10]) if n >= 60 else None   # đỉnh nền trước đó (bỏ 10 phiên gần)
     breakout_ext = ((price / prior_hi - 1) * 100) if prior_hi else None
+    avg_val20 = sum(c[i] * v[i] for i in range(n - 20, n)) / 20 / 1e8   # 억원/phiên
     return {
+        "avg_val20": avg_val20,
         "ext_ma50": (price / ma50 - 1) * 100 if ma50 else None,
         "ext_ma200": (price / ma200 - 1) * 100 if ma200 else None,
         "ret_1m": ret(21) * 100,
@@ -304,7 +306,8 @@ def meta_for(tk: str, themes_of: dict, ind_of: dict, theme_rank: dict,
         why = f"{best[0]} (chủ đề #{best[1]['rank']})"
     else:
         why = f"{ind} (ngành #{ir['rank']})" if ir else "—"
-    return {"in_meta": in_meta, "meta_pct": pct, "why": why,
+    via = "theme" if theme_hit else ("industry" if ind_hit else None)
+    return {"in_meta": in_meta, "meta_pct": pct, "why": why, "via": via,
             "theme": best[0] if best else None,
             "theme_rank": best[1]["rank"] if best else None,
             "ind": ind, "ind_rank": ir["rank"] if ir else None}
@@ -430,6 +433,163 @@ def news_metrics(items: list[dict], today: Optional[_dt.date] = None) -> dict:
                      "Tin tích cực > tiêu cực (30 ngày)": pos > neg,
                      "Được chú ý: ≥ 3 tin trong 7 ngày": n7 >= 3},
             "items": items[:10]}
+
+
+# ----------------------------------------------------------------------------
+# Lớp RÀ SOÁT: vì sao mã được chọn + chấm điểm lựa chọn (thang 100, minh bạch)
+# ----------------------------------------------------------------------------
+SEVERE_KW = ["유상증자", "전환사채", "신주인수권부사채", "소송", "횡령", "배임", "감사의견",
+             "거래정지", "상장폐지", "불성실공시", "관리종목", "투자주의환기"]
+GRADES = [(80, "A", "Chọn mạnh"), (65, "B", "Đáng cân nhắc"),
+          (50, "C", "Theo dõi thêm"), (0, "D", "Yếu — cân nhắc loại")]
+
+
+def grade_of(score: float) -> tuple[str, str]:
+    for th, g, txt in GRADES:
+        if score >= th:
+            return g, txt
+    return "D", GRADES[-1][2]
+
+
+def review(m: dict, g: dict, nm: dict, rev_th: float = 25, np_th: float = 25,
+           toss_warn: Optional[list] = None) -> dict:
+    """Rà soát 1 mã đã qua bộ lọc: cộng điểm theo 6 hạng mục (tối đa 100) rồi TRỪ điểm
+    cho rủi ro (tăng trưởng nền thấp, LN không đến từ doanh thu, tin xấu nghiêm trọng,
+    thanh khoản kém, dấu hiệu phân phối, đang nóng, bị sàn cảnh báo).
+    → {score, grade, grade_txt, parts[], pros[], cons[], summary}."""
+    parts, pros, cons = [], [], []
+
+    def add(name, pts, mx, why):
+        parts.append({"Hạng mục": name, "Điểm": round(max(pts, 0), 1), "Tối đa": mx,
+                      "Diễn giải": why})
+        return max(pts, 0)
+
+    total = 0.0
+    # 1) Xu hướng giá (25)
+    cp, rs = m.get("chart_pass", 0), m.get("rs") or 0
+    total += add("Xu hướng giá", cp / 8 * 20 + (5 if rs >= 90 else 3 if rs >= 80 else 0), 25,
+                 f"{cp}/8 tiêu chí Trend Template · RS {rs}")
+    if cp >= 7:
+        pros.append((7, f"xu hướng tăng chuẩn ({cp}/8 tiêu chí)"))
+    if rs >= 90:
+        pros.append((8, f"giá mạnh hơn {rs}% thị trường (RS {rs})"))
+
+    # 2) Điểm vào — chưa giãn (20)
+    stg = m.get("stage", "")
+    pts = 15 if stg.startswith("🌱") else 7 if stg.startswith("🌿") else 0
+    tight = m.get("tight")
+    if m.get("near_pivot"):
+        pts += 5
+    elif tight is not None and tight <= 0.5:
+        pts += 3
+    e50 = m.get("ext_ma50")
+    total += add("Điểm vào (chưa giãn)", pts, 20,
+                 f"{stg} · cách MA50 {e50:+.0f}%" + (f" · nền siết {tight:.2f}"
+                                                     if tight is not None else ""))
+    if stg.startswith("🌱"):
+        pros.append((5, "còn gần nền giá, chưa chạy xa"))
+    elif stg.startswith("🌿"):
+        cons.append("đã rời nền (" + "; ".join(m.get("stage_why", [])) + ") — dư địa ít hơn")
+    if m.get("near_pivot"):
+        pros.append((4, "sát điểm mua (gần đỉnh 52T + nền chặt)"))
+
+    # 3) Tăng trưởng (25)
+    ry, ny = g.get("rev_yoy"), g.get("np_yoy")
+    opm_now, opm_ya = g.get("opm_now"), g.get("opm_ya")
+    pts = 0
+    if ry is not None:
+        pts += 10 if ry >= 50 else 8 if ry >= rev_th else 3 if ry > 0 else 0
+    if ny is not None:
+        pts += 10 if ny >= 50 else 8 if ny >= np_th else 3 if ny > 0 else 0
+    if opm_now is not None and opm_ya is not None and opm_now > opm_ya:
+        pts += 3
+    if (g.get("np_fwd") or -1) > 0:
+        pts += 2
+
+    def _p(x):
+        return "lỗ→lãi" if x == float("inf") else (">+999%" if x > 999 else f"{x:+.0f}%")
+    total += add("Tăng trưởng DT/LN", min(pts, 25), 25,
+                 f"DT quý {_p(ry) if ry is not None else '—'} · LN quý "
+                 f"{_p(ny) if ny is not None else '—'} so cùng kỳ"
+                 + (f" · biên LN HĐ {opm_ya:.0f}%→{opm_now:.0f}%"
+                    if opm_now is not None and opm_ya is not None else ""))
+    if ry is not None and ry >= rev_th:
+        pros.append((1, f"doanh thu quý tăng {_p(ry)} so cùng kỳ"))
+    if ny is not None and ny >= np_th:
+        pros.append((2, f"lợi nhuận quý {_p(ny)} so cùng kỳ"))
+
+    # 4) Meta (15)
+    mt = m.get("meta") or {}
+    if mt.get("in_meta") is None:
+        pts, why = 7, "chưa xác định meta (cần quét toàn sàn)"
+    elif mt.get("via") == "theme":
+        pts, why = 15, f"thuộc nhóm dẫn dắt: {mt.get('why')}"
+    elif mt.get("via") == "industry":
+        pts, why = 10, f"ngành mạnh: {mt.get('why')}"
+    else:
+        pts, why = round((mt.get("meta_pct") or 0) / 100 * 5), f"ngoài meta: {mt.get('why')}"
+    total += add("Meta (nhóm dẫn dắt)", pts, 15, why)
+    if mt.get("via"):
+        pros.append((3, why))
+    elif mt.get("in_meta") is False:
+        cons.append("không thuộc nhóm đang dẫn dắt")
+
+    # 5) Tin tức (10)
+    pos, neg, n7 = nm.get("pos", 0), nm.get("neg", 0), nm.get("n7", 0)
+    total += add("Tin tức / xúc tác", (5 if pos >= 1 else 0) + (3 if pos > neg else 0)
+                 + (2 if n7 >= 3 else 0), 10, f"+{pos} tích cực / −{neg} tiêu cực (30 ngày) · "
+                 f"{n7} tin/7 ngày")
+    pos_titles = [it["title"] for it in nm.get("items", []) if it.get("tag", 0) > 0]
+    if pos_titles:
+        pros.append((6, f"có xúc tác: “{pos_titles[0][:45]}”"))
+
+    # 6) Dòng tiền (5)
+    ud = m.get("ud_ratio")
+    total += add("Dòng tiền (tích lũy KL)", 5 if ud and ud >= 1.2 else 2 if ud and ud >= 1.0
+                 else 0, 5, f"KL ngày tăng / ngày giảm = {ud:.2f}" if ud else "—")
+    if ud and ud >= 1.2:
+        pros.append((9, "khối lượng ngày tăng áp đảo (đang được gom)"))
+
+    # --- Điểm trừ (rủi ro) ---
+    def ded(pts, why):
+        nonlocal total
+        total += pts
+        cons.append(why)
+        parts.append({"Hạng mục": "⚠️ Trừ điểm", "Điểm": pts, "Tối đa": 0, "Diễn giải": why})
+
+    if ny == float("inf") or (ny is not None and ny > 500):
+        ded(-5, "LN tăng đột biến từ nền thấp / vừa chuyển lãi — cần quý sau xác nhận")
+    if ry is not None and ny is not None and ry < 10 and ny > 50:
+        ded(-5, "LN tăng mạnh nhưng doanh thu gần như đứng yên — có thể do khoản bất thường")
+    if opm_now is not None and opm_ya is not None and opm_now < opm_ya:
+        ded(-3, f"biên LN HĐ thu hẹp ({opm_ya:.0f}% → {opm_now:.0f}%)")
+    if ry is None and ny is None:
+        ded(-5, "thiếu số liệu quý để xác nhận tăng trưởng")
+    severe = [it["title"] for it in nm.get("items", [])
+              if any(k in it["title"] for k in SEVERE_KW)]
+    if severe:
+        ded(-10, f"tin rủi ro nghiêm trọng: “{severe[0][:45]}”")
+    elif neg > pos:
+        ded(-5, "tin tiêu cực nhiều hơn tích cực (30 ngày)")
+    rsi = m.get("rsi14")
+    if rsi is not None and rsi > 70:
+        ded(-3, f"RSI {rsi:.0f} — đang nóng ngắn hạn, dễ rung lắc")
+    if ud is not None and ud < 0.8:
+        ded(-5, "khối lượng ngày giảm lớn hơn ngày tăng — dấu hiệu phân phối")
+    av = m.get("avg_val20")
+    if av is not None and av < 10:
+        ded(-5, f"thanh khoản thấp (~{av:.0f}억/phiên) — khó mua/bán khối lượng lớn")
+    if toss_warn:
+        ded(-15, "sàn đang cảnh báo: " + ", ".join(toss_warn))
+
+    pros = [t for _, t in sorted(pros, key=lambda x: x[0])]   # lý do đặc trưng trước
+    score = max(0.0, min(100.0, total))
+    gr, gtxt = grade_of(score)
+    summary = ("Được chọn vì " + "; ".join(pros[:3]) + "." if pros else "Ít điểm mạnh nổi bật.")
+    if cons:
+        summary += " Cần lưu ý: " + "; ".join(cons[:3]) + "."
+    return {"score": round(score), "grade": gr, "grade_txt": gtxt, "parts": parts,
+            "pros": pros, "cons": cons, "summary": summary}
 
 
 # ----------------------------------------------------------------------------
