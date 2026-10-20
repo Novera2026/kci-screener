@@ -128,8 +128,12 @@ def _fmt_pct(x):
 
 # ---------------------------------------------------------------- điều khiển
 c1, c2, c3 = st.columns([2, 1.4, 1.2])
-scope = c1.radio("Phạm vi tìm", ["Toàn sàn (lọc vốn hóa)", "Danh sách ở trang chính",
-                                 "Nhập tay"], horizontal=True)
+_handoff = st.session_state.get("handoff_list")          # gửi từ trang 📰 Tin nóng
+_opts = ["Toàn sàn (lọc vốn hóa)", "Danh sách ở trang chính", "Nhập tay"]
+if _handoff:
+    _opts.append(f"Từ trang Tin nóng: {_handoff['label']}")
+scope = c1.radio("Phạm vi tìm", _opts, horizontal=True,
+                 index=len(_opts) - 1 if _handoff else 0)
 markets = c2.multiselect("Sàn", ["KOSPI", "KOSDAQ"], default=["KOSPI", "KOSDAQ"])
 min_cap = c3.number_input("Vốn hóa tối thiểu (억)", 100, 1_000_000, 1000, 500,
                           help="1.000억 ≈ 1 nghìn tỷ won. Bỏ mã quá nhỏ, thanh khoản kém.")
@@ -169,8 +173,12 @@ if run:
             st.stop()
         uni = _universe(float(min_cap), tuple(markets))
     else:
-        raw = (st.session_state.get("raw_input", "") if scope == "Danh sách ở trang chính"
-               else manual)
+        if scope == "Danh sách ở trang chính":
+            raw = st.session_state.get("main_list") or st.session_state.get("raw_input", "")
+        elif scope.startswith("Từ trang Tin nóng") and _handoff:
+            raw = "\n".join(_handoff["tickers"])
+        else:
+            raw = manual
         qs = [x.strip() for x in raw.replace(",", "\n").splitlines() if x.strip()]
         uni = []
         for q in qs:

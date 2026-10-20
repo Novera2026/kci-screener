@@ -118,7 +118,7 @@ with st.sidebar:
 
 # ---- Danh mục cổ phiếu (browse theo ngành / chủ đề, giống Naver) ----
 if "raw_input" not in st.session_state:
-    st.session_state["raw_input"] = "삼성전자\nSK Hynix\n005490\nHyundai Motor"
+    st.session_state["raw_input"] = st.session_state.get("main_list") or "삼성전자\nSK Hynix\n005490\nHyundai Motor"
 
 
 # map tra cứu nhanh (tránh lọc df 4.4k dòng mỗi lần render multiselect)
@@ -287,6 +287,9 @@ with col1:
         "Danh sách mã (mỗi dòng 1 mã — tên Hàn/Anh hoặc ticker đều được)",
         height=160, key="raw_input",
     )
+    # Bản sao KHÔNG gắn widget: Streamlit xóa state của ô nhập khi chuyển trang,
+    # các trang khác (🚀 Siêu cổ phiếu) đọc danh sách qua khóa này.
+    st.session_state["main_list"] = raw
 with col2:
     st.write("")
     st.write("")

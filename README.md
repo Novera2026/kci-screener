@@ -179,3 +179,11 @@ Trang **Sieu co phieu** trong thanh điều hướng quét cổ phiếu đang c�
 
 **Rà soát lựa chọn** (lớp kiểm tra cuối, 0–100, hạng A/B/C/D): mỗi mã có câu giải thích *vì sao được chọn* và bảng điểm từng hạng mục (Xu hướng 25 · Điểm vào 20 · Tăng trưởng 25 · Meta 15 · Tin 10 · Dòng tiền 5), trừ điểm rủi ro: LN đột biến từ nền thấp, LN tăng mà DT đứng yên, biên LN thu hẹp, tin nghiêm trọng (유상증자/전환사채/소송/횡령…), RSI > 70, dấu hiệu phân phối, thanh khoản < 10억/phiên, bị sàn cảnh báo (Toss). A ≥ 80 Chọn mạnh · B ≥ 65 Đáng cân nhắc · C ≥ 50 Theo dõi · D Yếu. Quét toàn sàn (vốn hóa ≥ 1.000억, ~1.300 mã) mất khoảng 1 phút, theo 2 bước: lọc biểu đồ toàn bộ → phân tích sâu N mã mạnh nhất.
 Toss (tùy chọn): giá realtime + cảnh báo mã của sàn (투자경고, 단기과열, VI…). Toss **không** có tin tức hay BCTC nên các phần đó lấy từ Naver.
+
+## 📰 Tin nóng & chủ đề dẫn dắt (trang riêng)
+
+Trang **Tin nong** (logic ở `hotnews.py`) theo dõi realtime, **tự làm mới** theo chu kỳ 3–15 phút:
+
+- **🔥 Chủ đề nóng** — xếp hạng 264 chủ đề Naver theo % tăng hôm nay, độ rộng (% mã cùng tăng), mã dẫn đầu; xem từng chủ đề: mô tả, thành viên + lý do thuộc chủ đề, tin của chủ đề; nút **gửi cả chủ đề sang trang 🚀 Siêu cổ phiếu** để lọc.
+- **⭐ Tin giá trị cao** — gom tin nhanh / tin chính / tin đọc nhiều + tin của các mã dẫn đầu, **chấm điểm giá trị 0–100**: 🟢 xúc tác mạnh (hợp đồng, kết quả kỷ lục, chuyển lãi, phê duyệt, M&A, 상한가) · 🔴 rủi ro (유상증자, CB, kiện tụng) · 🔵 phân tích · ⚪ tin chung/thị trường; cộng điểm khi là 특징주, có số tiền, thuộc chủ đề nóng, mới ≤ 3 giờ. Nhận diện mã theo ranh giới từ tiếng Hàn (không nhầm "하이브리드" thành 하이브).
+- **📢 Công bố DART** — công bố chính thức của DN niêm yết, chỉ giữ loại có giá trị (hợp đồng cung cấp, kết quả sơ bộ, chuyển giao công nghệ, cấp phép, cổ phiếu quỹ, M&A…) và rủi ro (phát hành thêm, CB/BW, tham ô, xem xét niêm yết…), kèm % giá hôm nay.
