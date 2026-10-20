@@ -123,7 +123,8 @@ def chart_metrics(d: dict) -> Optional[dict]:
     price = c[-1]
     ma50, ma150, ma200 = _sma(c, 50), _sma(c, 150), _sma(c, 200)
     ma200_1m = _sma(c, 200, end_offset=22)
-    hi52, lo52 = max(h[-252:]), min(lo[-252:])
+    hi52 = max(h[-252:])
+    lo52 = min((x for x in lo[-252:] if x > 0), default=None)   # bỏ phiên giá 0 (ngừng GD)
 
     crit = {
         CHART_CRITERIA[0]: price > ma150 and price > ma200,
@@ -131,7 +132,7 @@ def chart_metrics(d: dict) -> Optional[dict]:
         CHART_CRITERIA[2]: ma200_1m is not None and ma200 > ma200_1m,
         CHART_CRITERIA[3]: ma50 > ma150 and ma50 > ma200,
         CHART_CRITERIA[4]: price > ma50,
-        CHART_CRITERIA[5]: price >= 1.3 * lo52,
+        CHART_CRITERIA[5]: lo52 is not None and price >= 1.3 * lo52,
         CHART_CRITERIA[6]: price >= 0.75 * hi52,
     }
 
@@ -153,7 +154,25 @@ def chart_metrics(d: dict) -> Optional[dict]:
     tight = r10 / r50 if (r10 is not None and r50) else None
 
     vol50 = sum(v[-50:]) / 50 if n >= 50 else None
+
+    # --- Độ giãn (đã chạy bao xa) ---
+    def rsi(xs, k=14):                      # RSI Wilder
+        gains = losses = 0.0
+        for i in range(len(xs) - k, len(xs)):
+            ch = xs[i] - xs[i - 1]
+            gains += max(ch, 0)
+            losses += max(-ch, 0)
+        if losses == 0:
+            return 100.0
+        return 100 - 100 / (1 + gains / losses)
+    prior_hi = max(h[-60:-10]) if n >= 60 else None   # đỉnh nền trước đó (bỏ 10 phiên gần)
+    breakout_ext = ((price / prior_hi - 1) * 100) if prior_hi else None
     return {
+        "ext_ma50": (price / ma50 - 1) * 100 if ma50 else None,
+        "ext_ma200": (price / ma200 - 1) * 100 if ma200 else None,
+        "ret_1m": ret(21) * 100,
+        "rsi14": rsi(c),
+        "breakout_ext": breakout_ext,
         "price": price, "ma50": ma50, "ma150": ma150, "ma200": ma200,
         "hi52": hi52, "lo52": lo52,
         "pct_from_hi": (price / hi52 - 1) * 100 if hi52 else None,
@@ -191,6 +210,104 @@ def finalize_chart(m: dict, rs_min: int = 70) -> dict:
     m["near_pivot"] = (m.get("pct_from_hi") is not None and m["pct_from_hi"] >= -5
                        and m.get("tight") is not None and m["tight"] <= 0.5)
     return m
+
+
+# ----------------------------------------------------------------------------
+# Giai đoạn: lọc mã ĐÃ CHẠY QUÁ XA (rủi ro đu đỉnh)
+# ----------------------------------------------------------------------------
+DEFAULT_LIMITS = {"ext_ma50": 25.0, "from_low": 200.0, "ret_3m": 100.0, "rsi": 80.0,
+                  "mid_ext_ma50": 15.0, "mid_from_low": 100.0, "breakout": 10.0}
+
+
+def stage_of(m: dict, lim: Optional[dict] = None) -> tuple[str, list]:
+    """→ (giai đoạn, lý do).
+    🔥 Đã chạy xa: cách MA50 > 25% · tăng > 200% từ đáy 52T · +100% trong 3 tháng · RSI > 80
+    🌿 Đang chạy : cách MA50 > 15% · tăng > 100% từ đáy · đã vượt đỉnh nền > 10%
+    🌱 Sớm       : còn lại (gần nền / điểm mua — vùng rủi ro/lợi nhuận tốt nhất)."""
+    L = {**DEFAULT_LIMITS, **(lim or {})}
+    late, mid = [], []
+    e50, flo, r3, rsi = (m.get("ext_ma50"), m.get("pct_from_lo"), m.get("ret_3m"),
+                         m.get("rsi14"))
+    if e50 is not None and e50 > L["ext_ma50"]:
+        late.append(f"cách MA50 +{e50:.0f}%")
+    if flo is not None and flo > L["from_low"]:
+        late.append(f"+{flo:.0f}% từ đáy 52T")
+    if r3 is not None and r3 > L["ret_3m"]:
+        late.append(f"+{r3:.0f}% trong 3 tháng")
+    if rsi is not None and rsi > L["rsi"]:
+        late.append(f"RSI {rsi:.0f} quá mua")
+    if late:
+        return "🔥 Đã chạy xa", late
+    bo = m.get("breakout_ext")
+    if e50 is not None and e50 > L["mid_ext_ma50"]:
+        mid.append(f"cách MA50 +{e50:.0f}%")
+    if flo is not None and flo > L["mid_from_low"]:
+        mid.append(f"+{flo:.0f}% từ đáy 52T")
+    if bo is not None and bo > L["breakout"]:
+        mid.append(f"đã vượt đỉnh nền +{bo:.0f}%")
+    if mid:
+        return "🌿 Đang chạy", mid
+    return "🌱 Sớm", ["gần nền/điểm mua, chưa giãn"]
+
+
+def group_strength(mets: dict, groups: dict, min_members: int = 5,
+                   shrink: int = 5) -> dict:
+    """Sức mạnh từng nhóm (chủ đề/ngành) trên dữ liệu vừa quét.
+    raw = 50% RS trung vị + 50% độ rộng (% thành viên đạt xu hướng ≥ 6/8);
+    score = co về mức nền thị trường cho nhóm ít mã: (n·raw + k·nền)/(n + k)
+    → nhóm 3–5 mã "may mắn" không chiếm top; nhóm lớn & mạnh thật mới dẫn đầu.
+    → {nhóm: {score, med_rs, breadth, ret3m, n, rank, pct}} (pct = phân vị 0–100)."""
+    allm = [m for m in mets.values() if m]
+    base = (0.5 * 50 + 0.5 * (sum(1 for m in allm if m.get("chart_pass", 0) >= 6)
+                              / max(len(allm), 1) * 100))
+    out = {}
+    for name, tks in groups.items():
+        ms = [mets[t] for t in tks if t in mets and mets[t]]
+        if len(ms) < min_members:
+            continue
+        rs = sorted(m.get("rs") or 0 for m in ms)
+        r3 = sorted(m.get("ret_3m") or 0 for m in ms)
+        med_rs = rs[len(rs) // 2]
+        breadth = sum(1 for m in ms if m.get("chart_pass", 0) >= 6) / len(ms) * 100
+        raw = 0.5 * med_rs + 0.5 * breadth
+        n_ = len(ms)
+        out[name] = {"score": (n_ * raw + shrink * base) / (n_ + shrink), "med_rs": med_rs,
+                     "breadth": breadth, "ret3m": r3[len(r3) // 2], "n": len(ms)}
+    ranked = sorted(out, key=lambda k: -out[k]["score"])
+    for i, k in enumerate(ranked):
+        out[k]["rank"] = i + 1
+        out[k]["pct"] = round((1 - i / max(len(ranked), 1)) * 100)
+    return out
+
+
+def meta_for(tk: str, themes_of: dict, ind_of: dict, theme_rank: dict,
+             ind_rank: dict, top_k: int = 10) -> dict:
+    """Mã có thuộc nhóm DẪN DẮT (meta) không: chủ đề mạnh nhất của mã nằm top-K chủ đề,
+    hoặc ngành nằm top-5 ngành. meta_pct = phân vị sức mạnh nhóm tốt nhất (0–100)."""
+    best = None
+    for th in themes_of.get(tk, []):
+        r = theme_rank.get(th)
+        if r and (best is None or r["score"] > best[1]["score"]):
+            best = (th, r)
+    ind = ind_of.get(tk)
+    ir = ind_rank.get(ind) if ind else None
+    in_meta = bool((best and best[1]["rank"] <= top_k) or (ir and ir["rank"] <= 5))
+    pct = max([x for x in ((best[1]["pct"] if best else None),
+                           (ir["pct"] if ir else None)) if x is not None], default=None)
+    theme_hit = bool(best and best[1]["rank"] <= top_k)
+    ind_hit = bool(ir and ir["rank"] <= 5)
+    if theme_hit:
+        why = f"{best[0]} (chủ đề #{best[1]['rank']})"
+    elif ind_hit:
+        why = f"{ind} (ngành #{ir['rank']})"
+    elif best:
+        why = f"{best[0]} (chủ đề #{best[1]['rank']})"
+    else:
+        why = f"{ind} (ngành #{ir['rank']})" if ir else "—"
+    return {"in_meta": in_meta, "meta_pct": pct, "why": why,
+            "theme": best[0] if best else None,
+            "theme_rank": best[1]["rank"] if best else None,
+            "ind": ind, "ind_rank": ir["rank"] if ir else None}
 
 
 # ----------------------------------------------------------------------------
@@ -371,10 +488,13 @@ def score_pct(crit: dict) -> Optional[float]:
     return (sum(1 for v in avail if v) / len(avail) * 100) if avail else None
 
 
-def label(chart_pass: int, growth_pct: Optional[float], rs: Optional[int]) -> str:
+def label(chart_pass: int, growth_pct: Optional[float], rs: Optional[int],
+          stage: str = "🌱 Sớm", in_meta: bool = True) -> str:
     gp = growth_pct or 0
-    if chart_pass >= 7 and gp >= 80 and (rs or 0) >= 80:
-        return "🚀 Siêu tăng trưởng"
+    if stage.startswith("🔥"):
+        return "🔥 Đã chạy xa — không đuổi"
+    if chart_pass >= 7 and gp >= 80 and (rs or 0) >= 80 and in_meta:
+        return "🚀 Siêu cổ phiếu tiềm năng"
     if chart_pass >= 6 and gp >= 60:
         return "📈 Đang setup"
     return "👀 Theo dõi"
