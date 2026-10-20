@@ -165,6 +165,8 @@ def normalized_metrics(history: Optional[list]) -> dict:
         rev, op = h.get("revenue"), h.get("op_profit")
         if np_ is not None and eq:
             roes.append(np_ / eq)
+        elif h.get("roe") is not None:          # Naver không có VCSH → dùng ROE % có sẵn
+            roes.append(h["roe"] / 100.0)
         if np_ is not None and rev:
             nms.append(np_ / rev)
         if op is not None and rev:
@@ -630,6 +632,10 @@ def value_stock(row: dict, a: Assumptions,
         flags.append("entity cần data sâu hơn (DCF/SOTP/EV/rNPV) — đây chỉ là proxy")
     if used_midcycle:
         flags.append("đã chuẩn hóa earnings qua chu kỳ → tin cậy hơn trailing 1 năm")
+        if norm.get("n_years", 0) < 5:          # 3-4 năm chưa trọn 1 chu kỳ (memory ~4-5 năm)
+            conf = "Low"
+            flags.append(f"mid-cycle chỉ {norm['n_years']} năm (<5) — chưa trọn chu kỳ, "
+                         "median dễ lệch về đỉnh/đáy. Xem Chi tiết (DART nhiều năm)")
     # data gap THẬT: không có cả ROE thường lẫn mid-cycle
     if (roe is None and mid_roe is None) or (eps is not None and eps <= 0 and mid_roe is None):
         conf = "Low"
@@ -671,19 +677,47 @@ def value_stock(row: dict, a: Assumptions,
     )
 
 
-def value_batch(df, a: Assumptions, agg=None):
-    """Định giá cả DataFrame. Trả (list[ValuationResult], dict sector->median PE/PB)."""
-    import pandas as pd  # local import để module này không buộc pandas khi dùng lẻ
+MIN_PEERS = 3           # cần ≥3 mã cùng ngành mới so "vs median ngành"
+PE_CAP = 60.0           # P/E ≤0 hoặc >60 = outlier, loại khỏi median
+
+
+def peer_key(row: dict) -> Optional[str]:
+    """Khóa nhóm peer: sector EN (curated) nếu có, không thì ngành KRX (업종)."""
+    s = row.get("sector")
+    if isinstance(s, str) and s and s != "None":
+        return s
+    k = row.get("industry_kr")
+    return k if isinstance(k, str) and k else None
+
+
+def _robust_median(vals: list, lo: float = 0.0, hi: float = float("inf")) -> Optional[float]:
+    xs = [v for v in vals if v is not None and v == v and lo < v <= hi]   # v==v: bỏ NaN
+    return _median(xs) if len(xs) >= MIN_PEERS else None
+
+
+def value_batch(df, a: Assumptions, agg=None, histories: Optional[dict] = None):
+    """Định giá cả DataFrame. Trả (list[ValuationResult], dict peer_key->median PE/PB).
+
+    - Median ngành chỉ tính khi có ≥MIN_PEERS mã hợp lệ (P/E trong (0, 60], P/B > 0);
+      thiếu peer → None (không so mã với chính nó).
+    - histories: {ticker: [năm thực…]} → ngành CHU KỲ dùng mid-cycle thay trailing.
+    """
     medians: dict = {}
-    if df is not None and not df.empty and "sector" in df.columns:
-        for sec, g in df.groupby("sector", dropna=False):
-            medians[sec] = {
-                "pe": g["per"].median() if "per" in g and g["per"].notna().any() else None,
-                "pb": g["pbr"].median() if "pbr" in g and g["pbr"].notna().any() else None,
-            }
+    rows = [r.to_dict() for _, r in df.iterrows()] if df is not None else []
+    groups: dict = {}
+    for row in rows:
+        groups.setdefault(peer_key(row), []).append(row)
+    for k, g in groups.items():
+        if k is None:
+            continue
+        medians[k] = {
+            "pe": _robust_median([_num(x.get("per")) for x in g], 0.0, PE_CAP),
+            "pb": _robust_median([_num(x.get("pbr")) for x in g], 0.0),
+        }
+    histories = histories or {}
     results = []
-    for _, r in df.iterrows():
-        row = r.to_dict()
-        med = medians.get(row.get("sector"), {})
-        results.append(value_stock(row, a, med.get("pe"), med.get("pb")))
+    for row in rows:
+        med = medians.get(peer_key(row), {})
+        results.append(value_stock(row, a, med.get("pe"), med.get("pb"),
+                                   history=histories.get(row.get("ticker"))))
     return results, medians

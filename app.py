@@ -8,7 +8,6 @@ Chạy:
 Mở tự động ở http://localhost:8501
 """
 from __future__ import annotations
-import io
 import os
 import pandas as pd
 import streamlit as st
@@ -22,16 +21,16 @@ try:
 except Exception:
     pass
 
-from screener import (TickerRegistry, fetch_batch, sector_aggregates,
-                      export_excel, COLUMN_KR)
+from screener import (TickerRegistry, sector_aggregates, export_excel, COLUMN_KR)
 from valuation import (Assumptions, value_batch, value_stock, recommend_method,
-                       _cap_conf, ev_ebit_value, fcff_value)
+                       _cap_conf, ev_ebit_value, fcff_value, peer_key,
+                       effective_sector, CYCLICAL_SECTORS)
 try:
     import coverage
 except Exception:
     coverage = None
-from financials import (fetch_financials, last_n, latest_actual, forward_eps,
-                        balance_sheet, balance_sheet_of, assess_financials,
+from financials import (fetch_financials, latest_actual, forward_eps,
+                        balance_sheet_of, assess_financials,
                         build_annual_series, build_quarter_series,
                         project_forecast, project_forecast_quarter,
                         forecast_eps, LABELS_VI)
@@ -160,9 +159,9 @@ def _group_picker(tickers: list[str], key: str, label: str):
                    f"nhiều mã sẽ chậm, ~0.4s/mã).")
     sel = st.multiselect(label, tickers, default=default, format_func=_label, key=key)
     c1, c2, _ = st.columns([1, 1, 2])
-    c1.button("📋 Thay vào ô", key=key + "_rep", use_container_width=True,
+    c1.button("📋 Thay vào ô", key=key + "_rep", width="stretch",
               on_click=_load, args=(sel, False))
-    c2.button("➕ Thêm vào ô", key=key + "_add", use_container_width=True,
+    c2.button("➕ Thêm vào ô", key=key + "_add", width="stretch",
               on_click=_load, args=(sel, True))
 
 
@@ -291,8 +290,8 @@ with col1:
 with col2:
     st.write("")
     st.write("")
-    run_btn = st.button("🚀 Cào & định giá", type="primary", use_container_width=True)
-    st.button("🧹 Xóa ô", use_container_width=True, on_click=_clear)
+    run_btn = st.button("🚀 Cào & định giá", type="primary", width="stretch")
+    st.button("🧹 Xóa ô", width="stretch", on_click=_clear)
     st.caption("Mẹo: dán cả danh sách từ Excel cũng được.")
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -348,25 +347,18 @@ def _cell_fmt(v):
     return str(v)
 
 
-def _fin_table_styled(cols: list[dict], fields: list[str]):
-    """Bảng chuyển vị có MÀU: cột dự phóng nền xanh nhạt, số âm đỏ."""
-    data, fc_cols = {}, []
-    for c in cols:
-        lbl = _period_label(c)
-        data[lbl] = [c.get(f) for f in fields]
-        if c.get("is_forecast"):
-            fc_cols.append(lbl)
-    df = pd.DataFrame(data, index=[LABELS_VI.get(f, f) for f in fields])
-    df = df.where(df.notna(), "—")          # None → "—" (Streamlit grid hay hiện 'None')
-
-    def _hl_col(s):
-        return ["background-color:#eef2ff" if s.name in fc_cols else "" for _ in s]
-
-    def _neg(v):
-        return "color:#c0392b;font-weight:600" if isinstance(v, (int, float)) and v < 0 else ""
-
-    return (df.style.format(_cell_fmt, na_rep="—")
-            .apply(_hl_col, axis=0).map(_neg))
+def _styled_display(num: pd.DataFrame, col_bg: dict):
+    """Bảng hiển thị an toàn cho Arrow: mọi ô là CHUỖI đã format (None→'—'), còn màu
+    tính từ bảng SỐ gốc (nền theo cột + chữ đỏ cho số âm, căn phải).
+    Tránh lỗi ArrowInvalid khi một cột lẫn số và '—'."""
+    disp = num.map(_cell_fmt)
+    css = pd.DataFrame("text-align:right", index=num.index, columns=num.columns)
+    for c, bg in col_bg.items():
+        if c in css.columns and bg:
+            css[c] = css[c] + f";background-color:{bg}"
+    neg = num.map(lambda v: isinstance(v, (int, float)) and not pd.isna(v) and v < 0)
+    css = css.where(~neg, css + ";color:#c0392b;font-weight:600")
+    return disp.style.apply(lambda _: css, axis=None)
 
 
 def _fin_table_combined(annual_cols: list[dict], quarter_cols: list[dict],
@@ -398,71 +390,12 @@ def _fin_table_combined(annual_cols: list[dict], quarter_cols: list[dict],
     _add(annual_cols, "Y")
     _add(quarter_cols, "Q")
     df = pd.DataFrame(data, index=[LABELS_VI.get(f, f) for f in fields])
-    df = df.where(df.notna(), "—")          # None → "—" (tránh Streamlit hiện 'None')
-
-    def _hl_col(s):
-        if s.name in fc_cols:
-            return ["background-color:#eef2ff" for _ in s]      # dự phóng: xanh
-        if s.name in year_cols:
-            return ["background-color:#fafafa" for _ in s]      # cột năm: xám nhạt
-        return ["" for _ in s]                                   # cột quý: trắng
-
-    def _neg(v):
-        return "color:#c0392b;font-weight:600" if isinstance(v, (int, float)) and v < 0 else ""
-
-    return (df.style.format(_cell_fmt, na_rep="—")
-            .apply(_hl_col, axis=0).map(_neg))
+    bg = {c: "#fafafa" for c in year_cols}          # cột năm: xám nhạt; quý: trắng
+    bg.update({c: "#eef2ff" for c in fc_cols})      # dự phóng: xanh
+    return _styled_display(df, bg)
 
 
 # ---- màu cho bảng chính ----
-def _c_debt(v):
-    if v is None or pd.isna(v):
-        return ""
-    if v < 100:
-        return "background-color:#d7f5dd"
-    if v < 200:
-        return "background-color:#fff3cd"
-    return "background-color:#f8d7da"
-
-
-def _c_d2a(v):          # Nợ / Tổng tài sản (%): <50 an toàn · <70 vừa · ≥70 rủi ro
-    if v is None or pd.isna(v):
-        return ""
-    if v < 50:
-        return "background-color:#d7f5dd"
-    if v < 70:
-        return "background-color:#fff3cd"
-    return "background-color:#f8d7da"
-
-
-def _c_roe(v):
-    if v is None or pd.isna(v):
-        return ""
-    if v >= 15:
-        return "background-color:#b7e9c4"
-    if v >= 10:
-        return "background-color:#d7f5dd"
-    if v < 0:
-        return "background-color:#f8d7da"
-    return ""
-
-
-def _c_tag(v):
-    if not isinstance(v, str):
-        return ""
-    if "Rẻ" in v or "🟢" in v or "An toàn" in v:
-        return "background-color:#d7f5dd"
-    if "Đắt" in v or "🔴" in v or "thận trọng" in v:
-        return "background-color:#f8d7da"
-    if "Trung bình" in v or "🟡" in v:
-        return "background-color:#fff3cd"
-    return ""
-
-
-def _c_neg(v):
-    return "color:#c0392b;font-weight:600" if isinstance(v, (int, float)) and v < 0 else ""
-
-
 def _c_upside(v):
     """Nền theo upside: 🟢 hấp dẫn · 🟡 cao bất thường (nghi méo/chu kỳ) · 🔴 đắt."""
     if v is None or pd.isna(v):
@@ -638,9 +571,18 @@ if "screen" in st.session_state:
                 if "industry_kr" in df.columns else df["sector"])
     _per_clean = df["per"].where((df["per"] > 0) & (df["per"] <= PE_CAP))
     med = _per_clean.groupby(_eff_sec).transform("median")
+    # CHỈ so sánh khi ngành có ≥3 mã hợp lệ trong danh sách — 1-2 mã thì median chính
+    # là bản thân mã → "Ngang ngành"/0% giả. Thiếu peer → để trống, không bịa.
+    MIN_PEERS = 3
+    _npeer = _per_clean.groupby(_eff_sec).transform("count")
+    med = med.where(_npeer >= MIN_PEERS)
     def _tag(per, m):
-        if per is None or m is None or pd.isna(per) or pd.isna(m):
+        if per is None or pd.isna(per):
             return ""
+        if per <= 0:
+            return "· P/E âm (lỗ)"           # mã lỗ: P/E âm KHÔNG có nghĩa "rẻ"
+        if m is None or pd.isna(m):
+            return "· <3 mã cùng ngành"
         if per < m * 0.85:
             return "🟢 Rẻ vs ngành"
         if per > m * 1.15:
@@ -709,7 +651,6 @@ if "screen" in st.session_state:
         "Tỷ suất CT %": df["div_yield"].values,
     })
 
-    color_cols = {}        # tên cột -> hàm màu
     if enrich:
         rev, opp, net, roe, debt = [], [], [], [], []
         assets, liab, d2a, epsf, rating = [], [], [], [], []
@@ -747,9 +688,6 @@ if "screen" in st.session_state:
         disp["Nợ/TS %"] = d2a
         disp["EPS dự tính"] = epsf
         disp["Đánh giá"] = rating
-        color_cols.update({"ROE %": _c_roe, "Nợ/VCSH %": _c_debt, "Nợ/TS %": _c_d2a,
-                           "Đánh giá": _c_tag, "LN HĐ (억)": _c_neg,
-                           "LN thuần (억)": _c_neg})
 
     # ---- Cột tài chính theo KỲ: 3 NĂM + 4 QUÝ — nguồn Naver (đã cache, KHÔNG gọi DART) ----
     _ts_fmt: dict = {}
@@ -824,8 +762,6 @@ if "screen" in st.session_state:
 
     disp["Định giá"] = df["valuation_tag"].values
     disp["Nguồn"] = df["source"].values
-    color_cols.update({"Định giá": _c_tag, "% so đỉnh": _c_neg, "EPS": _c_neg,
-                       "Upside P/E %": _c_neg})
 
     fmt = {"Giá": "{:,.0f}", "% so đỉnh": "{:+.1f}", "Vốn hóa (억)": "{:,.0f}",
            "P/E": "{:.2f}", "P/B": "{:.2f}", "EPS": "{:,.0f}", "BPS": "{:,.0f}",
@@ -878,7 +814,7 @@ if "screen" in st.session_state:
     # ghim cột Mã + Tên để cuộn ngang vẫn theo dõi được
     col_cfg = {"Mã": st.column_config.Column(pinned=True),
                "Tên": st.column_config.Column(pinned=True, width="medium")}
-    st.dataframe(sty, use_container_width=True, hide_index=True, column_config=col_cfg)
+    st.dataframe(sty, width="stretch", hide_index=True, column_config=col_cfg)
     st.caption("📌 Cột Mã + Tên được ghim (cuộn ngang vẫn thấy). 🟢 tốt/rẻ · 🟡 trung bình · "
                "🔴 đắt/rủi ro. Vốn hóa, LN, Tài sản, Nợ đơn vị 억원 (×100 triệu KRW). "
                "Cân đối lấy số gốc DART nếu có .env key, nếu không là ước tính.")
@@ -891,14 +827,25 @@ if "screen" in st.session_state:
     # ---- Aggregate ngành ----
     st.subheader("🏭 Chỉ số toàn ngành")
     st.caption("agg_P/E = ΣVốn hóa / ΣLN ròng (chuẩn) — median để tham chiếu.")
-    st.dataframe(agg, use_container_width=True, hide_index=True)
+    st.dataframe(agg, width="stretch", hide_index=True)
 
     # ---- Định giá ----
     st.subheader("💰 Định giá")
     st.caption("Intrinsic làm base, multiples chỉ cross-check (KCI Valuation Spec §2/§8). "
-               "Fair value = số quá khứ; **Fwd upside** = theo EPS/ROE dự phóng (công thức). "
+               "Fair value = số quá khứ (ngành **chu kỳ** dùng ROE **mid-cycle** median nhiều năm, không dùng EPS đỉnh); **Fwd upside** = theo EPS/ROE dự phóng. So 'vs ngành' cần ≥3 mã cùng ngành. "
                "Đổi giả định ở sidebar là cập nhật ngay.")
-    val_results, _med = value_batch(df, assume)
+    # Ngành CHU KỲ: nạp lịch sử năm (Naver, đã cache) → Fair value dùng mid-cycle ROE
+    # thay cho trailing 1 năm/DCF-earnings trên EPS đỉnh. (Chi tiết 1 mã: tới 6 năm DART.)
+    _ikv = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
+    _hist_map = {}
+    for _tk, _s, _ik in zip(df["ticker"], df["sector"], _ikv):
+        if effective_sector(_s if isinstance(_s, str) else None,
+                            _ik if isinstance(_ik, str) else None) in CYCLICAL_SECTORS:
+            try:
+                _hist_map[_tk] = [c for c in _fin(_tk)["annual"] if not c.get("is_consensus")]
+            except Exception:
+                pass
+    val_results, _med = value_batch(df, assume, histories=_hist_map)
     vdf = pd.DataFrame([r.to_dict() for r in val_results])
     VAL_KR = {
         "ticker": "Mã", "name": "Tên", "sector": "Ngành", "price": "Giá",
@@ -912,7 +859,6 @@ if "screen" in st.session_state:
     vsum.columns = [VAL_KR.get(c, c) for c in summary_cols]
 
     # ---- Tùy chọn: EV/EBIT + FCFF qua DART (số gốc, chậm thêm ~1 gọi/mã) ----
-    _adv_cols = []
     adv_detail = {}          # ticker -> {fv_ev, fv_fcff, ev_ebit, net_debt, fcff0}
     if not dart_unavailable:
         adv = st.checkbox("🏗️ Thêm EV/EBIT + FCFF (số gốc DART — chậm thêm ~1 gọi/mã)",
@@ -961,7 +907,7 @@ if "screen" in st.session_state:
             for x in rec:
                 if x.get("ev_ebit") and 0 < x["ev_ebit"] <= 40:   # loại outlier
                     byk[x["sec"]].append(x["ev_ebit"])
-            med_ev = {k: _stt.median(v) for k, v in byk.items() if v}
+            med_ev = {k: _stt.median(v) for k, v in byk.items() if len(v) >= MIN_PEERS}   # ≥3 peer
             evb, ev_up, fc_up = [], [], []
             for x in rec:
                 m = med_ev.get(x["sec"])
@@ -982,8 +928,7 @@ if "screen" in st.session_state:
             vsum["EV/EBIT"] = evb
             vsum["Upside EV/EBIT %"] = ev_up
             vsum["Upside FCFF %"] = fc_up
-            _adv_cols = ["EV/EBIT", "Upside EV/EBIT %", "Upside FCFF %"]
-            st.caption("EV = Vốn hóa + Nợ ròng (DART). **EV/EBIT** so median ngành (loại outlier); "
+            st.caption("EV = Vốn hóa + Nợ ròng (DART). **EV/EBIT** so median ngành (loại outlier, cần ≥3 mã cùng ngành); "
                        "**FCFF** = CFO + lãi×(1−thuế) − CapEx, chiết khấu WACC. Dùng EBIT (DART "
                        "không tách khấu hao). Đóng tàu net-cash nên EV/EBIT thường thấp = rẻ.")
 
@@ -1007,7 +952,7 @@ if "screen" in st.session_state:
         vsty = vsty.map(_c_conf, subset=["Độ tin cậy"])
     if "EV/EBIT" in vsum.columns:
         vsty = vsty.map(_c_evebit, subset=["EV/EBIT"])
-    st.dataframe(vsty, use_container_width=True, hide_index=True)
+    st.dataframe(vsty, width="stretch", hide_index=True)
     st.caption(
         "🎨 **Chú thích màu** (các cột Upside): 🟢 xanh = **hấp dẫn** (định giá cao hơn "
         "giá +15…60%) · 🟡 vàng = **upside >60%, cẩn trọng** (dễ do số liệu méo/chu kỳ) · "
@@ -1030,7 +975,7 @@ if "screen" in st.session_state:
                     r.ticker, _fin(r.ticker)["annual"],
                     drow.get("market_cap"), drow.get("price"), years=6)
                  if not c.get("is_consensus")]
-        _m = _med.get(drow.get("sector"), {}) if isinstance(_med, dict) else {}
+        _m = _med.get(peer_key(drow), {}) if isinstance(_med, dict) else {}
         if _hist:
             r = value_stock(drow, assume, _m.get("pe"), _m.get("pb"), history=_hist)
     except Exception:
@@ -1083,7 +1028,7 @@ if "screen" in st.session_state:
         [{"Phương pháp": k, "Fair value": (round(v) if v else None),
           "Upside %": (round((v / r.price - 1) * 100, 1) if (v and r.price) else None)}
          for k, v in _all_methods.items()])
-    st.dataframe(method_tbl, use_container_width=True, hide_index=True)
+    st.dataframe(method_tbl, width="stretch", hide_index=True)
     if _ad:
         e1, e2, e3, e4 = st.columns(4)
         e1.metric("EV/EBIT", f"{_ad['ev_ebit']:.1f}" if _ad.get("ev_ebit") else "—")
@@ -1110,7 +1055,7 @@ if "screen" in st.session_state:
                 [{"Mảng/Công ty con": "", "Mã niêm yết": "", "% sở hữu": 100.0,
                   "Giá trị (억) — nếu chưa niêm yết": None}])
         edited = st.data_editor(st.session_state[_sotp_key], num_rows="dynamic",
-                                use_container_width=True, key=_sotp_key + "_ed",
+                                width="stretch", key=_sotp_key + "_ed",
                                 column_config={
                                     "% sở hữu": st.column_config.NumberColumn(
                                         format="%.1f", min_value=0.0, max_value=100.0)})
@@ -1144,7 +1089,7 @@ if "screen" in st.session_state:
             nav = gav - (ndebt or 0)
             sotp_eq = nav * (1 - disc)
             fair_ps = sotp_eq * 1e8 / shares if (shares and sotp_eq > 0) else None
-            st.dataframe(pd.DataFrame(parts), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(parts), width="stretch", hide_index=True)
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Tổng giá trị mảng (억)", f"{round(gav):,}")
             m2.metric("Nợ ròng holdco (억)",
@@ -1203,7 +1148,7 @@ if "screen" in st.session_state:
             _fin_table_combined(annual_series,
                                 build_quarter_series(fin["quarter"], mc, px, 4),
                                 fields),
-            use_container_width=True)
+            width="stretch")
 
         # --- Đánh giá cân đối theo tiêu chuẩn đầu tư ---
         asmt = assess_financials(fin["annual"], drow.get("sector"),
@@ -1212,7 +1157,7 @@ if "screen" in st.session_state:
         chk = pd.DataFrame([{"Tiêu chí": c["name"], "Giá trị": c["value"],
                              "": c["verdict"], "Ghi chú": c["note"]}
                             for c in asmt["checks"]])
-        st.dataframe(chk, use_container_width=True, hide_index=True)
+        st.dataframe(chk, width="stretch", hide_index=True)
 
     # ---- Download Excel (kèm sheet "Bảng" đúng như màn hình) ----
     tmp = "kci_screen_output.xlsx"
@@ -1267,7 +1212,7 @@ with st.expander("🔬 Backtest — đo sai số & tín hiệu của hệ thốn
                 k4.metric("Spread rẻ−đắt",
                           f"{bm.get('spread_rẻ_trừ_đắt', '—')}")
                 st.markdown(_bt.report_markdown(bdf, bm, bt_h))
-                st.dataframe(bdf, use_container_width=True, hide_index=True)
+                st.dataframe(bdf, width="stretch", hide_index=True)
                 st.download_button(
                     "⬇️ Tải CSV backtest",
                     bdf.to_csv(index=False).encode("utf-8-sig"),

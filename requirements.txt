@@ -1,7 +1,10 @@
-pykrx>=1.0.45
-pandas>=2.0
-requests>=2.31
-openpyxl>=3.1
-rapidfuzz>=3.0
-python-dotenv>=1.0
-streamlit>=1.30
+# Chốt phiên bản đã kiểm chứng (2026-10) — cloud build lại sẽ không tự lên bản mới
+# có breaking change. Nâng cấp: đổi số ở đây rồi chạy `pytest` trước khi push.
+streamlit~=1.58.0
+pandas>=2.3,<3
+pyarrow>=24,<25
+requests>=2.34,<3
+openpyxl>=3.1,<4
+rapidfuzz>=3.14,<4
+python-dotenv>=1.2,<2
+pykrx>=1.2.8,<1.3

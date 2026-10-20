@@ -153,3 +153,13 @@ Lấy báo cáo tài chính **4 năm + 4 quý gần nhất** từ Naver (`/api/s
 - **`assess_financials()`** — chấm sức khỏe theo tiêu chuẩn đầu tư: Nợ/VCSH <100%, thanh toán nhanh >100%, ROE >10%, biên LN ròng >0, LN thuần dương & ổn định, doanh thu tăng trưởng → rating 🟢 An toàn / 🟡 Trung bình / 🔴 Cần thận trọng. Ngành tài chính (bank/bảo hiểm/chứng khoán) tự bỏ tiêu chí đòn bẩy.
 
 Trong app: mục **🔎 Chi tiết 1 mã** hiện bảng 4 năm/4 quý + thẻ Tổng vốn hóa/Nợ/Tổng tài sản/Nợ-trên-TS/EPS dự tính + đánh giá. Tick **📑 Bổ sung tài chính vào bảng** để thêm cột tổng quan cho cả bảng (cào thêm/mã).
+
+## Kiểm thử (chạy trước mỗi lần push)
+
+```bash
+pip install -r requirements-dev.txt
+pytest                 # toán định giá, dự phóng, beta, DART, app khởi động (≈2s, không cần mạng)
+KCI_E2E=1 pytest       # thêm bài chạy THẬT: cào mã + bảng định giá + EV/EBIT (cần mạng/DART key)
+```
+
+`tests/test_app.py` dùng Streamlit **AppTest** (thực thi toàn bộ script) và **pyflakes** (bắt tên chưa định nghĩa) — chặn lỗi kiểu `NameError` trước khi lên cloud. Phiên bản thư viện được chốt trong `requirements.txt`; nâng cấp thì sửa số ở đó rồi chạy `pytest`.
