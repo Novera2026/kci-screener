@@ -163,3 +163,14 @@ KCI_E2E=1 pytest       # thêm bài chạy THẬT: cào mã + bảng định gi�
 ```
 
 `tests/test_app.py` dùng Streamlit **AppTest** (thực thi toàn bộ script) và **pyflakes** (bắt tên chưa định nghĩa) — chặn lỗi kiểu `NameError` trước khi lên cloud. Phiên bản thư viện được chốt trong `requirements.txt`; nâng cấp thì sửa số ở đó rồi chạy `pytest`.
+
+## 🚀 Siêu cổ phiếu tăng trưởng (trang riêng)
+
+Trang **Sieu co phieu** trong thanh điều hướng quét cổ phiếu đang có cấu trúc tăng theo 3 trụ (logic ở `growth.py`):
+
+- **Biểu đồ** — Trend Template 8 tiêu chí của Minervini (MA50/150/200, đỉnh/đáy 52 tuần, RS 1–99 kiểu IBD) + tín hiệu phụ: tích lũy khối lượng, nền siết, gần điểm mua.
+- **Tăng trưởng** — DT/LN thuần quý so cùng kỳ (≥25%), biên LN HĐ mở rộng, DT năm, đồng thuận LN năm tới.
+- **Tin tức** — từ khóa xúc tác tích cực/tiêu cực trong tiêu đề tin Naver (tin tổng hợp thị trường tính trung tính).
+
+Điểm tổng = 40% biểu đồ + 40% tăng trưởng + 20% tin tức. Quét toàn sàn (vốn hóa ≥ 1.000억, ~1.300 mã) mất khoảng 1 phút, theo 2 bước: lọc biểu đồ toàn bộ → phân tích sâu N mã mạnh nhất.
+Toss (tùy chọn): giá realtime + cảnh báo mã của sàn (투자경고, 단기과열, VI…). Toss **không** có tin tức hay BCTC nên các phần đó lấy từ Naver.
