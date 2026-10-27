@@ -3,31 +3,43 @@
 Đây là bước biến hệ thống từ "đúng lý thuyết" → "đã kiểm chứng bằng số". Chạy định giá
 tại thời điểm quá khứ rồi so với giá thực sau đó.
 
-## Chạy (trên máy bạn)
+## Cách 1 (mặc định, khuyến nghị): point-in-time trên số gốc DART — `backtest_dart.py`
+
+Chỉ cần `DART_API_KEY` trong `.env`. Trong app: mở **🔬 Backtest** → nguồn **DART** → nhập mã
+→ chọn các năm làm mốc → **🚀 Chạy backtest**. Dòng lệnh:
 
 ```bash
 source .venv/bin/activate
+python backtest_dart.py                       # 14 mã mặc định, mốc 15/4 năm 2021–2025
+python backtest_dart.py 005930 000660 105560  # mã tùy chọn
+```
+
+Tại mốc T = phiên đầu tiên ≥ 15/4 năm Y, chỉ dùng thông tin có tại T: BCTC DART năm ≤ Y−1
+(mã tài khoản IFRS chuẩn, hợp nhất), số cổ phiếu và cổ tức năm Y−1, giá Naver (đã điều chỉnh
+chia tách), beta 78 tuần trước T so với KOSPI, Rf = TPCP 10 năm (FRED) tháng trước T, median
+P/E–P/B peer cùng ngành trong cùng lát cắt. Định giá bằng chính `valuation.value_stock` của app
+(ERP/g/w theo sidebar) rồi so với lợi suất vượt KOSPI sau N tháng.
+
+Kết quả: **IC** trung bình theo năm (+ t-stat) và IC gộp, **ngũ phân vị** (Q1 = 20% mã rẻ nhất
+mỗi năm: vượt KOSPI trung vị/TB, tỷ lệ mất >30%, tỷ lệ thắng thị trường), IC **từng phương
+pháp**, theo **độ tin cậy**, và **dự phóng 1 năm** của công thức KCI so với naive (năm sau =
+năm trước) trên số DART thực. Cache ở `.cache/` (BCTC năm đã nộp giữ vĩnh viễn).
+
+Giới hạn riêng: tập đoàn tài chính (KB, Shinhan…) chưa có BCTC dạng cấu trúc trên DART trước
+năm tài chính 2023 → chỉ có điểm từ mốc 2024; số cổ phiếu đổi mạnh không theo tỷ lệ tròn
+(sáp nhập) → bỏ điểm đó.
+
+## Cách 2: pykrx (KRX) — `backtest.py`
+
+KRX hiện bắt đăng nhập mới trả P/E–EPS–BPS lịch sử: cần tài khoản miễn phí data.krx.co.kr,
+thêm `KRX_ID` / `KRX_PW` vào `.env`. Thiếu tài khoản, app báo ngay thay vì chạy ra 0 điểm.
+
+```bash
 python backtest.py
 ```
 
 Mặc định: 18 mã trải nhiều ngành × 3 mốc as-of (6/2023, 12/2023, 6/2024), horizon 12 tháng.
 Xuất `backtest_results.csv` (chi tiết từng điểm) + `backtest_report.md` (tổng kết).
-
-Tùy biến trong code hoặc gọi hàm:
-
-```python
-import backtest
-from valuation import Assumptions
-df, m = backtest.run_backtest(
-    tickers=["005930","000660","105560", ...],
-    asof_dates=["2022-12-29","2023-06-30","2023-12-29","2024-06-28"],
-    horizon_months=12,
-)
-print(backtest.report_markdown(df, m, 12))
-```
-
-> Cần mạng KRX (pykrx). Một số sandbox chặn endpoint fundamental; máy cá nhân chạy bình thường.
-> Phần phân tích (IC, sai số, bucket) đã được kiểm chứng bằng dữ liệu giả lập.
 
 ## Đọc 3 con số quan trọng
 

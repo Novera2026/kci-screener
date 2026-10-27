@@ -23,7 +23,6 @@ from typing import Optional
 
 import pandas as pd
 
-import valuation
 from valuation import Assumptions, value_stock, effective_sector
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

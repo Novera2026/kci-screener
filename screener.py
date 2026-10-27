@@ -17,11 +17,11 @@ Phụ thuộc: pip install pykrx pandas requests openpyxl rapidfuzz
 from __future__ import annotations
 import datetime as _dt
 import time
-import json
 import os
+import re
 import contextlib
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 import pandas as pd
@@ -73,7 +73,6 @@ def _last_n_days(n: int = 400) -> tuple[str, str]:
 
 def _retry(fn, n=RETRY, w=RETRY_WAIT):
     """Thử lại fn() tới khi ra kết quả khác rỗng, nếu không trả None."""
-    last = None
     for _ in range(n):
         try:
             r = fn()
@@ -82,8 +81,7 @@ def _retry(fn, n=RETRY, w=RETRY_WAIT):
             if hasattr(r, "empty") and r.empty:
                 time.sleep(w); continue
             return r
-        except Exception as e:  # noqa
-            last = e
+        except Exception:
             time.sleep(w)
     return None
 
@@ -111,7 +109,6 @@ def _parse_kr_won(x) -> Optional[float]:
         return None
     if isinstance(x, (int, float)):
         return float(x)
-    import re
     total, found = 0.0, False
     for num, unit in re.findall(r"([\d,]+)\s*([조억만])", str(x)):
         total += float(num.replace(",", "")) * _KR_UNITS[unit]
@@ -134,7 +131,11 @@ class TickerRegistry:
         cur["ticker"] = cur["ticker"].astype(str).str.zfill(6)
         if "theme" not in cur.columns:
             cur["theme"] = ""
+        # thứ tự dòng trong tickers.csv (bluechip xếp theo độ quan trọng) → ưu tiên khi
+        # một tên ngắn khớp nhiều mã ("삼성", "KB"…); mã chỉ có ở danh sách toàn sàn xếp sau
+        cur["_rank"] = range(len(cur))
         self.df = self._merge_full(cur, full_path)
+        self.df["_rank"] = self.df["_rank"].fillna(len(cur) + 1e6)
         self._krx_name_map: dict[str, str] = {}   # ticker -> name_kr (toàn KRX)
         self._krx_loaded = False
 
@@ -204,26 +205,51 @@ class TickerRegistry:
         return self._krx_name_map.get(ticker)
 
     def resolve(self, query: str) -> Optional[str]:
-        """Nhập tên/ticker -> trả mã 6 số. Match: ticker > exact name > fuzzy."""
+        """Nhập tên/ticker -> trả mã 6 ký tự. Match: ticker > exact name > chứa chuỗi > fuzzy."""
+        return self.resolve_info(query)["ticker"]
+
+    def resolve_info(self, query: str) -> dict:
+        """Như resolve() nhưng cho biết KHỚP KIỂU GÌ để UI cảnh báo khi đoán:
+        {query, ticker, how: ticker|exact|contains|preferred|fuzzy|None, alts: [tên khác]}.
+        `contains`/`fuzzy` = đoán; `alts` = các mã khác cũng khớp (tên mơ hồ)."""
         q = str(query).strip()
+        out = {"query": q, "ticker": None, "how": None, "alts": []}
         if not q:
-            return None
-        # 1) đã là ticker?
-        digits = q.zfill(6) if q.isdigit() else None
-        if digits and len(digits) == 6:
-            return digits
+            return out
+        # 1) đã là ticker? (6 số, hoặc mã chữ-số KRX mới cấp từ 2024 như 0001A0)
+        if q.isdigit() and len(q) <= 6:
+            return dict(out, ticker=q.zfill(6), how="ticker")
+        if _TICKER_RE.match(q.upper()):
+            return dict(out, ticker=q.upper(), how="ticker")
         # 2) match registry (en/kr, không phân biệt hoa thường)
         ql = q.lower()
         for col in ("name_en", "name_kr"):
             hit = self.df[self.df[col].str.lower() == ql]
             if not hit.empty:
-                return hit["ticker"].iloc[0]
-        # 3) match chứa chuỗi trong registry
-        for col in ("name_en", "name_kr"):
-            hit = self.df[self.df[col].str.lower().str.contains(ql, na=False, regex=False)]
-            if not hit.empty:
-                return hit["ticker"].iloc[0]
-        # 4) fuzzy trên registry + toàn KRX
+                return dict(out, ticker=hit["ticker"].iloc[0], how="exact")
+        # 3) cổ phiếu ưu đãi (삼성전자우, 현대차2우B…): registry chỉ có cổ phiếu thường →
+        #    KHÔNG được đoán sang mã thường (dữ liệu khác hẳn). Thử mã ưu đãi chuẩn KRX.
+        pm = _PREF_RE.match(q)
+        base = self.resolve_info(pm.group(1)) if pm else None
+        if base and base["how"] == "exact" and base["ticker"].isdigit():
+            for d in "5789":
+                code = base["ticker"][:5] + d
+                if _norm_name(_naver_name(code)) == _norm_name(q):
+                    return dict(out, ticker=code, how="preferred")
+            return out                  # không xác minh được → để trống, không đoán bừa
+        # 4) match chứa chuỗi: ưu tiên tên BẮT ĐẦU bằng chuỗi gõ, rồi bluechip curated
+        #    (thứ tự tickers.csv), rồi tên ngắn — "삼성" → 삼성전자 chứ không phải 삼성제약
+        hit = self.df[self.df["name_en"].str.lower().str.contains(ql, na=False, regex=False)
+                      | self.df["name_kr"].str.lower().str.contains(ql, na=False, regex=False)]
+        if not hit.empty:
+            def _key(r):
+                names = [str(r["name_en"]).lower(), str(r["name_kr"]).lower()]
+                return (not any(n.startswith(ql) for n in names), r["_rank"],
+                        min(len(n) for n in names))
+            ranked = sorted(hit.to_dict("records"), key=_key)
+            return dict(out, ticker=ranked[0]["ticker"], how="contains",
+                        alts=[r["name_kr"] for r in ranked[1:4]])
+        # 5) fuzzy trên registry + toàn KRX
         try:
             from rapidfuzz import process, fuzz
             choices = {}
@@ -235,17 +261,38 @@ class TickerRegistry:
             best = process.extractOne(q, choices, scorer=fuzz.WRatio)
             if best and best[1] >= 80:
                 # best[2] là key (ticker) khi truyền dict
-                return best[2]
+                return dict(out, ticker=best[2], how="fuzzy")
         except Exception:
             # fallback: quét KRX exact-contains
             self._load_krx_names()
             for t, nm in self._krx_name_map.items():
                 if ql in nm.lower():
-                    return t
-        return None
+                    return dict(out, ticker=t, how="contains")
+        return out
 
     def resolve_many(self, queries: list[str]) -> dict[str, Optional[str]]:
         return {q: self.resolve(q) for q in queries}
+
+
+# Mã KRX: 6 số, hoặc chữ-số kiểu mới (0001A0, 0126Z0) cho mã niêm yết từ 2024
+_TICKER_RE = re.compile(r"^[0-9][0-9A-Z]{5}$")
+# Tên cổ phiếu ưu đãi: <tên gốc>[số]우[B/C][(전환)]
+_PREF_RE = re.compile(r"^(.+?)\d?우[A-C]?(\(전환\))?$")
+
+
+def _norm_name(s: Optional[str]) -> str:
+    return re.sub(r"\s+", "", str(s or "")).lower()
+
+
+def _naver_name(code: str) -> Optional[str]:
+    """Tên Hàn của 1 mã theo Naver (để xác minh mã đoán ra). None nếu không có."""
+    try:
+        import requests
+        r = requests.get(f"https://m.stock.naver.com/api/stock/{code}/basic",
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=NAVER_TIMEOUT)
+        return r.json().get("stockName") if r.ok else None
+    except Exception:
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -325,8 +372,10 @@ def _fetch_naver(ticker: str) -> StockRow:
         r = requests.get(url, headers=headers, timeout=NAVER_TIMEOUT)
         r.raise_for_status()
         j = r.json()
+        row.name = j.get("stockName")
         totals = {d.get("code"): d.get("value") for d in (j.get("totalInfos") or [])}
-        # giá hiện tại: phiên gần nhất trong dealTrendInfos
+        # giá tạm: đóng cửa phiên TRƯỚC (dealTrendInfos) — fetch_one/fetch_many ghi đè bằng
+        # giá realtime (fetch_live_prices); P/E, vốn hóa ở totalInfos đã theo giá hiện tại
         deals = j.get("dealTrendInfos") or []
         if deals:
             row.price = _to_num(deals[0].get("closePrice"))
@@ -374,7 +423,6 @@ def _derive_net_income(row: StockRow):
 
 def _fetch_toss(ticker: str) -> StockRow:
     """Toss Open API: giá realtime chính thức + 52w (không có fundamentals)."""
-    from toss_api import TossClient  # lazy import, chỉ khi dùng
     cli = _toss_client()
     row = StockRow(ticker=ticker, source="toss")
     # Toss = giá realtime CHÍNH THỨC. 52T/fundamentals để pykrx/Naver lo
@@ -402,14 +450,46 @@ _MERGE_FIELDS = ("price", "high_52w", "low_52w", "market_cap", "shares",
                  "per", "pbr", "eps", "bps", "div_yield", "dps")
 
 
+def fetch_live_prices(tickers: list[str]) -> dict[str, float]:
+    """Giá khớp lệnh REALTIME (trong phiên) / đóng cửa hôm nay (sau phiên) từ Naver polling,
+    50 mã/lần gọi. {mã: giá}; mã lỗi/ngừng giao dịch không có trong kết quả."""
+    import requests
+    out: dict[str, float] = {}
+    for i in range(0, len(tickers), 50):
+        chunk = ",".join(tickers[i:i + 50])
+        try:
+            j = requests.get(
+                f"https://polling.finance.naver.com/api/realtime/domestic/stock/{chunk}",
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=NAVER_TIMEOUT).json()
+        except Exception:
+            continue
+        for d in (j or {}).get("datas", []):
+            px = _to_num(d.get("closePrice"))
+            if px and px > 0:
+                out[str(d.get("itemCode"))] = px
+    return out
+
+
+def _overlay_live(rows: list[StockRow]) -> None:
+    """Ghi đè giá bằng giá realtime cho các dòng không lấy giá từ Toss (đã realtime)."""
+    need = [r for r in rows if "toss" not in r.source.split("+")]
+    live = fetch_live_prices([r.ticker for r in need]) if need else {}
+    for r in need:
+        px = live.get(r.ticker)
+        if px:
+            r.price = px
+            r.source = (r.source + "+rt") if r.source else "rt"
+
+
 def fetch_one(ticker: str, registry: Optional[TickerRegistry] = None,
-              prefer: str = "pykrx") -> StockRow:
+              prefer: str = "pykrx", live: bool = True) -> StockRow:
     """Kéo 1 mã, gộp đa nguồn theo thứ tự ưu tiên.
 
     prefer = 'pykrx' | 'naver' | 'toss'.
       - toss : giá realtime chính thức, nhưng fundamentals lấy từ pykrx/naver.
     Logic: đi theo order, field nào chưa có thì lấy từ nguồn kế tiếp (nguồn trước
-    được ưu tiên cho field đã có)."""
+    được ưu tiên cho field đã có). live=True: giá cuối cùng là giá realtime Naver
+    (fetch_many tắt cờ này rồi lấy realtime theo lô 50 mã)."""
     orders = {
         "pykrx": ["pykrx", "naver"],
         "naver": ["naver"],            # Naver tự đủ (giá/52T/PER/PBR/EPS/BPS/cổ tức);
@@ -435,10 +515,13 @@ def fetch_one(ticker: str, registry: Optional[TickerRegistry] = None,
                 setattr(row, f, v); got = True
         if got:
             used.append(src)
+        row.name = row.name or r.name
         # đủ dữ liệu cốt lõi thì dừng sớm
         if row.price is not None and row.per is not None and row.market_cap is not None:
             break
     row.source = "+".join(used)
+    if live:
+        _overlay_live([row])
     _derive_net_income(row)
     if registry:
         row.name = registry.name_of(ticker) or row.name
@@ -494,13 +577,18 @@ def fetch_batch(queries: list[str], registry: Optional[TickerRegistry] = None,
 
 def fetch_many(queries: list[str], registry: Optional[TickerRegistry] = None,
                prefer: str = "naver", max_workers: int = 5, retries: int = 1,
-               progress=None) -> tuple[list[dict], list[str]]:
+               progress=None, resolutions: Optional[list] = None,
+               live: bool = True) -> tuple[list[dict], list[str]]:
     """Cào nhiều mã SONG SONG (mặc định 5 luồng) — nhanh hơn nhiều mà vẫn lịch sự
     với máy chủ Naver. KHÔNG đổi độ chính xác: mỗi mã cào độc lập, kết quả giữ
     đúng ánh xạ mã↔dòng và đúng THỨ TỰ nhập.
 
     - retries: số lần thử lại thêm cho mã trả về RỖNG (mất giá) — lấp chỗ thiếu.
     - progress(done, total): callback cập nhật tiến trình (gọi mỗi mã xong).
+    - resolutions: truyền list rỗng để nhận lại cách khớp từng dòng nhập
+      (TickerRegistry.resolve_info + cờ 'dup' khi trùng mã đã có).
+    - Mã nhập TRÙNG chỉ cào 1 lần (trùng làm méo median ngành & đếm peer).
+    - live: giá cuối cùng là giá realtime Naver (1 lần gọi / 50 mã).
     Trả (list[dict] theo thứ tự nhập, list[str] mã không resolve được).
     """
     import concurrent.futures as _cf
@@ -508,28 +596,35 @@ def fetch_many(queries: list[str], registry: Optional[TickerRegistry] = None,
 
     resolved: list[tuple[int, str]] = []   # (vị trí trong kết quả, ticker)
     unresolved: list[str] = []
+    seen: set[str] = set()
     for q in queries:
-        tk = registry.resolve(q)
+        info = registry.resolve_info(q)
+        tk = info["ticker"]
         if tk is None:
             unresolved.append(q)
+        elif tk in seen:
+            info["dup"] = True
         else:
+            seen.add(tk)
             resolved.append((len(resolved), tk))
+        if resolutions is not None:
+            resolutions.append(info)
 
-    rows: list[Optional[dict]] = [None] * len(resolved)
+    rows: list[Optional[StockRow]] = [None] * len(resolved)
 
-    def _work(tk: str) -> dict:
+    def _work(tk: str) -> StockRow:
         last = None
         for attempt in range(retries + 1):
             try:
-                r = fetch_one(tk, registry=registry, prefer=prefer)
+                r = fetch_one(tk, registry=registry, prefer=prefer, live=False)
                 if r.price is not None:        # có giá = coi như thành công
-                    return r.to_dict()
+                    return r
                 last = r
             except Exception as ex:
                 last = StockRow(ticker=tk, note=f"err: {str(ex)[:40]}")
             if attempt < retries:
                 time.sleep(RETRY_WAIT)         # nghỉ rồi thử lại mã bị rỗng
-        return (last or StockRow(ticker=tk, note="no data")).to_dict()
+        return last or StockRow(ticker=tk, note="no data")
 
     done = 0
     total = len(resolved)
@@ -540,7 +635,12 @@ def fetch_many(queries: list[str], registry: Optional[TickerRegistry] = None,
             done += 1
             if progress:
                 progress(done, total)
-    return [r for r in rows if r is not None], unresolved
+    got = [r for r in rows if r is not None]
+    if live:
+        _overlay_live(got)
+    for r in got:
+        _derive_net_income(r)
+    return [r.to_dict() for r in got], unresolved
 
 
 # ----------------------------------------------------------------------------
@@ -602,13 +702,18 @@ def beta_vs_market(stock_closes: list[float], market_closes: list[float],
 
 def sector_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     """Chỉ số toàn ngành. Aggregate P/E = ΣVốn hóa / ΣLN ròng (đúng chuẩn,
-    không phải trung bình cộng P/E). Kèm median để tham chiếu."""
+    không phải trung bình cộng P/E). Kèm median để tham chiếu.
+
+    Nhóm theo ngành EN (curated) và — với mã ngoài curated — ngành KRX (업종), giống
+    valuation.peer_key; median_P/E loại P/E ≤0 và >60 như median dùng để định giá."""
     if df.empty:
         return pd.DataFrame()
     out = []
-    groups = df.groupby("sector", dropna=False) if df["sector"].notna().any() \
-        else [("Tất cả", df)]
-    for sec, g in groups:
+    key = df["sector"].where(df["sector"].notna() & (df["sector"] != ""), None)
+    if "industry_kr" in df.columns:
+        key = key.where(key.notna(), df["industry_kr"])
+    key = key.fillna("—")
+    for sec, g in df.groupby(key, sort=False):
         cap = g["market_cap"].sum(min_count=1)
         ni = g["net_income"].sum(min_count=1)
         agg_pe = (cap / ni) if (cap and ni and ni > 0) else None
@@ -616,11 +721,12 @@ def sector_aggregates(df: pd.DataFrame) -> pd.DataFrame:
         book = (g["bps"] * (g["market_cap"] / g["price"])).sum(min_count=1) \
             if g["price"].notna().any() else None
         agg_pb = (cap / book) if (cap and book and book > 0) else None
+        pe_ok = g["per"].where((g["per"] > 0) & (g["per"] <= 60))
         out.append({
             "sector": sec,
             "n": int(g["ticker"].notna().sum()),
             "agg_P/E": round(agg_pe, 2) if agg_pe else None,
-            "median_P/E": round(g["per"].median(), 2) if g["per"].notna().any() else None,
+            "median_P/E": round(pe_ok.median(), 2) if pe_ok.notna().any() else None,
             "mean_P/E": round(g["per"].mean(), 2) if g["per"].notna().any() else None,
             "agg_P/B": round(agg_pb, 2) if agg_pb else None,
             "median_P/B": round(g["pbr"].median(), 2) if g["pbr"].notna().any() else None,

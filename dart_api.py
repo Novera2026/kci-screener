@@ -146,7 +146,25 @@ def _num(x) -> Optional[float]:
         return None
 
 
+# BCTC năm đã nộp gần như không đổi → nhớ trong tiến trình 12 giờ. Panel Chi tiết gọi
+# lại mỗi lần rerun (kéo slider): trước đây mỗi lần ~6 request DART tuần tự × 3 lượt.
+# Chỉ nhớ kết quả CÓ số (năm chưa nộp báo cáo vẫn được hỏi lại).
+_YEAR_CACHE: dict = {}
+_YEAR_TTL = 12 * 3600
+
+
 def _fetch_year(corp_code: str, year: int) -> Optional[dict]:
+    """Lấy các tài khoản chính của 1 năm (사업보고서), có nhớ đệm (_YEAR_CACHE)."""
+    hit = _YEAR_CACHE.get((corp_code, year))
+    if hit and time.time() - hit[0] < _YEAR_TTL:
+        return dict(hit[1])
+    rec = _fetch_year_raw(corp_code, year)
+    if rec:
+        _YEAR_CACHE[(corp_code, year)] = (time.time(), dict(rec))
+    return rec
+
+
+def _fetch_year_raw(corp_code: str, year: int) -> Optional[dict]:
     """Lấy các tài khoản chính của 1 năm (사업보고서). Ưu tiên 연결(CFS), fallback 별도(OFS)."""
     key = api_key()
     for fs_div in ("CFS", "OFS"):

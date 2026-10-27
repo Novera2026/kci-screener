@@ -22,7 +22,6 @@ from __future__ import annotations
 import os
 import time
 import json
-import datetime as _dt
 from typing import Optional, Any
 
 import requests

@@ -16,3 +16,6 @@ demo_output.xlsx
 # Hệ thống / công cụ
 .DS_Store
 .claude/
+
+# Cache dữ liệu backtest (BCTC DART, giá, Rf) — tự sinh lại
+.cache/

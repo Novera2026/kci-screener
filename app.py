@@ -8,14 +8,16 @@ Chạy:
 Mở tự động ở http://localhost:8501
 """
 from __future__ import annotations
+import datetime as _dt
+import io
 import os
 import pandas as pd
 import streamlit as st
 
 # Trên Streamlit Cloud KHÔNG có .env → nạp key từ Streamlit Secrets vào os.environ
-# để dart_api / toss_api (đọc os.environ) hoạt động. Local có .env thì bỏ qua.
+# để dart_api / toss_api / pykrx (đọc os.environ) hoạt động. Local có .env thì bỏ qua.
 try:
-    for _k in ("DART_API_KEY", "TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET"):
+    for _k in ("DART_API_KEY", "TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "KRX_ID", "KRX_PW"):
         if _k not in os.environ and _k in st.secrets:
             os.environ[_k] = str(st.secrets[_k])
 except Exception:
@@ -33,7 +35,7 @@ from financials import (fetch_financials, latest_actual, forward_eps,
                         balance_sheet_of, assess_financials,
                         build_annual_series, build_quarter_series,
                         project_forecast, project_forecast_quarter,
-                        forecast_eps, LABELS_VI)
+                        forecast_eps, consensus_eps, LABELS_VI)
 
 try:
     import dart_api
@@ -82,9 +84,10 @@ with st.sidebar:
     prefer = st.selectbox(
         "Nguồn giá ưu tiên",
         ["naver", "toss", "pykrx"],
-        help="naver (mặc định) = nhanh nhất ~0.1s/mã, đủ giá+52T+P/E+P/B+EPS+BPS+cổ tức, "
-             "chạy được cả trên cloud. toss = giá realtime (cần .env). "
-             "pykrx = KRX chính thức nhưng chậm (~13s/mã) & bị chặn trên server/cloud.",
+        help="naver (mặc định) = nhanh nhất ~0.1s/mã, giá REALTIME trong phiên + 52T + P/E + "
+             "P/B + EPS + BPS + cổ tức, chạy được cả trên cloud. toss = giá realtime chính "
+             "thức của sàn (cần .env). pykrx = KRX chính thức nhưng chậm (~13s/mã) & bị chặn "
+             "trên server/cloud.",
     )
     if prefer == "toss":
         ok = bool(os.environ.get("TOSS_CLIENT_ID")) or os.path.exists(".env")
@@ -298,8 +301,39 @@ with col2:
     st.caption("Mẹo: dán cả danh sách từ Excel cũng được.")
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _fin(ticker: str) -> dict:
+def _fin_cached(ticker: str) -> dict:
     return fetch_financials(ticker)
+
+
+def _fin(ticker: str) -> dict:
+    """BCTC Naver: ưu tiên bản đã nạp song song lúc bấm 🚀 (_prefetch), nếu không thì cache."""
+    f = (st.session_state.get("screen") or {}).get("fin", {}).get(ticker)
+    if f and (f.get("annual") or f.get("quarter")):
+        return f
+    return _fin_cached(ticker)
+
+
+PREFETCH_MAX = 80        # danh sách lớn hơn: BCTC/beta nạp dần khi cần (như trước)
+
+
+def _prefetch(tickers: list[str], on_prog=None) -> tuple[dict, dict]:
+    """Nạp SONG SONG (5 luồng) BCTC Naver + beta 52T cho cả danh sách ngay khi cào —
+    thay cho vòng lặp tuần tự từng mã ở bảng/định giá (40 mã: vài giây thay vì chục giây)."""
+    import concurrent.futures as _cf
+    from screener import fetch_weekly_closes, beta_vs_market
+    kospi = _kospi_weekly()
+
+    def _one(tk):
+        b = beta_vs_market(fetch_weekly_closes(tk), kospi) if kospi else None
+        return fetch_financials(tk), b
+
+    fins, betas = {}, {}
+    with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+        for i, (tk, (f, b)) in enumerate(zip(tickers, ex.map(_one, tickers))):
+            fins[tk], betas[tk] = f, b
+            if on_prog:
+                on_prog(i + 1, len(tickers))
+    return fins, betas
 
 
 def _dart_extras(ticker: str) -> dict:
@@ -455,7 +489,7 @@ def _cluster_bg(col: str) -> str:
         return "#f6f7f9"                                   # tài chính trailing: xám
     if col in ("Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %"):
         return "#fdeef0"                                   # cân đối: hồng nhạt
-    if col in ("EPS", "EPS dự tính"):
+    if col in ("EPS", "EPS dự tính", "EPS đồng thuận", "Lệch ĐT %"):
         return "#eef9f3"
     if col in ("P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %"):
         return "#eef9fb"                                   # định giá: xanh cyan nhạt
@@ -523,6 +557,10 @@ def _style_table(d):
                        "#fff3cd" if ("Trung bình" in t or "🟡" in t) else "")
                 if css:
                     _set_bg(c, "background-color:" + css)
+        # dự phóng công thức lệch đồng thuận >25% → vàng (soi lại giả định trước khi tin)
+        if "Lệch ĐT %" in d.columns and isinstance(d.at[idx, "Lệch ĐT %"], (int, float)) \
+                and not pd.isna(d.at[idx, "Lệch ĐT %"]) and abs(d.at[idx, "Lệch ĐT %"]) > 25:
+            _set_bg("Lệch ĐT %", "background-color:#fff3cd")
         # cờ độ tin P/E: ⚠ chu kỳ → vàng nhạt (cảnh báo earnings-based không hợp)
         if "PP P/E?" in d.columns and isinstance(d.at[idx, "PP P/E?"], str):
             _set_bg("PP P/E?", "background-color:" +
@@ -548,13 +586,25 @@ if run_btn:
         prog.progress(done / total if total else 1.0,
                       text=f"Đang cào song song: {done}/{total} mã")
 
+    resolutions: list = []
     rows, unresolved = fetch_many(queries, registry=reg, prefer=prefer,
-                                  max_workers=5, retries=1, progress=_on_prog)
-    prog.empty()
+                                  max_workers=5, retries=1, progress=_on_prog,
+                                  resolutions=resolutions)
     if not rows:
+        prog.empty()
         st.error("Không cào được mã nào. Kiểm tra tên/ticker hoặc kết nối mạng.")
         st.stop()
-    st.session_state["screen"] = {"records": rows, "unresolved": unresolved}
+    fins, betas = {}, {}
+    if len(rows) <= PREFETCH_MAX:
+        def _on_fin(done, total):
+            prog.progress(done / total, text=f"Đang nạp BCTC + beta song song: {done}/{total} mã")
+        fins, betas = _prefetch([r["ticker"] for r in rows], _on_fin)
+    prog.empty()
+    st.session_state["screen"] = {
+        "records": rows, "unresolved": unresolved, "resolutions": resolutions,
+        "fin": fins, "beta": betas,
+        "fetched_at": _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).strftime(
+            "%H:%M %d/%m/%Y")}
 
 # ---- Render kết quả (tồn tại qua các lần rerun để panel chi tiết tương tác được) ----
 if "screen" in st.session_state:
@@ -594,39 +644,65 @@ if "screen" in st.session_state:
     df["valuation_tag"] = [_tag(p, m) for p, m in zip(df["per"], med)]
 
     # EPS/ROE dự phóng (công thức) -> nuôi cả bảng & định giá forward. Bỏ qua nếu list quá lớn.
-    fwd_eps_col, fwd_roe_col = [], []
-    if len(df) <= 80:
+    # Năm dự phóng đã có quý thực công bố → dự phóng = lũy kế quý thực + run-rate quý còn lại.
+    fwd_eps_col, fwd_roe_col, fwd_per_col = [], [], []
+    if len(df) <= PREFETCH_MAX:
         for tk, mc, px, bps in zip(df["ticker"], df["market_cap"], df["price"], df["bps"]):
             try:
+                _f = _fin(tk)
                 fc = project_forecast(
-                    [c for c in _fin(tk)["annual"] if not c.get("is_consensus")], mc, px)
+                    [c for c in _f["annual"] if not c.get("is_consensus")], mc, px,
+                    quarters=_f["quarter"])
             except Exception:
                 fc = None
             fwd_eps_col.append(fc.get("eps") if fc else None)
             fwd_roe_col.append((fc["eps"] / bps) if (fc and fc.get("eps") and bps) else None)
+            fwd_per_col.append(fc.get("period") if fc else None)
     else:
         fwd_eps_col = [None] * len(df)
         fwd_roe_col = [None] * len(df)
+        fwd_per_col = [None] * len(df)
     df["fwd_eps"] = fwd_eps_col
     df["fwd_roe"] = fwd_roe_col
+    df["fwd_period"] = fwd_per_col
 
     # Beta riêng từng mã (52T vs KOSPI) → vào CAPM/Ke. Tắt hoặc lỗi → None (dùng beta phẳng).
-    if beta_auto and len(df) <= 80:
+    # Đã nạp song song lúc bấm 🚀; mã nào thiếu (phiên cũ) thì tính lại qua cache.
+    if beta_auto and len(df) <= PREFETCH_MAX:
+        _bmap = st.session_state["screen"].get("beta") or {}
         bcol = []
-        bp = st.progress(0.0, text="Đang tính beta 52 tuần...")
-        for i, tk in enumerate(df["ticker"]):
+        for tk in df["ticker"]:
             try:
-                bcol.append(_beta(tk))
+                bcol.append(_bmap[tk] if tk in _bmap else _beta(tk))
             except Exception:
                 bcol.append(None)
-            bp.progress((i + 1) / len(df))
-        bp.empty()
         df["beta"] = bcol
     else:
         df["beta"] = [None] * len(df)
 
     if unresolved:
         st.warning(f"Chưa resolve được: {', '.join(unresolved)}")
+    # Dòng nhập được ĐOÁN (khớp 1 phần / fuzzy), cổ phiếu ưu đãi, hoặc trùng → cho xem lại
+    _HOW = {"contains": "⚠️ gần đúng (tên chứa chuỗi gõ)", "fuzzy": "⚠️ đoán theo độ giống",
+            "preferred": "✓ cổ phiếu ưu đãi (đã xác minh tên)"}
+    _names_df = dict(zip(df["ticker"], df["name"]))
+    _chk = [x for x in st.session_state["screen"].get("resolutions") or []
+            if x.get("how") in _HOW or x.get("dup")]
+    if _chk:
+        _amb = any(x.get("how") == "fuzzy" or x.get("alts") for x in _chk)
+        with st.expander(f"🔍 Đối chiếu mã — {len(_chk)} dòng nhập được đoán/trùng, "
+                         "kiểm tra đúng mã chưa", expanded=_amb):
+            st.dataframe(pd.DataFrame([{
+                "Bạn nhập": x["query"], "→ Mã": x["ticker"],
+                "Tên": _names_df.get(x["ticker"], "—"),
+                "Kiểu khớp": "↩︎ trùng mã đã có — bỏ qua" if x.get("dup") else _HOW[x["how"]],
+                "Mã khác cũng khớp": ", ".join(x.get("alts") or []),
+            } for x in _chk]), width="stretch", hide_index=True)
+            st.caption("Sai mã? Gõ tên đầy đủ hoặc mã 6 ký tự (vd 005930) rồi bấm 🚀 lại.")
+    _at = st.session_state["screen"].get("fetched_at")
+    if _at:
+        st.caption(f"🕒 Giá realtime (Naver) lấy lúc **{_at}** giờ Hàn Quốc — bấm 🚀 lại để "
+                   "cập nhật giá mới.")
 
     # ---- Bảng chính (có màu) ----
     st.subheader("📋 Bảng dữ liệu")
@@ -657,6 +733,7 @@ if "screen" in st.session_state:
     if enrich:
         rev, opp, net, roe, debt = [], [], [], [], []
         assets, liab, d2a, epsf, rating = [], [], [], [], []
+        epsc, epsdev = [], []
         pbar = st.progress(0.0, text="Đang cào báo cáo tài chính & cân đối...")
         for i, tk in enumerate(df["ticker"]):
             f = _fin(tk)
@@ -673,8 +750,17 @@ if "screen" in st.session_state:
             assets.append(bs_i.get("assets"))
             liab.append(bs_i.get("liabilities"))
             d2a.append(bs_i.get("debt_to_assets"))
-            epsf.append(df["fwd_eps"].iloc[i] if df["fwd_eps"].iloc[i] is not None
-                        else forecast_eps(f["annual"], mc_i, px_i))
+            ef = (df["fwd_eps"].iloc[i] if df["fwd_eps"].iloc[i] is not None
+                  else forecast_eps(f["annual"], mc_i, px_i, quarters=f["quarter"]))
+            epsf.append(ef)
+            # Đối chiếu đồng thuận Naver CÙNG NĂM: lệch >25% = giả định công thức cần soi lại
+            _yr = (df["fwd_period"].iloc[i] or
+                   (str(int(la["period"][:4]) + 1) if la and str(la.get("period", ""))[:4].isdigit()
+                    else None))
+            ce = consensus_eps(f["annual"], _yr) if _yr else None
+            epsc.append(ce)
+            epsdev.append(round((ef / ce - 1) * 100, 1)
+                          if (ef is not None and ce and ce > 0 and ef > 0) else None)
             rating.append(assess_financials(
                 f["annual"], df["sector"].iloc[i],
                 df["industry_kr"].iloc[i] if "industry_kr" in df.columns else None
@@ -690,6 +776,8 @@ if "screen" in st.session_state:
         disp["Nợ/VCSH %"] = debt
         disp["Nợ/TS %"] = d2a
         disp["EPS dự tính"] = epsf
+        disp["EPS đồng thuận"] = epsc
+        disp["Lệch ĐT %"] = epsdev
         disp["Đánh giá"] = rating
 
     # ---- Cột tài chính theo KỲ: 3 NĂM + 4 QUÝ — nguồn Naver (đã cache, KHÔNG gọi DART) ----
@@ -710,7 +798,7 @@ if "screen" in st.session_state:
             f = _fin(tk)                                   # Naver, cached → nhanh
             mc_i, px_i = df["market_cap"].iloc[i], df["price"].iloc[i]
             a_real = [c for c in f["annual"] if not c.get("is_consensus")][-3:]   # 3 năm
-            a_fc = project_forecast(a_real, mc_i, px_i)                            # + dự phóng
+            a_fc = project_forecast(a_real, mc_i, px_i, quarters=f["quarter"])    # + dự phóng
             a_seq = a_real + ([a_fc] if a_fc else [])
             q_real = [c for c in f["quarter"] if not c.get("is_consensus")][-4:]   # 4 quý
             q_fc = project_forecast_quarter(f["quarter"], mc_i, px_i)             # + dự phóng
@@ -771,7 +859,7 @@ if "screen" in st.session_state:
            "Tỷ suất CT %": "{:.2f}", "Doanh thu (억)": "{:,.0f}", "LN HĐ (억)": "{:,.0f}",
            "LN thuần (억)": "{:,.0f}", "ROE %": "{:.1f}", "Tổng tài sản (억)": "{:,.0f}",
            "Nợ (억)": "{:,.0f}", "Nợ/VCSH %": "{:.0f}", "Nợ/TS %": "{:.0f}",
-           "EPS dự tính": "{:,.0f}",
+           "EPS dự tính": "{:,.0f}", "EPS đồng thuận": "{:,.0f}", "Lệch ĐT %": "{:+.0f}",
            "P/E dự kiến": "{:.2f}", "Giá hợp lý (P/E)": "{:,.0f}",
            "Upside P/E %": "{:+.1f}"}
     fmt.update(_ts_fmt)
@@ -798,7 +886,7 @@ if "screen" in st.session_state:
         "Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %",
         "Tỷ suất CT %",
         # EPS
-        "EPS", "EPS dự tính",
+        "EPS", "EPS dự tính", "EPS đồng thuận", "Lệch ĐT %",
         # ĐỊNH GIÁ
         "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %", "PP P/E?",
         # Đánh giá tổng hợp
@@ -821,8 +909,11 @@ if "screen" in st.session_state:
     st.caption("📌 Cột Mã + Tên được ghim (cuộn ngang vẫn thấy). 🟢 tốt/rẻ · 🟡 trung bình · "
                "🔴 đắt/rủi ro. Vốn hóa, LN, Tài sản, Nợ đơn vị 억원 (×100 triệu KRW). "
                "Cân đối lấy số gốc DART nếu có .env key, nếu không là ước tính.")
-    st.caption("⚠️ **Đọc kỹ:** *EPS dự tính* dự phóng theo XU HƯỚNG biên LN (đơn điệu→bám "
-               "năm gần đây, nhiễu→median). *Median P/E ngành* đã LOẠI P/E âm & >60 (outlier). "
+    st.caption("⚠️ **Đọc kỹ:** *EPS dự tính* = năm tài chính hiện tại: nếu đã có quý thực công "
+               "bố thì = lũy kế quý thực + quý còn lại theo trung bình 2 quý gần nhất; chưa có "
+               "quý nào thì theo CAGR doanh thu × biên LN xu hướng. *Lệch ĐT %* = so với EPS "
+               "đồng thuận Naver cùng năm (🟡 lệch >25% → soi lại). "
+               "*Median P/E ngành* đã LOẠI P/E âm & >60 (outlier). "
                "Cột **PP P/E?**: ⚠ chu kỳ = ngành định giá theo P/E earnings-based KHÔNG đáng "
                "tin (đóng tàu/bán dẫn/pin/dược…) — *Giá hợp lý & Upside P/E* chỉ tham khảo "
                "tương đối, nên xem backlog/DCF.")
@@ -1118,7 +1209,8 @@ if "screen" in st.session_state:
     else:
         mc, px = drow.get("market_cap"), drow.get("price")
         # chuỗi 5 năm thực (DART nếu có) + 1 cột dự phóng bằng công thức
-        annual_series = build_annual_series(r.ticker, fin["annual"], mc, px, years=5)
+        annual_series = build_annual_series(r.ticker, fin["annual"], mc, px, years=5,
+                                            quarters=fin["quarter"])
         reals = [c for c in annual_series if not c.get("is_consensus")]
         la = reals[-1] if reals else None
         fcast = next((c for c in annual_series if c.get("is_forecast")), None)
@@ -1134,10 +1226,14 @@ if "screen" in st.session_state:
         b4.metric("Nợ/Tài sản %", f"{bs['debt_to_assets']}" if bs["debt_to_assets"] is not None else "—")
         b5.metric("EPS dự tính", f"{feps:,.0f}" if feps else "—")
         src = bs.get("source", "Ước tính")
-        cagr = f" · Doanh thu dự phóng theo CAGR {fcast['_cagr']:+.1f}%/năm" if fcast else ""
+        basis = (f" · Dự phóng năm {str(fcast['period'])[:4]}: {fcast.get('_basis')}"
+                 if fcast else "")
+        _ce = consensus_eps(fin["annual"], fcast["period"]) if fcast else None
+        if _ce and feps and _ce > 0 and feps > 0:
+            basis += f" · EPS đồng thuận Naver {_ce:,.0f} (lệch {(feps / _ce - 1) * 100:+.0f}%)"
         st.caption(f"Đơn vị 억원 = ×100 triệu KRW. Cân đối: **{src}** "
                    f"({'số gốc DART' if src == 'DART' else 'suy từ 부채비율×VCSH — ước tính'})."
-                   f"{cagr}")
+                   f"{basis}")
         if dart_unavailable:
             st.caption("ℹ️ Chưa có `DART_API_KEY` trong .env → lịch sử dùng Naver (≤3 năm thực). "
                        "Thêm key OpenDART để có đủ 5 năm thực + cân đối gốc.")
@@ -1163,12 +1259,13 @@ if "screen" in st.session_state:
         st.dataframe(chk, width="stretch", hide_index=True)
 
     # ---- Download Excel (kèm sheet "Bảng" đúng như màn hình) ----
-    tmp = "kci_screen_output.xlsx"
+    # Ghi vào bộ nhớ (không ra file chung trên đĩa): trên cloud nhiều người dùng cùng lúc
+    # sẽ không tải nhầm file của nhau.
+    _xbuf = io.BytesIO()
     export_excel(df.reindex(columns=[c for c in df.columns if c in COLUMN_KR]
-                            + ["valuation_tag"]), agg, tmp, val=vdf, table_df=disp)
-    with open(tmp, "rb") as f:
-        st.download_button("⬇️ Tải Excel", f.read(), file_name=tmp,
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                            + ["valuation_tag"]), agg, _xbuf, val=vdf, table_df=disp)
+    st.download_button("⬇️ Tải Excel", _xbuf.getvalue(), file_name="kci_screen_output.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.success(f"Xong: {len(df)} mã · {df['per'].notna().sum()} mã có P/E")
 
 
@@ -1176,50 +1273,177 @@ if "screen" in st.session_state:
 # 🔬 Backtest — kiểm định độ tin cậy thực nghiệm (top-level, luôn hiển thị)
 # ============================================================================
 st.divider()
-with st.expander("🔬 Backtest — đo sai số & tín hiệu của hệ thống (chạy chậm, cần mạng KRX)"):
-    st.caption("Định giá tại thời điểm QUÁ KHỨ bằng dữ liệu có-tại-lúc-đó rồi so với "
-               "GIÁ THỰC sau N tháng. Đo: sai số định giá · IC (upside có dự báo được "
-               "return không) · hiệu lực theo confidence. Đây là bằng chứng độ tin cậy.")
-    try:
-        import backtest as _bt
-    except Exception as _e:
-        _bt = None
-        st.error(f"Không nạp được backtest.py: {_e}")
-    if _bt is not None:
-        cba, cbb = st.columns(2)
-        bt_universe = cba.text_area(
-            "Mã backtest (mỗi dòng 1 ticker)",
-            value="005930\n000660\n035420\n105560\n055550\n005380\n000270\n"
-                  "005490\n051910\n207940\n068270\n012450\n015760\n017670",
-            height=160)
-        bt_asof = cbb.text_input("Mốc as-of (YYYY-MM-DD, cách nhau dấu phẩy)",
-                                 value="2023-06-30, 2023-12-29, 2024-06-28")
-        bt_h = cbb.slider("Horizon (tháng)", 3, 24, 12, 3)
-        cbb.caption("⚠️ Chạy mất vài phút. Cần mạng KRX (pykrx fundamental).")
-        if st.button("🚀 Chạy backtest", type="primary"):
-            tickers = [x.strip().zfill(6) for x in
-                       bt_universe.replace(",", "\n").splitlines() if x.strip()]
-            asofs = [x.strip() for x in bt_asof.split(",") if x.strip()]
-            bdf, bm = None, None
-            with st.spinner(f"Đang chạy {len(tickers)}×{len(asofs)} điểm..."):
-                try:
-                    bdf, bm = _bt.run_backtest(tickers, asofs, horizon_months=bt_h,
-                                               a=assume, verbose=False)
-                except Exception as e:
-                    st.error(f"Lỗi backtest: {e}")
-            if bm and bm.get("n"):
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Số điểm", bm["n"])
-                k2.metric("Sai số (median)", f"{bm.get('median_abs_error')}")
-                k3.metric("IC (Spearman)", f"{bm.get('IC_spearman')}")
-                k4.metric("Spread rẻ−đắt",
-                          f"{bm.get('spread_rẻ_trừ_đắt', '—')}")
-                st.markdown(_bt.report_markdown(bdf, bm, bt_h))
-                st.dataframe(bdf, width="stretch", hide_index=True)
-                st.download_button(
-                    "⬇️ Tải CSV backtest",
-                    bdf.to_csv(index=False).encode("utf-8-sig"),
-                    file_name="backtest_results.csv", mime="text/csv")
-            elif bm is not None:
-                st.warning("Không thu được điểm dữ liệu nào — kiểm tra mạng KRX, "
-                           "danh sách mã, hoặc mốc as-of.")
+_BT_DEFAULT = ("005930\n000660\n035420\n105560\n055550\n005380\n000270\n"
+               "005490\n051910\n207940\n068270\n012450\n015760\n017670")
+
+
+def _pct(x, d=1):
+    return None if x is None else round(x * 100, d)
+
+
+def _render_bt_dart(bdf: pd.DataFrame, bres: dict):
+    """Kết quả backtest DART (lưu trong session_state → còn nguyên khi bấm chỗ khác)."""
+    import backtest_dart as _bd
+    a_, m_ = bres["auto"], bres["meta"]
+    if not m_["kospi_ok"]:
+        st.error("Không tải được chỉ số KOSPI từ Naver → không tính được lợi suất vượt thị "
+                 "trường. Thử chạy lại sau ít phút.")
+    if not m_["points_with_return"]:
+        st.warning("Không có điểm nào đủ dữ liệu (BCTC DART + giá trước và sau mốc). Kiểm tra "
+                   "danh sách mã hoặc chọn các năm cũ hơn.")
+        return
+    q = {r["q"]: r for r in a_["quintiles"]}
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Điểm có lợi suất", m_["points_with_return"],
+              f"{m_['tickers']} mã · {m_['years'][0]}–{m_['years'][1]}", delta_color="off")
+    k2.metric("IC trung bình theo năm",
+              "—" if a_["mean_ic"] is None else f"{a_['mean_ic']:.3f}",
+              None if a_.get("t_stat") is None else f"t = {a_['t_stat']:.2f}",
+              delta_color="off")
+    k3.metric("IC gộp mọi năm", "—" if a_["ic_pooled"] is None else f"{a_['ic_pooled']:.3f}")
+    k4.metric("Q1 − Q5 (vượt KOSPI, trung vị)",
+              f"{(q[1]['median_excess'] - q[5]['median_excess']) * 100:+.1f} điểm %"
+              if (1 in q and 5 in q) else "—")
+    st.markdown(_bd.report_markdown(bres))
+    if m_["no_points"]:
+        st.warning("Không tạo được điểm nào cho: " + ", ".join(m_["no_points"]) +
+                   ". Thường do DART chưa có BCTC dạng cấu trúc (tập đoàn tài chính trước năm "
+                   "tài chính 2023), mã mới niêm yết, hoặc số cổ phiếu đổi mạnh không rõ "
+                   "nguyên nhân (sáp nhập).")
+    mrows = []
+    for k, e in sorted(bres["methods"].items(), key=lambda kv: -(kv[1]["mean_ic"] or -9)):
+        if e["n"] < 10:
+            continue
+        qq = {r["q"]: r for r in e["quintiles"]}
+        mrows.append({"Phương pháp": k, "n": e["n"],
+                      "IC TB": None if e["mean_ic"] is None else round(e["mean_ic"], 3),
+                      "IC gộp": None if e["ic_pooled"] is None else round(e["ic_pooled"], 3),
+                      "Q1 vượt KOSPI %": _pct(qq.get(1, {}).get("median_excess")),
+                      "Q5 vượt KOSPI %": _pct(qq.get(5, {}).get("median_excess")),
+                      "Q1 mất >30%": _pct(qq.get(1, {}).get("loss30"), 0),
+                      "Q5 mất >30%": _pct(qq.get(5, {}).get("loss30"), 0)})
+    if mrows:
+        st.markdown("**Từng phương pháp** (Q1 = 20% mã rẻ nhất theo phương pháp đó mỗi năm; "
+                    "cột %, trung vị)")
+        st.dataframe(pd.DataFrame(mrows), width="stretch", hide_index=True)
+    crow = []
+    for c, e in bres["by_confidence"].items():
+        sub = bdf[(bdf["confidence"] == c) & bdf["excess"].notna()]
+        crow.append({"Độ tin cậy": c, "n": e["n"],
+                     "IC gộp": None if e["ic_pooled"] is None else round(e["ic_pooled"], 3),
+                     "Vượt KOSPI trung vị %": _pct(sub["excess"].median()) if len(sub) else None,
+                     "Sai lệch |fair−giá| trung vị %":
+                         _pct(sub["abs_err"].median()) if sub["abs_err"].notna().any() else None})
+    if crow:
+        st.markdown("**Theo độ tin cậy của KCI**")
+        st.dataframe(pd.DataFrame(crow), width="stretch", hide_index=True)
+    ft = bres["forecast"]["table"]
+    if ft:
+        _MV = {"revenue": "Doanh thu", "op_profit": "LN hoạt động", "net_profit": "LN thuần"}
+        st.markdown("**Dự phóng 1 năm: công thức KCI so với naive (năm sau = năm trước)**, "
+                    "so với số DART thực")
+        st.dataframe(pd.DataFrame([{
+            "Chỉ tiêu": _MV.get(r["metric"], r["metric"]),
+            "Nguồn": "KCI" if r["source"] == "kci" else "Naive", "n": r["n"],
+            "Sai số tuyệt đối trung vị %": _pct(r["median_ape"]),
+            "Thiên lệch trung vị %": _pct(r["bias_median"]),
+            "Trong ±10%": _pct(r["within_10pct"], 0)} for r in ft]),
+            width="stretch", hide_index=True)
+    with st.expander(f"Chi tiết {len(bdf)} điểm định giá"):
+        st.dataframe(bdf, width="stretch", hide_index=True)
+    st.download_button("⬇️ Tải CSV backtest", bdf.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="backtest_dart.csv", mime="text/csv", key="bt_dart_csv")
+
+
+with st.expander("🔬 Backtest — kiểm chứng định giá trên dữ liệu quá khứ (point-in-time)"):
+    st.caption("Định giá lại tại mốc 15/4 mỗi năm CHỈ bằng thông tin có lúc đó (BCTC DART năm "
+               "trước, giá, beta 78 tuần, Rf tháng trước) rồi so với lợi suất vượt KOSPI sau N "
+               "tháng. Đo: IC (upside có dự báo được lợi suất không) · ngũ phân vị · tỷ lệ mất "
+               ">30% · độ chính xác dự phóng so với naive. Đây là bằng chứng độ tin cậy.")
+    bt_src = st.radio("Nguồn dữ liệu", ["DART — số gốc point-in-time (khuyến nghị)",
+                                        "KRX qua pykrx (cần tài khoản KRX)"],
+                      horizontal=True, key="bt_src")
+    cba, cbb = st.columns(2)
+    bt_universe = cba.text_area("Mã backtest (mỗi dòng 1 mã — ticker hoặc tên)",
+                                value=_BT_DEFAULT, height=160, key="bt_universe")
+    bt_queries = [x.strip() for x in bt_universe.replace(",", "\n").splitlines() if x.strip()]
+    if bt_src.startswith("DART"):
+        _today = _dt.date.today()
+        _ylast = _today.year if _today >= _dt.date(_today.year, 4, 15) else _today.year - 1
+        bt_years = cbb.slider("Các năm làm mốc (15/4)", 2017, _ylast,
+                              (max(2017, _ylast - 5), _ylast - 1), key="bt_years")
+        bt_hd = cbb.slider("Giữ (tháng)", 3, 24, 12, 3, key="bt_h_dart")
+        cbb.caption("Lần đầu ~30–60 giây cho 15 mã × 5 năm (gọi DART), các lần sau đọc cache "
+                    "`.cache/`. ERP, g, hệ số w theo sidebar; Rf và beta lấy theo từng mốc. "
+                    "Mốc chưa đủ N tháng thì chưa có lợi suất.")
+        if dart_unavailable:
+            st.error("❌ Cần `DART_API_KEY` (miễn phí tại opendart.fss.or.kr) trong `.env` — "
+                     "cloud: Settings → Secrets.")
+        elif st.button("🚀 Chạy backtest", type="primary", key="bt_run_dart"):
+            import backtest_dart as _bd
+            bt_tks = [reg.resolve(q) for q in bt_queries]
+            _bad = [q for q, t in zip(bt_queries, bt_tks) if not t]
+            if _bad:
+                st.warning(f"Bỏ qua (không nhận ra mã): {', '.join(_bad)}")
+            _bp = st.progress(0.0, text="Đang chuẩn bị...")
+            try:
+                st.session_state["bt_dart"] = _bd.run_backtest_dart(
+                    [t for t in bt_tks if t], years=bt_years, horizon_months=bt_hd, a=assume,
+                    registry=reg, progress=lambda s, x: _bp.progress(min(max(x, 0.0), 1.0), text=s))
+            except Exception as e:
+                st.error(f"Lỗi backtest: {e}")
+            _bp.empty()
+        if st.session_state.get("bt_dart"):
+            _render_bt_dart(*st.session_state["bt_dart"])
+    else:
+        try:
+            import backtest as _bt
+        except Exception as _e:
+            _bt = None
+            st.error(f"Không nạp được backtest.py: {_e}")
+        if _bt is not None:
+            bt_asof = cbb.text_input("Mốc as-of (YYYY-MM-DD, cách nhau dấu phẩy)",
+                                     value="2023-06-30, 2023-12-29, 2024-06-28", key="bt_asof")
+            bt_h = cbb.slider("Horizon (tháng)", 3, 24, 12, 3, key="bt_h_krx")
+            cbb.caption("⚠️ Chạy mất vài phút. Cần mạng KRX (pykrx fundamental) và tài khoản "
+                        "KRX: `KRX_ID` / `KRX_PW` trong .env (cloud: Secrets).")
+            if st.button("🚀 Chạy backtest", type="primary", key="bt_run_krx"):
+                tickers = [x.zfill(6) for x in bt_queries]
+                asofs = [x.strip() for x in bt_asof.split(",") if x.strip()]
+                bdf, bm = None, None
+                # Kiểm tra nguồn trước: KRX hiện bắt đăng nhập mới trả P/E–EPS–BPS lịch sử;
+                # thiếu tài khoản thì mọi điểm đều rỗng → báo ngay thay vì chạy vài phút ra 0 điểm.
+                with st.spinner("Kiểm tra nguồn dữ liệu KRX..."):
+                    try:
+                        _probe = _bt._asof_fundamental(tickers[0], asofs[0]) \
+                            if (tickers and asofs) else None
+                    except Exception:
+                        _probe = None
+                if _probe is None:
+                    st.error("❌ KRX không trả số liệu P/E–EPS–BPS lịch sử (pykrx báo cần đăng "
+                             "nhập). Cách sửa: tạo tài khoản miễn phí tại data.krx.co.kr rồi thêm "
+                             "`KRX_ID=...` và `KRX_PW=...` vào `.env` (cloud: Settings → "
+                             "Secrets), khởi động lại app. Hoặc chọn nguồn **DART** ở trên.")
+                else:
+                    with st.spinner(f"Đang chạy {len(tickers)}×{len(asofs)} điểm..."):
+                        try:
+                            bdf, bm = _bt.run_backtest(tickers, asofs, horizon_months=bt_h,
+                                                       a=assume, verbose=False)
+                        except Exception as e:
+                            st.error(f"Lỗi backtest: {e}")
+                if bm and bm.get("n"):
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("Số điểm", bm["n"])
+                    k2.metric("Sai số (median)", f"{bm.get('median_abs_error')}")
+                    k3.metric("IC (Spearman)", f"{bm.get('IC_spearman')}")
+                    k4.metric("Spread rẻ−đắt",
+                              f"{bm.get('spread_rẻ_trừ_đắt', '—')}")
+                    st.markdown(_bt.report_markdown(bdf, bm, bt_h))
+                    st.dataframe(bdf, width="stretch", hide_index=True)
+                    st.download_button(
+                        "⬇️ Tải CSV backtest",
+                        bdf.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="backtest_results.csv", mime="text/csv")
+                elif bm is not None:
+                    st.warning("Không thu được điểm dữ liệu nào — kiểm tra mạng KRX, "
+                               "danh sách mã, hoặc mốc as-of.")

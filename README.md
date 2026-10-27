@@ -56,7 +56,7 @@ Kết quả: file Excel 2 sheet — **Stocks** (bảng đầy đủ từng mã) 
 
 Hai tầng dữ liệu:
 - **`tickers.csv`** — ~77 bluechip curated: có ngành EN (Bank, Semiconductor…) + cột `theme` (chủ đề) → định giá khuyến nghị tốt nhất + browse theo chủ đề.
-- **`tickers_all.csv`** — **toàn bộ KOSPI+KOSDAQ (~4.400 mã)** kèm ngành KRX (업종), cào từ Naver bằng `build_full_registry.py`. `TickerRegistry` tự gộp 2 file.
+- **`tickers_all.csv`** — **toàn bộ cổ phiếu thường KOSPI+KOSDAQ (~2.590 mã**, đã bỏ ETF/ETN/SPAC/ưu đãi) kèm ngành KRX (업종), cào từ Naver bằng `build_full_registry.py`. `TickerRegistry` tự gộp 2 file.
 
 Trong app, mục **🗂️ Danh mục cổ phiếu** có 3 tab:
 - **📂 Nhóm lớn** — bluechip theo ngành EN (định giá tốt nhất).
@@ -66,6 +66,8 @@ Trong app, mục **🗂️ Danh mục cổ phiếu** có 3 tab:
 Bấm **📋 Thay vào ô** / **➕ Thêm vào ô** để nạp vào ô định giá → 🚀. Nhóm > 40 mã không tự chọn hết (định giá hàng loạt chậm ~0.4s/mã).
 
 Mã ngoài registry vẫn resolve/định giá được; ngành KRX (업종) được map sang bucket EN để vẫn gợi ý đúng phương pháp (vd 은행→Bank, 제약→Pharma).
+
+**Nhận diện mã** (`TickerRegistry.resolve_info`): mã 6 số hoặc mã chữ-số mới (vd `0001A0`) → tên đúng → tên *chứa* chuỗi gõ (ưu tiên tên bắt đầu bằng chuỗi gõ, rồi bluechip theo thứ tự `tickers.csv` — "삼성" ra 삼성전자, "KB" ra KB Financial) → fuzzy. Cổ phiếu ưu đãi (`삼성전자우`, `현대차2우B`…) được dò mã chuẩn KRX và xác minh tên qua Naver, **không bao giờ** đoán sang cổ phiếu thường. App hiện bảng **🔍 Đối chiếu mã** cho mọi dòng được đoán/trùng; mã nhập trùng chỉ cào 1 lần.
 
 ### Cập nhật danh sách toàn sàn
 
@@ -79,8 +81,8 @@ Mở `tickers.csv`, thêm dòng `name_en,name_kr,ticker,sector,market,theme`. C�
 
 ## Lưu ý nguồn dữ liệu
 
-- **pykrx** (primary): lấy giá & 52w high/low chạy tốt mọi nơi. PER/PBR/EPS/BPS/market-cap lấy từ KRX MDC — chạy ổn trên **máy cá nhân**; một số môi trường server/sandbox chặn endpoint này.
-- **Naver JSON** (fallback, `prefer="naver"`): chính nguồn VBA cũ dùng (`m.stock.naver.com/api`, `api.finance.naver.com`). Tự động bù field còn thiếu.
+- **Naver JSON** (mặc định của app, `prefer="naver"`): `m.stock.naver.com/api/stock/{mã}/integration` cho P/E, P/B, EPS, BPS, vốn hóa, cổ tức, 52T. **Giá** lấy realtime từ `polling.finance.naver.com` (50 mã/lần gọi) — trong phiên là giá khớp lệnh hiện tại, sau phiên là giá đóng cửa hôm nay; cột `Nguồn` ghi `+rt`. App ghi rõ giờ lấy giá.
+- **pykrx** (`prefer="pykrx"`): giá & 52T vẫn chạy; PER/PBR/EPS/BPS/vốn hóa từ KRX MDC hiện **bắt đăng nhập** (`KRX_ID`/`KRX_PW` trong `.env`), thiếu thì trả rỗng và hệ thống tự bù từ Naver.
 - Nếu một nguồn lỗi/thiếu, hệ thống tự thử nguồn kia và gộp data; cột `Nguồn` ghi rõ đã dùng nguồn nào.
 
 ```python
@@ -150,6 +152,7 @@ Input `net_income/market_cap/eps/bps` cũng là đầu vào cho pipeline L1 (`kc
 Lấy báo cáo tài chính **4 năm + 4 quý gần nhất** từ Naver (`/api/stock/{code}/finance/annual|quarter`): doanh thu, LN hoạt động, LN thuần, LN ròng cổ đông, ROE, biên LN, Nợ/VCSH (부채비율), thanh toán nhanh, EPS, BPS, PER, PBR, cổ tức — kèm **EPS dự tính** (cột consensus).
 
 - **Bảng cân đối suy ra**: Nợ, Tổng tài sản, Nợ/Tài sản từ `부채비율 × VCSH` (VCSH ≈ BPS × số cp). Là ước tính.
+- **Dự phóng năm (`project_forecast`)**: khi năm dự phóng **đã có quý thực công bố** (vd tháng 10 đã có Q1–Q2), doanh thu/LN = lũy kế quý thực + mỗi quý còn lại bằng trung bình 2 quý thực gần nhất; chưa có quý nào thì theo CAGR doanh thu × biên LN xu hướng. App đặt cạnh **EPS đồng thuận Naver** cùng năm và tô 🟡 khi lệch > 25%.
 - **`assess_financials()`** — chấm sức khỏe theo tiêu chuẩn đầu tư: Nợ/VCSH <100%, thanh toán nhanh >100%, ROE >10%, biên LN ròng >0, LN thuần dương & ổn định, doanh thu tăng trưởng → rating 🟢 An toàn / 🟡 Trung bình / 🔴 Cần thận trọng. Ngành tài chính (bank/bảo hiểm/chứng khoán) tự bỏ tiêu chí đòn bẩy.
 
 Trong app: mục **🔎 Chi tiết 1 mã** hiện bảng 4 năm/4 quý + thẻ Tổng vốn hóa/Nợ/Tổng tài sản/Nợ-trên-TS/EPS dự tính + đánh giá. Tick **📑 Bổ sung tài chính vào bảng** để thêm cột tổng quan cho cả bảng (cào thêm/mã).
@@ -162,7 +165,9 @@ pytest                 # toán định giá, dự phóng, beta, DART, app khởi
 KCI_E2E=1 pytest       # thêm bài chạy THẬT: cào mã + bảng định giá + EV/EBIT (cần mạng/DART key)
 ```
 
-`tests/test_app.py` dùng Streamlit **AppTest** (thực thi toàn bộ script) và **pyflakes** (bắt tên chưa định nghĩa) — chặn lỗi kiểu `NameError` trước khi lên cloud. Phiên bản thư viện được chốt trong `requirements.txt`; nâng cấp thì sửa số ở đó rồi chạy `pytest`.
+`tests/test_app.py` dùng Streamlit **AppTest** (thực thi toàn bộ script, cả trang 🚀/📰) và **pyflakes** trên mọi module + `pages/` (bắt tên chưa định nghĩa) — chặn lỗi kiểu `NameError` trước khi lên cloud.
+
+Mục **🔬 Backtest** trong app mặc định chạy **point-in-time trên số gốc DART** (`backtest_dart.py`, chỉ cần `DART_API_KEY`): mốc 15/4 mỗi năm chỉ dùng BCTC năm trước, giá Naver đã điều chỉnh chia tách, beta 78 tuần và Rf tháng trước → đo IC, ngũ phân vị, tỷ lệ mất >30% và độ chính xác dự phóng so với naive. Cache ở `.cache/` (lần đầu ~30 giây cho 14 mã × 5 năm). Nguồn cũ qua pykrx (`backtest.py`) vẫn chọn được nhưng cần `KRX_ID`/`KRX_PW`. Chi tiết: `HUONG_DAN_BACKTEST.md`. Phiên bản thư viện được chốt trong `requirements.txt`; nâng cấp thì sửa số ở đó rồi chạy `pytest`.
 
 ## 🚀 Siêu cổ phiếu tăng trưởng (trang riêng)
 

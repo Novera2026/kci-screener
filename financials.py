@@ -182,10 +182,10 @@ def _trend_value(xs: list[float]) -> Optional[float]:
 
 
 def _shares_estimate(reals: list[dict], market_cap: Optional[float],
-                     price: Optional[float]) -> Optional[float]:
-    """Số cổ phiếu: ưu tiên suy từ LN thuần / EPS (cùng kỳ), fallback vốn hóa/giá."""
+                     price: Optional[float], field: str = "net_profit") -> Optional[float]:
+    """Số cổ phiếu: ưu tiên suy từ LN (field) / EPS cùng kỳ, fallback vốn hóa/giá."""
     for c in reversed(reals):
-        np_, eps = c.get("net_profit"), c.get("eps")
+        np_, eps = c.get(field), c.get("eps")
         if np_ and eps and np_ > 0 and eps > 0:   # cùng dấu dương → số cp hợp lệ
             return np_ * 1e8 / eps                 # 억원 -> 원 rồi chia EPS (원/cp)
     if market_cap and price and price > 0:
@@ -202,13 +202,45 @@ def _next_label(reals: list[dict]) -> str:
     return "FCST"
 
 
+def _ytd_run_rate(reals: list[dict], quarters: Optional[list[dict]]) -> Optional[dict]:
+    """Năm dự phóng ĐÃ CÓ quý thực công bố → ước cả năm = lũy kế các quý đã công bố
+    + mỗi quý còn lại bằng trung bình 2 quý thực gần nhất (run-rate, không ngoại suy).
+
+    Trả {revenue, op_profit, net_profit, k} (k = số quý đã công bố) hoặc None nếu chưa
+    có quý nào của năm dự phóng / năm tài chính không kết thúc tháng 12 / thiếu số."""
+    if not quarters or not reals or str(reals[-1].get("period", ""))[4:6] != "12":
+        return None
+    fy = str(int(str(reals[-1]["period"])[:4]) + 1)
+    q_real = sorted((c for c in quarters if not c.get("is_consensus")
+                     and str(c.get("period", ""))[:6].isdigit()),
+                    key=lambda c: str(c["period"]))
+    ytd = [c for c in q_real if str(c["period"])[:4] == fy]
+    k = len(ytd)
+    if not 1 <= k <= 4:
+        return None
+    recent = q_real[-2:]
+    out = {"k": k}
+    for m in ("revenue", "op_profit", "net_profit", "ctrl_net"):
+        vals = [c.get(m) for c in ytd]
+        rr = [c.get(m) for c in recent if c.get(m) is not None]
+        if any(v is None for v in vals) or not rr:
+            out[m] = None
+            continue
+        out[m] = sum(vals) + (4 - k) * sum(rr) / len(rr)
+    return out if out.get("revenue") else None
+
+
 def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
-                     price: Optional[float] = None) -> Optional[dict]:
+                     price: Optional[float] = None,
+                     quarters: Optional[list[dict]] = None) -> Optional[dict]:
     """Dự phóng 1 năm tới bằng CÔNG THỨC minh bạch (không dùng consensus Naver):
 
       • Doanh thu: CAGR các năm thực, kẹp [-20%, +40%]  →  DT(t+1) = DT(t)·(1+g)
       • LN HĐ / LN thuần: biên LN theo XU HƯỚNG (đơn điệu→nghiêng năm gần đây;
         nhiễu→median) × DT dự phóng — tránh under/over-forecast ngành chu kỳ
+      • Có `quarters` và năm dự phóng đã có quý thực công bố → DT/LN = lũy kế quý thực
+        + quý còn lại theo run-rate 2 quý gần nhất (_ytd_run_rate) thay cho CAGR/biên
+        (vd tháng 10 đã có 2-3 quý của năm: không được bỏ qua số thực đó)
       • EPS: LN thuần dự phóng / số cp (suy từ LN/EPS cùng kỳ)
       • BPS: BPS(t) + EPS dự phóng − cổ tức/cp(t)   (lợi nhuận giữ lại)
       • ROE: EPS/BPS dự phóng
@@ -231,9 +263,26 @@ def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
                         if c.get("net_profit") is not None and c.get("revenue")])
     op_fc = rev_fc * opm if opm is not None else None
     net_fc = rev_fc * npm if npm is not None else None
+    basis = f"CAGR doanh thu {g * 100:+.1f}%/năm × biên LN xu hướng"
+    ytd = _ytd_run_rate(reals, quarters)
+    if ytd:
+        rev_fc = ytd["revenue"]
+        g = rev_fc / revs[-1] - 1 if revs[-1] and revs[-1] > 0 else g
+        op_fc = ytd["op_profit"] if ytd["op_profit"] is not None else op_fc
+        net_fc = ytd["net_profit"] if ytd["net_profit"] is not None else net_fc
+        opm = op_fc / rev_fc if (op_fc is not None and rev_fc) else opm
+        npm = net_fc / rev_fc if (net_fc is not None and rev_fc) else npm
+        basis = (f"{ytd['k']} quý thực đã công bố"
+                 + (f" + {4 - ytd['k']} quý ước theo TB 2 quý gần nhất" if ytd["k"] < 4 else ""))
     shares = _shares_estimate(reals, market_cap, price)
     last = reals[-1]
     eps_fc = net_fc * 1e8 / shares if (net_fc is not None and shares) else None
+    # EPS là của cổ đông công ty mẹ: có LN 지배주주 lũy kế quý → dùng nó (tập đoàn có cổ
+    # đông thiểu số lớn như LG Chem/SK: LN hợp nhất và LN công ty mẹ có thể trái dấu)
+    if ytd and ytd.get("ctrl_net") is not None:
+        sh_c = _shares_estimate(reals, None, None, field="ctrl_net")
+        if sh_c:
+            eps_fc = ytd["ctrl_net"] * 1e8 / sh_c
     dps = last.get("dps") or 0
     bps_last = last.get("bps")
     bps_fc = (bps_last + eps_fc - dps) if (bps_last is not None and eps_fc is not None) \
@@ -254,6 +303,7 @@ def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
     return {
         "period": _next_label(reals), "label": _next_label(reals)[:4],
         "is_consensus": True, "is_forecast": True, "_cagr": round(g * 100, 1),
+        "_basis": basis,
         "revenue": round(rev_fc) if rev_fc is not None else None,
         "op_profit": round(op_fc) if op_fc is not None else None,
         "net_profit": round(net_fc) if net_fc is not None else None,
@@ -367,19 +417,32 @@ def _merge_dart(naver_annual: list[dict], ticker: str) -> list[dict]:
 
 def build_annual_series(ticker: str, naver_annual: list[dict],
                         market_cap: Optional[float] = None,
-                        price: Optional[float] = None, years: int = 5) -> list[dict]:
+                        price: Optional[float] = None, years: int = 5,
+                        quarters: Optional[list[dict]] = None) -> list[dict]:
     """Chuỗi năm để hiển thị: tối đa `years` năm THỰC (DART nếu có, fallback Naver)
-    + 1 cột dự phóng bằng công thức. Thứ tự thời gian tăng dần."""
+    + 1 cột dự phóng bằng công thức (tính cả quý thực của năm dự phóng nếu có
+    `quarters`). Thứ tự thời gian tăng dần."""
     reals = _merge_dart(naver_annual, ticker)[-years:]
-    fc = project_forecast(reals, market_cap, price)
+    fc = project_forecast(reals, market_cap, price, quarters=quarters)
     return reals + ([fc] if fc else [])
 
 
+def consensus_eps(annual: list[dict], period: Optional[str] = None) -> Optional[float]:
+    """EPS đồng thuận (Naver, cột isConsensus) — chỉ để ĐỐI CHIẾU với dự phóng công thức.
+    period: chỉ lấy khi đúng năm đó (vd '202612'), tránh so lệch năm."""
+    for c in reversed(annual):
+        if c.get("is_consensus") and c.get("eps") is not None and not c.get("is_forecast"):
+            if period is None or str(c.get("period", ""))[:4] == str(period)[:4]:
+                return c["eps"]
+    return None
+
+
 def forecast_eps(annual: list[dict], market_cap: Optional[float] = None,
-                 price: Optional[float] = None) -> Optional[float]:
+                 price: Optional[float] = None,
+                 quarters: Optional[list[dict]] = None) -> Optional[float]:
     """EPS dự tính bằng công thức (ưu tiên), fallback consensus Naver nếu công thức N/A."""
     fc = project_forecast([c for c in annual if not c.get("is_consensus")],
-                          market_cap, price)
+                          market_cap, price, quarters=quarters)
     if fc and fc.get("eps") is not None:
         return fc["eps"]
     for c in reversed(annual):

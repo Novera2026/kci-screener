@@ -71,3 +71,140 @@ def test_account_names_normalized():
     assert D._norm("자산 총계") == D._norm("자산총계")
     assert D._norm("부채 총계") in D._ACCOUNTS_NORM["liabilities"]
     assert D._norm("자본 및 부채 총계") not in D._ACCOUNTS_NORM["liabilities"]
+
+
+# ---- dự phóng năm: dùng quý THỰC đã công bố của năm dự phóng ----
+_BASE = {"is_consensus": False, "dps": 0, "bps": 10_000}
+_REALS = [dict(_BASE, period="202312", revenue=1000, op_profit=100, net_profit=80, eps=800),
+          dict(_BASE, period="202412", revenue=1100, op_profit=110, net_profit=88, eps=880),
+          dict(_BASE, period="202512", revenue=1200, op_profit=120, net_profit=96, eps=960)]
+_QTRS = [{"period": p, "is_consensus": c, "revenue": r, "op_profit": o, "net_profit": n}
+         for p, c, r, o, n in [("202509", False, 300, 30, 24), ("202512", False, 320, 32, 26),
+                               ("202603", False, 600, 90, 70), ("202606", False, 800, 140, 110),
+                               ("202609", True, 900, 150, 120)]]
+
+
+def test_forecast_uses_reported_quarters_of_forecast_year():
+    fc = F.project_forecast(_REALS, quarters=_QTRS)
+    # 2 quý thực 2026 (600 + 800) + 2 quý còn lại × TB 2 quý gần nhất (700); bỏ quý consensus
+    assert fc["period"] == "202612" and fc["revenue"] == 2800
+    assert fc["net_profit"] == 70 + 110 + 2 * 90
+    assert fc["eps"] == round(360e8 / (96e8 / 960))
+    assert "2 quý thực" in fc["_basis"]
+
+
+
+def test_forecast_eps_uses_controlling_profit_when_reported():
+    # tập đoàn có cổ đông thiểu số lớn: LN hợp nhất dương nhưng LN công ty mẹ âm
+    reals = [dict(c, ctrl_net=c["net_profit"] / 2) for c in _REALS]   # cp = 48e8/960 = 5e6
+    q = [dict(c, ctrl_net=-c["net_profit"]) for c in _QTRS]
+    fc = F.project_forecast(reals, quarters=q)
+    assert fc["net_profit"] == 360                       # LN hợp nhất vẫn giữ để hiển thị
+    assert fc["eps"] == round(-360e8 / 5e6)              # EPS theo LN công ty mẹ
+
+def test_forecast_without_quarters_keeps_annual_formula():
+    # lab (KCI-Valuation-Lab) gọi không truyền quý → giữ nguyên công thức CAGR cũ
+    assert F.project_forecast(_REALS)["revenue"] == round(1200 * 1.2 ** 0.5)
+    non_dec = [dict(c, period=c["period"][:4] + "03") for c in _REALS]
+    assert F.project_forecast(non_dec, quarters=_QTRS)["revenue"] == round(1200 * 1.2 ** 0.5)
+
+
+def test_consensus_eps_same_year_only():
+    annual = _REALS + [{"period": "202612", "is_consensus": True, "eps": 1500}]
+    assert F.consensus_eps(annual, "202612") == 1500
+    assert F.consensus_eps(annual, "202712") is None
+
+
+# ---- screener: nhận diện mã ----
+@pytest.fixture(scope="module")
+def reg():
+    r = S.TickerRegistry()
+    r._krx_loaded = True            # không gọi pykrx/KRX trong test offline
+    return r
+
+
+def test_resolve_short_name_prefers_bluechip(reg):
+    assert reg.resolve("삼성") == "005930"          # trước đây ra 삼성제약
+    assert reg.resolve("Samsung") == "005930"       # trước đây ra Samsung Fire & Marine
+    assert reg.resolve("KB") == "105560"            # trước đây ra KBI동양철관
+    info = reg.resolve_info("삼성")
+    assert info["how"] == "contains" and info["alts"]
+
+
+def test_resolve_alphanumeric_ticker(reg):
+    assert reg.resolve("0001a0") == "0001A0"
+
+
+def test_preferred_share_never_maps_to_common(reg, monkeypatch):
+    monkeypatch.setattr(S, "_naver_name", lambda code: None)
+    assert reg.resolve("삼성전자우") is None         # trước đây lặng lẽ ra 005930 (cp thường)
+    monkeypatch.setattr(S, "_naver_name",
+                        lambda code: "삼성전자우" if code == "005935" else "x")
+    info = reg.resolve_info("삼성전자우")
+    assert (info["ticker"], info["how"]) == ("005935", "preferred")
+
+
+def test_fetch_many_dedupes_and_overlays_live_price(reg, monkeypatch):
+    calls = []
+
+    def fake(tk, registry=None, prefer="naver", live=True):
+        calls.append((tk, live))
+        return S.StockRow(ticker=tk, price=100.0, source="naver")
+    monkeypatch.setattr(S, "fetch_one", fake)
+    monkeypatch.setattr(S, "fetch_live_prices", lambda tks: {"005930": 123.0})
+    res = []
+    rows, un = S.fetch_many(["005930", "삼성전자", "000660", "zzzz_khong_co"],
+                            registry=reg, resolutions=res)
+    assert sorted(calls) == [("000660", False), ("005930", False)]   # mã trùng cào 1 lần
+    assert [r["ticker"] for r in rows] == ["005930", "000660"]
+    assert (rows[0]["price"], rows[0]["source"]) == (123.0, "naver+rt")
+    assert (rows[1]["price"], rows[1]["source"]) == (100.0, "naver")
+    assert un == ["zzzz_khong_co"] and res[1].get("dup")
+
+
+def test_fetch_live_prices_batches_50(monkeypatch):
+    urls = []
+
+    class _R:
+        def __init__(self, codes):
+            self.codes = codes
+
+        def json(self):
+            return {"datas": [{"itemCode": c, "closePrice": "1,234"} for c in self.codes]
+                    + [{"itemCode": "HALT", "closePrice": "0"}]}
+
+    def fake_get(url, **kw):
+        urls.append(url)
+        return _R(url.rsplit("/", 1)[1].split(","))
+    monkeypatch.setattr("requests.get", fake_get)
+    out = S.fetch_live_prices([f"{i:06d}" for i in range(120)])
+    assert len(urls) == 3 and len(out) == 120 and out["000007"] == 1234.0
+
+
+def test_sector_aggregates_groups_by_krx_industry_when_no_sector():
+    import pandas as pd
+    base = {"price": 100.0, "market_cap": 1e12, "net_income": 1e11, "pbr": 1.0,
+            "bps": 100.0, "div_yield": 2.0}
+    df = pd.DataFrame([dict(base, ticker="A", sector="Bank", industry_kr="은행", per=10.0),
+                       dict(base, ticker="B", sector=None, industry_kr="조선", per=8.0),
+                       dict(base, ticker="C", sector=None, industry_kr="조선", per=-5.0),
+                       dict(base, ticker="D", sector=None, industry_kr="화학", per=12.0)])
+    agg = S.sector_aggregates(df).set_index("sector")
+    assert set(agg.index) == {"Bank", "조선", "화학"}      # trước đây B/C/D gộp chung 1 nhóm NaN
+    assert agg.loc["조선", "median_P/E"] == 8.0           # median bỏ P/E âm
+
+
+def test_dart_year_cache_skips_repeat_requests(monkeypatch):
+    calls = []
+
+    def raw(cc, y):
+        calls.append((cc, y))
+        return {"period": f"{y}12", "revenue": 1.0} if y < 2026 else None
+    monkeypatch.setattr(D, "_fetch_year_raw", raw)
+    monkeypatch.setattr(D, "_YEAR_CACHE", {})
+    for _ in range(3):
+        D._fetch_year("X", 2025)
+        D._fetch_year("X", 2026)                    # chưa nộp → không nhớ, lần sau hỏi lại
+    assert calls.count(("X", 2025)) == 1 and calls.count(("X", 2026)) == 3
+    D._fetch_year("X", 2025)["revenue"] = 99        # sửa bản trả về không làm bẩn cache
+    assert D._fetch_year("X", 2025)["revenue"] == 1.0
