@@ -4,13 +4,22 @@ import pytest
 
 import valuation as V
 
-A = V.Assumptions()          # Rf 3.2%, ERP 6.5%, beta 1.0 → Ke 9.7%
+A = V.Assumptions(erp=0.065)  # các phép tính tay bên dưới: Rf 3.2%, ERP 6.5%, beta 1.0 → Ke 9.7%
 
 
 def test_ke_and_beta_clamp():
     assert A.ke() == pytest.approx(0.097)
     assert A.ke_with(5.0) == pytest.approx(0.032 + 1.8 * 0.065)   # kẹp trên 1.8
     assert A.ke_with(0.1) == pytest.approx(0.032 + 0.5 * 0.065)   # kẹp dưới 0.5
+
+
+def test_default_erp_is_damodaran_and_stock_beta_is_blume_adjusted():
+    d = V.Assumptions()
+    assert d.erp == pytest.approx(0.0487)                         # Damodaran Hàn Quốc 01/2026 (như lab)
+    assert d.ke_stock(1.74) == pytest.approx(0.032 + (0.67 * 1.74 + 0.33) * 0.0487)   # Hynix 52T
+    assert d.ke_stock(0.1) == pytest.approx(0.032 + (0.67 * 0.5 + 0.33) * 0.0487)     # kẹp rồi Blume
+    assert d.ke_stock(None) == pytest.approx(d.ke())              # không có beta riêng → beta mặc định
+    assert V.Assumptions(blume=False).ke_stock(1.74) == pytest.approx(0.032 + 1.74 * 0.0487)
 
 
 def test_srim_known_value():
@@ -91,3 +100,42 @@ def test_cyclical_uses_midcycle_when_history_given():
     hist6 = hist + [{"net_profit": 1, "roe": r} for r in (8.0, 12.0, 14.0)]
     res6, _ = V.value_batch(pd.DataFrame([row]), A, histories={"S": hist6})
     assert res6[0].confidence == "Medium"               # đủ ≥5 năm → Medium
+
+
+def _rv(roe, price=100_000, bps=100_000, dps=0, sector="Insurance", **kw):
+    row = {"ticker": "T", "name": "t", "sector": sector, "price": price, "eps": roe * bps,
+           "bps": bps, "dps": dps}
+    row.update(kw)
+    return row
+
+
+def test_book_intrinsic_is_median_of_three_not_degenerate_pb_roe():
+    # ROE 2,5% ≈ g 2%: P/B-ROE hợp lý ≈ 0,07× book (suy biến), S-RIM ≈ 0,63× → trung vị bộ ba
+    r = V.value_stock(_rv(0.025), A)
+    trio = [r.methods[k] for k in ("S-RIM", "P/B-ROE (justified)", "RIM nhiều giai đoạn") if r.methods.get(k)]
+    assert len(trio) == 3 and r.methods["P/B-ROE (justified)"] < 0.1 * 100_000
+    assert r.fair_raw == pytest.approx(sorted(trio)[1])
+    assert "trung vị 3 PP" in r.auto_method
+
+
+def test_triangulates_with_peer_anchor_when_intrinsic_far():
+    # nội tại ≈ 1,7× book; peer P/E 5 × EPS 15.000 = 75.000 và P/B 0,7 → 70.000: lệch > 2× → 50/50
+    r = V.value_stock(_rv(0.15, price=60_000, dps=3_000, sector="Bank"), A,
+                      sector_median_pe=5.0, sector_median_pb=0.7)
+    intr = sorted(r.methods[k] for k in ("S-RIM", "P/B-ROE (justified)", "RIM nhiều giai đoạn"))[1]
+    anchor = sorted([r.methods["P/E vs median ngành"], r.methods["P/B vs median ngành"]])
+    anchor = sum(anchor) / 2
+    assert intr / anchor > 2 and r.triangulated and r.status.startswith("△")
+    assert r.fair_raw == pytest.approx(0.5 * intr + 0.5 * anchor)
+    assert r.confidence == "Low"
+
+
+def test_reliability_gate_withholds_extreme_fair_value():
+    # Doosan-like: ROE 2,2% ≈ g, giá 2,7× book → fair < 0,4× giá → không công bố
+    r = V.value_stock(_rv(0.022, price=270_000), A)
+    assert r.fair_value is None and r.upside_pct is None and not r.reliable
+    assert r.fair_raw and r.fair_raw / 270_000 < 0.4
+    assert r.status.startswith("⚪") and r.confidence == "Low"
+    assert r.to_dict()["fair_value"] is None and r.to_dict()["fair_raw"] == round(r.fair_raw)
+    ok = V.value_stock(_rv(0.12, price=150_000), A)            # trong vùng → công bố
+    assert ok.reliable and ok.fair_value and 0.4 <= ok.fair_value / 150_000 <= 2.5

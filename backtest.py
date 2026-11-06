@@ -144,8 +144,9 @@ def value_points(points: list[dict], a: Optional[Assumptions] = None) -> pd.Data
                "industry_kr": r.get("industry_kr"), "eps": r.get("eps"),
                "bps": r.get("bps"), "dps": r.get("dps"), "price": r["price0"]}
         res = value_stock(row, a, r.get("med_pe"), r.get("med_pb"))
-        fair.append(res.fair_value)
-        ups.append(res.upside_pct / 100 if res.upside_pct is not None else None)
+        fv = res.fair_raw if res.fair_raw is not None else res.fair_value   # tín hiệu thô (xem backtest_dart)
+        fair.append(fv)
+        ups.append((fv / r["price0"] - 1) if (fv and r["price0"]) else None)
         conf.append(res.confidence)
         method.append(res.auto_method)
     df["fair_value"] = fair

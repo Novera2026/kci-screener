@@ -25,8 +25,12 @@ from typing import Optional
 @dataclass
 class Assumptions:
     rf: float = 0.032          # KGB 10Y ~ 3.2% (cập nhật theo thời điểm)
-    erp: float = 0.065         # Equity Risk Premium house = 6.5%
+    # ERP = ERP tổng cho Hàn Quốc của Damodaran (thị trường trưởng thành 4,23% + quốc gia 0,64%, 05/01/2026),
+    # đồng bộ KCI-Valuation-Lab (lab/capital.py). Trước 06/11/2026 là 6,5% "house" — cao hơn tham chiếu
+    # 1,6 điểm %, cộng với beta hồi quy thô đẩy Ke nhóm bán dẫn lên 15–16% (Hynix, SEMCO, SK Square).
+    erp: float = 0.0487
     beta: float = 1.0          # clamp [0.5, 1.8]
+    blume: bool = True         # beta hồi quy TỪNG MÃ → Blume 0,67·β + 0,33 (kéo về 1, như beta điều chỉnh Bloomberg)
     g_terminal: float = 0.020  # tăng trưởng vĩnh viễn, cap 2.5% & ≤ Rf
     g_high: float = 0.08       # tăng trưởng giai đoạn đầu (DCF/DDM 2 stage)
     years_high: int = 5        # số năm giai đoạn tăng trưởng cao
@@ -43,6 +47,17 @@ class Assumptions:
         """Ke với beta tùy chọn (per-stock). None → dùng beta mặc định. β kẹp [0.5, 1.8]."""
         b = self.beta if beta is None else beta
         b = min(max(b, 0.5), 1.8)
+        return self.rf + b * self.erp
+
+    def ke_stock(self, beta_raw: Optional[float]) -> float:
+        """Ke cho beta hồi quy riêng từng mã: kẹp [0.5, 1.8] rồi Blume (nếu bật). Beta hồi quy 52 tuần so với
+        KOSPI 2026 bị nhóm bán dẫn chi phối (ngân hàng 0,2–0,3; bán dẫn 1,7–1,8) — Blume giảm sai số ước lượng.
+        Không có beta riêng → Ke với beta mặc định (không Blume)."""
+        if beta_raw is None:
+            return self.ke()
+        b = min(max(beta_raw, 0.5), 1.8)
+        if self.blume:
+            b = 0.67 * b + 0.33
         return self.rf + b * self.erp
 
     def g_term_capped(self) -> float:
@@ -497,6 +512,11 @@ class ValuationResult:
     confidence: str = "Medium"
     note: str = ""
     flags: list = field(default_factory=list)
+    # Cổng tin cậy (06/11/2026): fair/giá ngoài [0,4; 2,5] → không công bố fair_value (None), giữ số thô ở đây
+    reliable: bool = True
+    fair_raw: Optional[float] = None
+    triangulated: bool = False
+    status: str = "✓"
 
     def to_dict(self) -> dict:
         d = {
@@ -512,6 +532,8 @@ class ValuationResult:
             "ROE_thị_trường_ngụ_ý": round(self.implied_roe * 100, 1)
                 if self.implied_roe is not None else None,
             "confidence": self.confidence,
+            "status": self.status,
+            "fair_raw": round(self.fair_raw) if self.fair_raw else None,
         }
         for k, v in self.methods.items():
             d[k] = round(v) if v else None
@@ -528,6 +550,16 @@ _AUTO_LABEL = {
     "S-RIM": "S-RIM",
 }
 
+
+# Bộ ba mô hình sổ sách cùng nền ROE (lấy trung vị) và các phương pháp tương đối (phép neo peer).
+_BOOK_TRIO = {
+    "trailing": ("S-RIM", "P/B-ROE (justified)", "RIM nhiều giai đoạn"),
+    "mid": ("S-RIM (mid-cycle)", "P/B-ROE (mid-cycle)", "RIM nhiều giai đoạn (mid-cycle)"),
+}
+_RELATIVE_METHODS = {"P/E vs median ngành", "P/B vs median ngành", "Forward P/E vs median ngành",
+                     "EPS chuẩn hóa × P/E ngành"}
+ANCHOR_BAND = (0.5, 2.0)      # nội tại / trung vị phép neo peer — ngoài dải thì tam giác hóa 50/50
+RELIABLE_BAND = (0.4, 2.5)    # fair / giá — ngoài dải: không công bố fair (cổng cứng bằng số)
 
 # Thứ hạng confidence để áp "trần" (cap không cho vượt mức cho phép).
 _CONF_RANK = {"High": 3, "Medium": 2, "Low": 1}
@@ -553,7 +585,7 @@ def value_stock(row: dict, a: Assumptions,
     (coverage.assess_coverage(...)['confidence_cap']). Dùng cho mã mới niêm yết /
     thiếu lịch sử — không cho confidence vượt trần dù method có hội tụ."""
     _beta = _num(row.get("beta"))            # beta riêng từng mã (52T) nếu có
-    ke = a.ke_with(_beta)
+    ke = a.ke_stock(_beta)
     g_term = a.g_term_capped()
     eps = _num(row.get("eps"))
     bps = _num(row.get("bps"))
@@ -597,6 +629,8 @@ def value_stock(row: dict, a: Assumptions,
     if mid_roe is not None and bps is not None:
         methods["S-RIM (mid-cycle)"] = srim(bps, mid_roe, ke, w=a.persistence)
         methods["P/B-ROE (mid-cycle)"] = justified_pb_value(bps, mid_roe, ke, g_term)
+        methods["RIM nhiều giai đoạn (mid-cycle)"] = rim_multistage(
+            bps, mid_roe, ke, a.years_high, g_term, payout=_payout)
         methods["EPS chuẩn hóa × P/E ngành"] = relative_pe_value(mid_roe * bps, sector_median_pe)
 
     is_cyclical = sec_eff in CYCLICAL_SECTORS
@@ -624,6 +658,31 @@ def value_stock(row: dict, a: Assumptions,
                 auto_label, fair = fb, methods[fb]
                 flags.append(f"method chính thiếu data → dùng {fb}")
                 break
+
+    # --- Lõi nội tại bền (06/11/2026): P/B-ROE hợp lý = BPS·(ROE−g)/(Ke−g) tiến về 0 khi ROE ≈ g (Doosan
+    #     Enerbility 0,02× giá, Hanwha Ocean 0,07×), S-RIM lại cao khi ROE < Ke và P/B thấp (POSCO 2,2×). Ba mô
+    #     hình sổ sách cùng nền ROE → lấy TRUNG VỊ thay vì tin một công thức.
+    basis = next((b for b, ks in _BOOK_TRIO.items() if auto_label in ks), None)
+    if basis:
+        trio = [methods[k] for k in _BOOK_TRIO[basis] if methods.get(k)]
+        if len(trio) >= 2:
+            fair = _median(trio)
+            auto_label = (f"Nội tại sổ sách — trung vị {len(trio)} PP "
+                          f"({'mid-cycle' if basis == 'mid' else 'ROE hiện tại'})")
+    # --- Đối chiếu phép neo peer: nội tại ngoài [0,5×; 2×] trung vị bội số peer → tam giác hóa 50/50
+    #     (cùng luật với KCI-Valuation-Lab: phương pháp chính giữ ≥ 50%). Ngành chu kỳ dùng EPS chuẩn hóa.
+    rel_keys = (("EPS chuẩn hóa × P/E ngành", "P/B vs median ngành") if used_midcycle
+                else ("P/E vs median ngành", "Forward P/E vs median ngành", "P/B vs median ngành"))
+    rel = [methods[k] for k in rel_keys if methods.get(k)]
+    anchor = _median(rel) if len(rel) >= 2 else None
+    triangulated = False
+    if fair and anchor and auto_label not in _RELATIVE_METHODS:
+        r = fair / anchor
+        if not ANCHOR_BAND[0] <= r <= ANCHOR_BAND[1]:
+            flags.append(f"nội tại = {r:.2f}× trung vị {len(rel)} phép neo peer (ngoài "
+                         f"[{ANCHOR_BAND[0]}; {ANCHOR_BAND[1]}]×) → tam giác hóa 50/50")
+            fair = 0.5 * fair + 0.5 * anchor
+            triangulated = True
 
     # --- Confidence (§9) ---
     conf = "Medium"
@@ -661,6 +720,22 @@ def value_stock(row: dict, a: Assumptions,
                 or methods.get("S-RIM (ROE dự phóng)"))
     fwd_upside = round((fwd_fair / price - 1) * 100, 1) if (fwd_fair and price) else None
 
+    # --- Cổng tin cậy bằng số (06/11/2026): mô hình dữ liệu quá khứ cho fair < 0,4× hoặc > 2,5× giá là lỗi đặc
+    #     tả cho tới khi chứng minh được (tăng trưởng/chu kỳ/tái cấu trúc mà ROE quá khứ không nắm được) — không
+    #     công bố làm mục tiêu giá. Số thô vẫn giữ ở fair_raw và methods để soi.
+    fair_raw, reliable = fair, True
+    status = "△ tam giác hóa" if triangulated else "✓"
+    if triangulated:
+        conf = "Low"
+    if fair and price and not RELIABLE_BAND[0] <= fair / price <= RELIABLE_BAND[1]:
+        flags.append(f"⚪ fair = {fair / price:.2f}× giá (ngoài [{RELIABLE_BAND[0]}; {RELIABLE_BAND[1]}]×): KCI "
+                     "(ROE/EPS quá khứ) không giải thích được giá — KHÔNG dùng làm mục tiêu giá; xem báo cáo "
+                     "nghiên cứu hoặc DCF có dự phóng")
+        fair, upside, reliable, conf, status = None, None, False, "Low", "⚪ ngoài vùng tin cậy"
+    if fwd_fair and price and not RELIABLE_BAND[0] <= fwd_fair / price <= RELIABLE_BAND[1]:
+        flags.append(f"fair dự phóng = {fwd_fair / price:.2f}× giá — ngoài vùng tin cậy, không công bố")
+        fwd_fair, fwd_upside = None, None
+
     # §9/§14: trần confidence theo độ phủ dữ liệu (mã mới niêm yết / thiếu lịch sử)
     capped = _cap_conf(conf, coverage_cap)
     if capped != conf:
@@ -673,7 +748,8 @@ def value_stock(row: dict, a: Assumptions,
         primary=guide["primary"], cross=guide["cross"], auto_method=auto_label,
         fair_value=fair, upside_pct=upside, fwd_fair=fwd_fair,
         fwd_upside_pct=fwd_upside, implied_roe=implied_roe, confidence=conf,
-        note=guide["note"], flags=flags,
+        note=guide["note"], flags=flags, reliable=reliable, fair_raw=fair_raw,
+        triangulated=triangulated, status=status,
     )
 
 

@@ -380,13 +380,16 @@ def value_points(points: list[dict], a: Optional[V.Assumptions] = None) -> list[
             except Exception:
                 continue
             price = row["price"]
+            # Chấm TÍN HIỆU THÔ của mô hình (fair_raw): cổng tin cậy chỉ quyết định có công bố hay không,
+            # không được làm mất điểm cực trị khỏi phép đo IC; cột reliable để tách riêng hai nhóm.
+            fv = res.fair_raw if res.fair_raw is not None else res.fair_value
             out.append({
                 "year": year, "date": p["date"], "ticker": row["ticker"],
                 "name": row.get("name"), "industry": ik, "sector_eff": sec,
-                "price": price, "fair": res.fair_value, "method": res.auto_method,
-                "confidence": res.confidence,
-                "upside": (res.fair_value / price - 1) if res.fair_value else None,
-                "abs_err": abs(res.fair_value / price - 1) if res.fair_value else None,
+                "price": price, "fair": fv, "method": res.auto_method,
+                "confidence": res.confidence, "reliable": res.reliable,
+                "upside": (fv / price - 1) if fv else None,
+                "abs_err": abs(fv / price - 1) if fv else None,
                 "method_upsides": {m: (x / price - 1) for m, x in res.methods.items()
                                    if x and price},
                 "fwd_date": p["fwd_date"], "ret": p["ret"], "kospi_ret": p["kospi_ret"],

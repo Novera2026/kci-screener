@@ -105,7 +105,9 @@ with st.sidebar:
     rf = st.slider("Rf — TPCP Hàn 10Y (%)", 1.0, 6.0, _rf_def, 0.1) / 100
     st.caption(f"🛰️ Rf mặc định LIVE từ FRED: **{_rf_def}%**" if _rf0 else
                "⚠️ Không lấy được Rf live → mặc định 3.2%. Chỉnh tay nếu cần.")
-    erp = st.slider("ERP — phần bù rủi ro VCSH (%)", 4.0, 9.0, 6.5, 0.1) / 100
+    erp = st.slider("ERP — phần bù rủi ro VCSH (%)", 4.0, 9.0, round(Assumptions().erp * 100, 2), 0.01,
+                    help="Mặc định = ERP tổng cho Hàn Quốc của Damodaran (01/2026), cùng nguồn với "
+                         "KCI-Valuation-Lab. Beta riêng từng mã được điều chỉnh Blume (0,67β + 0,33).") / 100
     beta_auto = st.checkbox("β riêng từng mã (52 tuần vs KOSPI, tự tính)", value=True,
                             help="Bật: mỗi mã dùng beta thực 52T. Tắt: dùng beta phẳng dưới đây.")
     beta = st.slider("Beta mặc định (khi tắt β riêng / thiếu dữ liệu)", 0.5, 1.8, 1.0, 0.05)
@@ -945,10 +947,10 @@ if "screen" in st.session_state:
         "ticker": "Mã", "name": "Tên", "sector": "Ngành", "price": "Giá",
         "fair_value": "Fair value", "upside_%": "Upside %",
         "fwd_upside_%": "Fwd upside %", "auto_method": "PP áp dụng",
-        "confidence": "Độ tin cậy",
+        "confidence": "Độ tin cậy", "status": "Trạng thái",
     }
     summary_cols = ["ticker", "name", "sector", "price", "fair_value", "upside_%",
-                    "fwd_upside_%", "auto_method", "confidence"]
+                    "fwd_upside_%", "auto_method", "confidence", "status"]
     vsum = vdf[summary_cols].copy()
     vsum.columns = [VAL_KR.get(c, c) for c in summary_cols]
 
@@ -1031,7 +1033,7 @@ if "screen" in st.session_state:
     _vorder = ["Mã", "Tên", "Ngành", "Giá",
                "Fair value", "Upside %", "Fwd upside %",      # nội tại + forward
                "EV/EBIT", "Upside EV/EBIT %", "Upside FCFF %",  # EV/dòng tiền (khi bật)
-               "PP áp dụng", "Độ tin cậy"]                     # chú thích → cuối
+               "PP áp dụng", "Độ tin cậy", "Trạng thái"]       # chú thích → cuối
     vsum = vsum[[c for c in _vorder if c in vsum.columns]]
 
     _vfmt = {"Giá": "{:,.0f}", "Fair value": "{:,.0f}", "Upside %": "{:+.1f}",
@@ -1053,7 +1055,10 @@ if "screen" in st.session_state:
         "⚪ trắng = **hợp lý** (±15%) · 🔴 đỏ = **đắt/định giá thấp hơn giá** (≤ −15%). "
         "Cột **Độ tin cậy**: 🟢 High · 🟡 Medium · 🔴 Low. "
         "Cột **EV/EBIT**: 🟢 ≤12 (rẻ) · 🔴 ≥30 (đắt). "
-        "Màu chỉ GỢI Ý — luôn đọc kèm cảnh báo ngành chu kỳ (PP P/E?, ghi chú dưới).")
+        "Màu chỉ GỢI Ý — luôn đọc kèm cảnh báo ngành chu kỳ (PP P/E?, ghi chú dưới). "
+        "Cột **Trạng thái**: ✓ = nội tại khớp phép neo peer · △ = nội tại lệch peer >2× nên lấy 50/50 "
+        "(tin cậy Thấp) · ⚪ = fair ngoài 0,4–2,5× giá → KCI không công bố (mô hình ROE/EPS quá khứ "
+        "không giải thích được giá: tăng trưởng, chu kỳ, tái cấu trúc). Số thô xem ở Chi tiết 1 mã.")
 
     # ---- Chi tiết 1 mã: định giá + tài chính 4 năm/4 quý + cân đối ----
     st.subheader("🔎 Chi tiết 1 mã")
@@ -1094,6 +1099,15 @@ if "screen" in st.session_state:
               f"{r.fwd_upside_pct:+.1f}%" if r.fwd_upside_pct is not None else None)
     c4.metric("Độ tin cậy định giá", disp_conf,
               "↓ chặn trần" if disp_conf != r.confidence else None)
+    if not getattr(r, "reliable", True):
+        st.warning(f"⚪ **KCI không công bố giá trị hợp lý cho mã này.** Số thô "
+                   f"{r.fair_raw:,.0f} KRW = {r.fair_raw / r.price:.2f}× giá, ngoài vùng tin cậy 0,4–2,5×: "
+                   "mô hình dựa trên ROE/EPS quá khứ không giải thích được giá hiện tại. Dùng báo cáo "
+                   "nghiên cứu (DCF có dự phóng theo mảng) thay vì con số này."
+                   if r.fair_raw and r.price else "⚪ KCI không công bố giá trị hợp lý cho mã này.")
+    elif getattr(r, "triangulated", False):
+        st.caption("△ Nội tại lệch trung vị phép neo peer quá 2× → giá trị hợp lý = 50% nội tại + 50% peer "
+                   "(tin cậy Thấp). Xem bảng phương pháp bên dưới.")
     if cov:
         st.caption("📊 Độ phủ dữ liệu: " + coverage.coverage_badge(cov))
         if cov.get("is_new_listing"):
@@ -1102,8 +1116,9 @@ if "screen" in st.session_state:
                 f"· _cross-check:_ {', '.join(r.cross)}")
     _bv = drow.get("beta")
     st.caption(f"📐 CAPM: **Ke = {r.ke*100:.2f}%** · Rf = {assume.rf*100:.2f}% (FRED) · "
-               f"ERP = {assume.erp*100:.1f}% · β = "
-               + (f"**{_bv:.2f}** (52T riêng mã)" if _bv else f"{assume.beta:.2f} (phẳng)"))
+               f"ERP = {assume.erp*100:.2f}% · β = "
+               + (f"**{_bv:.2f}** (52T riêng mã, Blume → {0.67 * min(max(_bv, 0.5), 1.8) + 0.33:.2f})"
+                  if _bv else f"{assume.beta:.2f} (phẳng)"))
     st.info(r.note)
     if getattr(r, "implied_roe", None) is not None:
         cur = f" · ROE hiện tại ~{r.roe*100:.0f}%" if r.roe else ""

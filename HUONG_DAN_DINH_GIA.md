@@ -52,7 +52,7 @@ App đã **tự gợi ý** phương pháp + ghi chú cho từng mã ở mục **
 | **P/E, P/B vs median ngành** | EPS × median P/E ngành | So tương đối trong nhóm | Chỉ cross-check, không phải base |
 
 **Các tham số (chỉnh ở sidebar):**
-- **Ke** (lợi suất yêu cầu) = Rf + Beta × ERP. Mặc định Rf 3.2% (TPCP Hàn 10Y), ERP 6.5%, Beta 1.0 → Ke ≈ 9.7%.
+- **Ke** (lợi suất yêu cầu) = Rf + Beta × ERP. Rf LIVE (TPCP Hàn 10Y, FRED), ERP mặc định **4,87%** (ERP tổng cho Hàn Quốc của Damodaran, 01/2026 — cùng nguồn với KCI-Valuation-Lab; trước 06/11/2026 là 6,5%). Beta riêng từng mã (52 tuần vs KOSPI) được kẹp 0,5–1,8 rồi **điều chỉnh Blume** 0,67·β + 0,33, vì beta hồi quy 2026 bị nhóm bán dẫn chi phối.
 - **g vĩnh viễn**: cap 2.5% (≤ tăng trưởng GDP danh nghĩa dài hạn). Không đặt cao hơn.
 - **w (S-RIM)**: 1.0 = siêu lợi nhuận giữ mãi; 0.8–0.9 = phai dần (thận trọng hơn).
 
@@ -64,5 +64,16 @@ App đã **tự gợi ý** phương pháp + ghi chú cho từng mã ở mục **
 - **Fair ≪ giá thị trường** (vd Samsung −50%): KHÔNG phải "app sai". Đây thường là **boom premium** — thị trường đang định giá một siêu chu kỳ (AI/HBM). Dùng tư duy *reverse*: "giá này ngụ ý tăng trưởng/biên bao nhiêu? Có hợp lý không?".
 - **Fair ≫ giá thị trường** (upside lớn): coi chừng **value trap** hoặc dữ liệu bị méo (EPS one-off). Kiểm lại trước khi mừng.
 - **Độ tin cậy Low**: ngành cần phương pháp app chưa làm tự động (DCF đầy đủ/SOTP/EV/rNPV) → coi như tham chiếu, không phải khuyến nghị mua/bán.
+
+### Cổng tin cậy (06/11/2026)
+
+- **Lõi nội tại sổ sách = trung vị của S-RIM, P/B-ROE và RIM nhiều giai đoạn** (cùng nền ROE: hiện tại, hoặc mid-cycle
+  với ngành chu kỳ). P/B-ROE hợp lý tiến về 0 khi ROE ≈ g (Doosan Enerbility từng ra 0,02× giá); S-RIM lại cao khi
+  ROE < Ke và P/B thấp. Không tin một công thức.
+- **△ tam giác hóa**: nội tại lệch trung vị các phép neo peer (P/E, P/E dự phóng, P/B so với ngành) quá 2× → giá trị
+  hợp lý = 50% nội tại + 50% peer, độ tin cậy Thấp (cùng luật với lab: phương pháp chính giữ ≥ 50%).
+- **⚪ ngoài vùng tin cậy**: giá trị hợp lý < 0,4× hoặc > 2,5× giá → **không công bố** (cột Fair value để "—").
+  Mô hình dựa trên ROE/EPS quá khứ không giải thích được giá (tăng trưởng, chu kỳ, tái cấu trúc). Số thô vẫn xem
+  được ở Chi tiết 1 mã (`fair_raw`) và bảng phương pháp. Backtest chấm số thô để không mất các điểm cực trị.
 
 > ⚠️ Đây là công cụ sàng lọc, **không phải khuyến nghị đầu tư**. Luôn đối chiếu báo cáo tài chính gốc (DART/KRX) trước khi quyết định.

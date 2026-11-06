@@ -56,6 +56,11 @@ def test_full_screen_run():
     assert not at.exception, at.exception
     frames = [d.value for d in at.dataframe]
     assert any("Fair value" in getattr(f, "columns", []) for f in frames)
+    vt = next(f for f in frames if "Trạng thái" in getattr(f, "columns", []))   # cổng tin cậy 06/11/2026
+    assert set(vt["Trạng thái"]) <= {"✓", "△ tam giác hóa", "⚪ ngoài vùng tin cậy"}
+    # fair công bố luôn nằm trong vùng 0,4–2,5× giá (mã ngoài vùng → "—")
+    pub = vt.dropna(subset=["Fair value"])
+    assert all(0.4 <= fv / px <= 2.5 for fv, px in zip(pub["Fair value"], pub["Giá"]))
     assert any("Giá realtime" in c.value for c in at.caption)       # có giờ lấy giá
     assert any("EPS đồng thuận" in getattr(f, "columns", []) for f in frames)
     cb = [c for c in at.checkbox if "EV/EBIT" in c.label]
