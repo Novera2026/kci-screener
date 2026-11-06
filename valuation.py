@@ -15,6 +15,7 @@ Nguyên tắc (đồng bộ spec):
 Chỉ phụ thuộc thư viện chuẩn (math). Không thêm dependency.
 """
 from __future__ import annotations
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -78,10 +79,13 @@ def _pos(x) -> Optional[float]:
 
 
 def _num(x) -> Optional[float]:
+    """Số hữu hạn hoặc None. NaN/inf (median ngành rỗng từ pandas, beta thiếu) → None — trước 06/11 NaN lọt qua,
+    biến fair thành NaN và làm to_dict() lỗi."""
     try:
-        return float(x)
+        v = float(x)
     except (TypeError, ValueError):
         return None
+    return v if math.isfinite(v) else None
 
 
 # ----------------------------------------------------------------------------
@@ -160,7 +164,7 @@ CYCLICAL_SECTORS = {"Semiconductor", "Steel/Chemicals", "Shipbuilding",
 
 
 def _median(xs: list) -> Optional[float]:
-    xs = sorted(v for v in xs if v is not None)
+    xs = sorted(v for v in xs if v is not None and math.isfinite(v))
     if not xs:
         return None
     n = len(xs)
@@ -517,6 +521,7 @@ class ValuationResult:
     fair_raw: Optional[float] = None
     triangulated: bool = False
     status: str = "✓"
+    confidence_model: str = "Medium"              # độ tin của mô hình trước cổng công bố (backtest dùng)
 
     def to_dict(self) -> dict:
         d = {
@@ -533,7 +538,7 @@ class ValuationResult:
                 if self.implied_roe is not None else None,
             "confidence": self.confidence,
             "status": self.status,
-            "fair_raw": round(self.fair_raw) if self.fair_raw else None,
+            "fair_raw": round(self.fair_raw) if self.fair_raw and math.isfinite(self.fair_raw) else None,
         }
         for k, v in self.methods.items():
             d[k] = round(v) if v else None
@@ -559,6 +564,7 @@ _BOOK_TRIO = {
 _RELATIVE_METHODS = {"P/E vs median ngành", "P/B vs median ngành", "Forward P/E vs median ngành",
                      "EPS chuẩn hóa × P/E ngành"}
 ANCHOR_BAND = (0.5, 2.0)      # nội tại / trung vị phép neo peer — ngoài dải thì tam giác hóa 50/50
+IRRECONCILABLE = (0.25, 4.0)  # ngoài dải này: không trộn, không công bố
 RELIABLE_BAND = (0.4, 2.5)    # fair / giá — ngoài dải: không công bố fair (cổng cứng bằng số)
 
 # Thứ hạng confidence để áp "trần" (cap không cho vượt mức cho phép).
@@ -600,14 +606,23 @@ def value_stock(row: dict, a: Assumptions,
     implied_roe = implied_roe_from_price(price, bps, ke, g_term)
 
     methods: dict = {}
-    methods["S-RIM"] = srim(bps, roe, ke, w=a.persistence) if roe is not None else None
-    methods["P/B-ROE (justified)"] = justified_pb_value(bps, roe, ke, g_term) \
-        if roe is not None else None
     # RIM nhiều giai đoạn (tường minh): payout suy từ DPS/EPS (mặc định giữ lại hết).
     _payout = (dps / eps) if (eps and dps and eps > 0) else \
         (a.payout if a.payout is not None else 0.0)
-    methods["RIM nhiều giai đoạn"] = rim_multistage(
-        bps, roe, ke, a.years_high, g_term, payout=_payout) if roe is not None else None
+
+    # 06/11/2026: ROE < Ke mà vẫn tăng trưởng g = tái đầu tư phá hủy giá trị mãi mãi (cùng nguyên tắc KCI-Valuation-
+    # Lab). Với ROE ≈ g, P/B hợp lý (ROE−g)/(Ke−g) tiến về 0 (ROE 2,5% → 0,06× book) dù doanh nghiệp vẫn có lãi.
+    # Khi ROE < Ke: g = 0 → P/B = ROE/Ke (và RIM nhiều giai đoạn trả hết lợi nhuận, cùng kết quả).
+    def _pb_roe(r):
+        return justified_pb_value(bps, r, ke, g_term if r >= ke else 0.0)
+
+    def _rim_ms(r):
+        return (rim_multistage(bps, r, ke, a.years_high, g_term, payout=_payout) if r >= ke
+                else rim_multistage(bps, r, ke, a.years_high, 0.0, payout=1.0))
+
+    methods["S-RIM"] = srim(bps, roe, ke, w=a.persistence) if roe is not None else None
+    methods["P/B-ROE (justified)"] = _pb_roe(roe) if roe is not None else None
+    methods["RIM nhiều giai đoạn"] = _rim_ms(roe) if roe is not None else None
     methods["DDM (Gordon)"] = ddm_gordon(dps, ke, g_term)
     methods["DDM 2 giai đoạn"] = ddm_two_stage(dps, ke, a.g_high, a.years_high, g_term)
     methods["DCF earnings (thô)"] = dcf_earnings(eps, ke, a.g_high, a.years_high, g_term)
@@ -628,9 +643,8 @@ def value_stock(row: dict, a: Assumptions,
     used_midcycle = False
     if mid_roe is not None and bps is not None:
         methods["S-RIM (mid-cycle)"] = srim(bps, mid_roe, ke, w=a.persistence)
-        methods["P/B-ROE (mid-cycle)"] = justified_pb_value(bps, mid_roe, ke, g_term)
-        methods["RIM nhiều giai đoạn (mid-cycle)"] = rim_multistage(
-            bps, mid_roe, ke, a.years_high, g_term, payout=_payout)
+        methods["P/B-ROE (mid-cycle)"] = _pb_roe(mid_roe)
+        methods["RIM nhiều giai đoạn (mid-cycle)"] = _rim_ms(mid_roe)
         methods["EPS chuẩn hóa × P/E ngành"] = relative_pe_value(mid_roe * bps, sector_median_pe)
 
     is_cyclical = sec_eff in CYCLICAL_SECTORS
@@ -675,10 +689,15 @@ def value_stock(row: dict, a: Assumptions,
                 else ("P/E vs median ngành", "Forward P/E vs median ngành", "P/B vs median ngành"))
     rel = [methods[k] for k in rel_keys if methods.get(k)]
     anchor = _median(rel) if len(rel) >= 2 else None
-    triangulated = False
+    triangulated, irreconcilable = False, False
     if fair and anchor and auto_label not in _RELATIVE_METHODS:
         r = fair / anchor
-        if not ANCHOR_BAND[0] <= r <= ANCHOR_BAND[1]:
+        if not IRRECONCILABLE[0] <= r <= IRRECONCILABLE[1]:
+            # một trong hai mô hình hỏng; trộn 50/50 chỉ ra ~nửa phép neo và "hồi sinh" số mà cổng sẽ chặn
+            irreconcilable = True
+            flags.append(f"nội tại = {r:.2f}× trung vị {len(rel)} phép neo peer (ngoài [{IRRECONCILABLE[0]}; "
+                         f"{IRRECONCILABLE[1]}]×) — hai cách định giá không dung hòa được, không công bố")
+        elif not ANCHOR_BAND[0] <= r <= ANCHOR_BAND[1]:
             flags.append(f"nội tại = {r:.2f}× trung vị {len(rel)} phép neo peer (ngoài "
                          f"[{ANCHOR_BAND[0]}; {ANCHOR_BAND[1]}]×) → tam giác hóa 50/50")
             fair = 0.5 * fair + 0.5 * anchor
@@ -716,25 +735,43 @@ def value_stock(row: dict, a: Assumptions,
         elif upside >= 60:
             flags.append("fair ≫ thị giá: khả năng value trap/data méo — kiểm lại")
 
-    fwd_fair = (methods.get("Forward P/E vs median ngành")
-                or methods.get("S-RIM (ROE dự phóng)"))
-    fwd_upside = round((fwd_fair / price - 1) * 100, 1) if (fwd_fair and price) else None
+    fwd_cands = [methods.get(k) for k in ("Forward P/E vs median ngành", "S-RIM (ROE dự phóng)")]
+    fwd_fair = next((v for v in fwd_cands if v), None)
 
     # --- Cổng tin cậy bằng số (06/11/2026): mô hình dữ liệu quá khứ cho fair < 0,4× hoặc > 2,5× giá là lỗi đặc
     #     tả cho tới khi chứng minh được (tăng trưởng/chu kỳ/tái cấu trúc mà ROE quá khứ không nắm được) — không
     #     công bố làm mục tiêu giá. Số thô vẫn giữ ở fair_raw và methods để soi.
     fair_raw, reliable = fair, True
-    status = "△ tam giác hóa" if triangulated else "✓"
     if triangulated:
         conf = "Low"
-    if fair and price and not RELIABLE_BAND[0] <= fair / price <= RELIABLE_BAND[1]:
+    conf_model = conf                          # độ tin của MÔ HÌNH (trước cổng công bố) — dùng cho backtest
+    if fair is None:
+        status = "— không đủ dữ liệu"
+    elif not price:
+        status, reliable = "⚪ thiếu giá để kiểm", False
+        flags.append("thiếu giá → không kiểm được vùng tin cậy, không công bố")
+    elif irreconcilable:
+        status, reliable = "⚪ nội tại và peer lệch >4×", False
+    elif not RELIABLE_BAND[0] <= fair / price <= RELIABLE_BAND[1]:
         flags.append(f"⚪ fair = {fair / price:.2f}× giá (ngoài [{RELIABLE_BAND[0]}; {RELIABLE_BAND[1]}]×): KCI "
                      "(ROE/EPS quá khứ) không giải thích được giá — KHÔNG dùng làm mục tiêu giá; xem báo cáo "
                      "nghiên cứu hoặc DCF có dự phóng")
-        fair, upside, reliable, conf, status = None, None, False, "Low", "⚪ ngoài vùng tin cậy"
-    if fwd_fair and price and not RELIABLE_BAND[0] <= fwd_fair / price <= RELIABLE_BAND[1]:
-        flags.append(f"fair dự phóng = {fwd_fair / price:.2f}× giá — ngoài vùng tin cậy, không công bố")
-        fwd_fair, fwd_upside = None, None
+        status, reliable = "⚪ ngoài vùng tin cậy", False
+    elif triangulated:
+        status = "△ tam giác hóa"
+    elif anchor is None:
+        status = "○ chưa đối chiếu peer"
+    else:
+        status = "✓"
+    if not reliable:
+        fair, upside, conf = None, None, "Low"
+    # fair dự phóng: ứng viên đầu tiên nằm trong vùng tin cậy
+    fwd_ok = [v for v in fwd_cands if v and price and RELIABLE_BAND[0] <= v / price <= RELIABLE_BAND[1]]
+    if fwd_fair and not fwd_ok:
+        flags.append(f"fair dự phóng = {fwd_fair / price:.2f}× giá — ngoài vùng tin cậy, không công bố"
+                     if price else "fair dự phóng: thiếu giá, không công bố")
+    fwd_fair = fwd_ok[0] if fwd_ok else None
+    fwd_upside = round((fwd_fair / price - 1) * 100, 1) if (fwd_fair and price) else None
 
     # §9/§14: trần confidence theo độ phủ dữ liệu (mã mới niêm yết / thiếu lịch sử)
     capped = _cap_conf(conf, coverage_cap)
@@ -749,7 +786,7 @@ def value_stock(row: dict, a: Assumptions,
         fair_value=fair, upside_pct=upside, fwd_fair=fwd_fair,
         fwd_upside_pct=fwd_upside, implied_roe=implied_roe, confidence=conf,
         note=guide["note"], flags=flags, reliable=reliable, fair_raw=fair_raw,
-        triangulated=triangulated, status=status,
+        triangulated=triangulated, status=status, confidence_model=conf_model,
     )
 
 

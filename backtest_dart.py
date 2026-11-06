@@ -387,7 +387,8 @@ def value_points(points: list[dict], a: Optional[V.Assumptions] = None) -> list[
                 "year": year, "date": p["date"], "ticker": row["ticker"],
                 "name": row.get("name"), "industry": ik, "sector_eff": sec,
                 "price": price, "fair": fv, "method": res.auto_method,
-                "confidence": res.confidence, "reliable": res.reliable,
+                # độ tin của MÔ HÌNH (trước cổng công bố), để nhóm by_confidence không lẫn mã bị giữ lại
+                "confidence": getattr(res, "confidence_model", res.confidence), "reliable": res.reliable,
                 "upside": (fv / price - 1) if fv else None,
                 "abs_err": abs(fv / price - 1) if fv else None,
                 "method_upsides": {m: (x / price - 1) for m, x in res.methods.items()

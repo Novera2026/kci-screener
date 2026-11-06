@@ -109,13 +109,18 @@ def _rv(roe, price=100_000, bps=100_000, dps=0, sector="Insurance", **kw):
     return row
 
 
-def test_book_intrinsic_is_median_of_three_not_degenerate_pb_roe():
-    # ROE 2,5% ≈ g 2%: P/B-ROE hợp lý ≈ 0,07× book (suy biến), S-RIM ≈ 0,63× → trung vị bộ ba
+def test_low_roe_uses_no_growth_not_degenerate_pb_roe():
+    # ROE 2,5% ≈ g 2% < Ke 9,7%: công thức cũ (ROE−g)/(Ke−g) = 0,065× book (suy biến). Không giả định tăng trưởng
+    # phá hủy giá trị → g = 0: P/B = ROE/Ke ≈ 0,26×; RIM nhiều giai đoạn trả hết lợi nhuận cho cùng giá trị.
     r = V.value_stock(_rv(0.025), A)
-    trio = [r.methods[k] for k in ("S-RIM", "P/B-ROE (justified)", "RIM nhiều giai đoạn") if r.methods.get(k)]
-    assert len(trio) == 3 and r.methods["P/B-ROE (justified)"] < 0.1 * 100_000
-    assert r.fair_raw == pytest.approx(sorted(trio)[1])
+    m = r.methods
+    assert m["P/B-ROE (justified)"] == pytest.approx(100_000 * 0.025 / 0.097)
+    assert m["RIM nhiều giai đoạn"] == pytest.approx(m["P/B-ROE (justified)"], rel=1e-9)
+    assert m["S-RIM"] > m["P/B-ROE (justified)"]
+    assert r.fair_raw == pytest.approx(m["P/B-ROE (justified)"]) and r.fair_raw > 0.2 * 100_000
     assert "trung vị 3 PP" in r.auto_method
+    hi = V.value_stock(_rv(0.15), A)                   # ROE > Ke: giữ tăng trưởng g như cũ
+    assert hi.methods["P/B-ROE (justified)"] == pytest.approx(100_000 * 0.13 / 0.077)
 
 
 def test_triangulates_with_peer_anchor_when_intrinsic_far():
@@ -139,3 +144,45 @@ def test_reliability_gate_withholds_extreme_fair_value():
     assert r.to_dict()["fair_value"] is None and r.to_dict()["fair_raw"] == round(r.fair_raw)
     ok = V.value_stock(_rv(0.12, price=150_000), A)            # trong vùng → công bố
     assert ok.reliable and ok.fair_value and 0.4 <= ok.fair_value / 150_000 <= 2.5
+
+
+def test_nan_peer_medians_and_beta_do_not_poison_fair():
+    # median ngành NaN (pandas, ngành không map) và beta NaN (mới niêm yết) → coi như thiếu, không lan NaN
+    row = {"ticker": "N", "name": "n", "sector": None, "price": 60_000, "eps": 5_000, "bps": 50_000, "dps": 0,
+           "beta": float("nan")}
+    r = V.value_stock(row, A, float("nan"), float("nan"))
+    assert r.ke == pytest.approx(A.ke()) and r.fair_value and r.fair_value == r.fair_value
+    assert r.methods["P/E vs median ngành"] is None
+    assert r.status.startswith("○")                    # không có phép neo peer để đối chiếu
+    r.to_dict()                                         # không còn lỗi round(NaN)
+
+
+def test_irreconcilable_intrinsic_vs_peer_is_withheld_not_blended():
+    # nội tại ~0,08× giá, peer ~0,96× giá: trộn 50/50 sẽ "hồi sinh" ~0,5× giá → nay không công bố
+    row = _rv(0.022, price=270_000, fwd_eps=7_000)
+    r = V.value_stock(row, A, sector_median_pe=40.0, sector_median_pb=2.6)
+    assert r.fair_value is None and not r.reliable and not r.triangulated
+    assert r.status.startswith("⚪ nội tại và peer")
+
+
+def test_missing_price_withholds_and_status_states():
+    r = V.value_stock(_rv(0.12, price=None), A)
+    assert r.fair_value is None and r.fair_raw and r.status.startswith("⚪ thiếu giá")
+    none = V.value_stock({"ticker": "Z", "name": "z", "sector": None, "price": 10_000}, A)
+    assert none.fair_value is None and none.status.startswith("—")
+
+
+def test_forward_fair_falls_back_to_in_band_candidate():
+    # Forward P/E 9.000 × 40 = 360.000 (3,6× giá) ngoài vùng; S-RIM theo ROE dự phóng trong vùng → dùng nó
+    row = _rv(0.12, price=100_000, fwd_eps=9_000, fwd_roe=0.20)
+    r = V.value_stock(row, A, sector_median_pe=40.0)
+    assert r.methods["Forward P/E vs median ngành"] / 100_000 > 2.5
+    assert r.fwd_fair == pytest.approx(r.methods["S-RIM (ROE dự phóng)"])
+    assert 0.4 <= r.fwd_fair / 100_000 <= 2.5
+
+
+def test_confidence_model_kept_for_backtests():
+    r = V.value_stock(_rv(0.022, price=270_000), A)    # bị giữ lại vì ngoài vùng
+    assert r.confidence == "Low" and r.confidence_model in ("Low", "Medium")
+    ok = V.value_stock(_rv(0.12, price=150_000, sector="Bank"), A)
+    assert ok.confidence_model == ok.confidence

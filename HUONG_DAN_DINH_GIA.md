@@ -68,11 +68,14 @@ App đã **tự gợi ý** phương pháp + ghi chú cho từng mã ở mục **
 ### Cổng tin cậy (06/11/2026)
 
 - **Lõi nội tại sổ sách = trung vị của S-RIM, P/B-ROE và RIM nhiều giai đoạn** (cùng nền ROE: hiện tại, hoặc mid-cycle
-  với ngành chu kỳ). P/B-ROE hợp lý tiến về 0 khi ROE ≈ g (Doosan Enerbility từng ra 0,02× giá); S-RIM lại cao khi
-  ROE < Ke và P/B thấp. Không tin một công thức.
+  với ngành chu kỳ). **Khi ROE < Ke, không giả định tăng trưởng** (g = 0): P/B hợp lý = ROE/Ke, thay vì
+  (ROE−g)/(Ke−g) tiến về 0 khi ROE ≈ g (Doosan Enerbility từng ra 0,02× giá) — tăng trưởng ở ROE dưới chi phí vốn là
+  phá hủy giá trị, cùng nguyên tắc với KCI-Valuation-Lab.
 - **△ tam giác hóa**: nội tại lệch trung vị các phép neo peer (P/E, P/E dự phóng, P/B so với ngành) quá 2× → giá trị
   hợp lý = 50% nội tại + 50% peer, độ tin cậy Thấp (cùng luật với lab: phương pháp chính giữ ≥ 50%).
-- **⚪ ngoài vùng tin cậy**: giá trị hợp lý < 0,4× hoặc > 2,5× giá → **không công bố** (cột Fair value để "—").
+- **⚪ không công bố** (cột Fair value để "—"): giá trị hợp lý < 0,4× hoặc > 2,5× giá; nội tại và peer lệch > 4× (một
+  trong hai mô hình hỏng — trộn 50/50 chỉ ra nửa phép neo); hoặc thiếu giá. Cột "Giá hợp lý (P/E)" ở bảng chính qua
+  cùng cổng. **○ chưa đối chiếu peer**: ngành có < 3 mã trong danh sách nên chưa có phép neo. **— không đủ dữ liệu**.
   Mô hình dựa trên ROE/EPS quá khứ không giải thích được giá (tăng trưởng, chu kỳ, tái cấu trúc). Số thô vẫn xem
   được ở Chi tiết 1 mã (`fair_raw`) và bảng phương pháp. Backtest chấm số thô để không mất các điểm cực trị.
 

@@ -138,7 +138,7 @@ def value_points(points: list[dict], a: Optional[Assumptions] = None) -> pd.Data
              .agg(med_pe=("per", "median"), med_pb=("pbr", "median")).reset_index())
     df = df.merge(med, on=["asof", "sec_eff"], how="left")
 
-    fair, ups, conf, method = [], [], [], []
+    fair, ups, conf, method, reliable = [], [], [], [], []
     for _, r in df.iterrows():
         row = {"ticker": r["ticker"], "name": r.get("name"), "sector": r.get("sector"),
                "industry_kr": r.get("industry_kr"), "eps": r.get("eps"),
@@ -147,11 +147,13 @@ def value_points(points: list[dict], a: Optional[Assumptions] = None) -> pd.Data
         fv = res.fair_raw if res.fair_raw is not None else res.fair_value   # tín hiệu thô (xem backtest_dart)
         fair.append(fv)
         ups.append((fv / r["price0"] - 1) if (fv and r["price0"]) else None)
-        conf.append(res.confidence)
+        conf.append(getattr(res, "confidence_model", res.confidence))   # trước cổng công bố
+        reliable.append(res.reliable)
         method.append(res.auto_method)
     df["fair_value"] = fair
     df["upside"] = ups
     df["confidence"] = conf
+    df["reliable"] = reliable
     df["method"] = method
     df["abs_err"] = [(abs(fv - p0) / p0) if (fv and p0) else None
                      for fv, p0 in zip(df["fair_value"], df["price0"])]

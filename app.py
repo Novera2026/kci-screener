@@ -26,7 +26,7 @@ except Exception:
 from screener import (TickerRegistry, sector_aggregates, export_excel, COLUMN_KR)
 from valuation import (Assumptions, value_batch, value_stock, recommend_method,
                        _cap_conf, ev_ebit_value, fcff_value, peer_key,
-                       effective_sector, CYCLICAL_SECTORS)
+                       effective_sector, CYCLICAL_SECTORS, RELIABLE_BAND)
 try:
     import coverage
 except Exception:
@@ -843,8 +843,10 @@ if "screen" in st.session_state:
     _mp = list(med)   # median P/E ngành (theo cross-section)
     disp["P/E dự kiến"] = [round(px / fe, 2) if (fe and fe > 0 and px) else None
                           for fe, px in zip(_fe, _px)]
-    disp["Giá hợp lý (P/E)"] = [round(fe * mp) if (fe and fe > 0 and mp and mp > 0) else None
-                               for fe, mp in zip(_fe, _mp)]
+    # cùng số với "Forward P/E vs median ngành" → cùng cổng vùng tin cậy (0,4–2,5× giá) như bảng Định giá
+    _tp = [fe * mp if (fe and fe > 0 and mp and mp > 0) else None for fe, mp in zip(_fe, _mp)]
+    disp["Giá hợp lý (P/E)"] = [round(tp) if (tp and px and RELIABLE_BAND[0] <= tp / px <= RELIABLE_BAND[1])
+                               else None for tp, px in zip(_tp, _px)]
     disp["Upside P/E %"] = [round((tp / px - 1) * 100, 1) if (tp and px) else None
                            for tp, px in zip(disp["Giá hợp lý (P/E)"], _px)]
     # Cờ độ tin: ngành chu kỳ/đặc thù (data_ok=False trong valuation: đóng tàu, bán dẫn,
@@ -1056,9 +1058,10 @@ if "screen" in st.session_state:
         "Cột **Độ tin cậy**: 🟢 High · 🟡 Medium · 🔴 Low. "
         "Cột **EV/EBIT**: 🟢 ≤12 (rẻ) · 🔴 ≥30 (đắt). "
         "Màu chỉ GỢI Ý — luôn đọc kèm cảnh báo ngành chu kỳ (PP P/E?, ghi chú dưới). "
-        "Cột **Trạng thái**: ✓ = nội tại khớp phép neo peer · △ = nội tại lệch peer >2× nên lấy 50/50 "
-        "(tin cậy Thấp) · ⚪ = fair ngoài 0,4–2,5× giá → KCI không công bố (mô hình ROE/EPS quá khứ "
-        "không giải thích được giá: tăng trưởng, chu kỳ, tái cấu trúc). Số thô xem ở Chi tiết 1 mã.")
+        "Cột **Trạng thái**: ✓ = nội tại khớp phép neo peer · ○ = chưa đối chiếu được peer (ngành < 3 mã trong "
+        "danh sách) · △ = nội tại lệch peer 2–4× nên lấy 50/50 (tin cậy Thấp) · ⚪ = KCI không công bố: fair "
+        "ngoài 0,4–2,5× giá, nội tại và peer lệch >4×, hoặc thiếu giá (mô hình ROE/EPS quá khứ không giải thích "
+        "được giá: tăng trưởng, chu kỳ, tái cấu trúc). Số thô xem ở Chi tiết 1 mã.")
 
     # ---- Chi tiết 1 mã: định giá + tài chính 4 năm/4 quý + cân đối ----
     st.subheader("🔎 Chi tiết 1 mã")
