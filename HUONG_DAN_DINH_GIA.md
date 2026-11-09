@@ -101,3 +101,17 @@ Trang riêng cho **1 mã**, đi theo thứ tự (logic ở `pipeline.py`):
 **Kết luận:** mỗi mô hình phải nằm trong 0,4–2,5× giá và 0,25–4× phép neo peer. Giá trị hợp lý = trung vị các mô
 hình **chính** qua cổng; khoảng = min–max mọi mô hình qua cổng. **High** chỉ khi ≥ 2 mô hình chính lệch nhau ≤ ±20%
 và nằm trong 0,67–1,5× phép neo peer. Tải báo cáo `.md` và bảng tính `.xlsx` ở tab cuối.
+
+### Giai đoạn 2 (10/11/2026): kịch bản, độ nhạy, football field, nhật ký, báo cáo in PDF
+
+7. **Kịch bản Bear/Base/Bull** — dịch giả định bước ④ (tăng trưởng ± điểm %, biên × hệ số; sửa được) rồi chạy lại
+   **đúng quy trình và cổng số**. Năm 1 đã có quý thực thì giữ nguyên. Giá trị kỳ vọng Σ xác suất × giá trị chỉ công
+   bố khi cả 3 kịch bản qua cổng **và** có mô hình chính dùng dự phóng (dự phóng bị chặn → kịch bản không đổi gì).
+   **Độ nhạy Ke ±1 điểm × g 1–2,5%.** Mỗi ô giữ **cùng bộ mô hình chính** của trường hợp gốc. Có mô hình rơi khỏi
+   cổng, hoặc lõi chuyển sang 50/50 với peer, thì ô đó là ⚪ chứ không đổi sang bộ khác. (Ví dụ: nếu ô Ke +0,5
+   đổi bộ mô hình, giá trị lại TĂNG — sai chiều.)
+8. **Football field** — chỉ vẽ mô hình đã qua cổng, cộng giá 52 tuần, dải kịch bản, dải độ nhạy; vạch đỏ = giá.
+   **Nhật ký định giá** — nút 📓 ở tab Kết luận lưu vào `valuation_log.csv` (không đưa lên git; trên Streamlit Cloud
+   sẽ mất khi App khởi động lại). Bảng theo dõi: giá đã đi bao nhiêu % và đã đi được bao nhiêu % quãng về giá trị hợp lý.
+
+Báo cáo `.html` mở trong trình duyệt → In (⌘P) → Lưu PDF.

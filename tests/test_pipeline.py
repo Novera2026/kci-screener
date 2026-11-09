@@ -170,3 +170,118 @@ def test_high_needs_peer_anchor_agreement():
     c = [{"name": "a", "value": 15_000, "role": "primary"}, {"name": "b", "value": 15_500, "role": "primary"}]
     assert P.reconcile(10_000, c, anchor=14_000, caps=[])["confidence"] == "High"
     assert P.reconcile(10_000, c, anchor=8_000, caps=[])["confidence"] == "Medium"
+
+
+# ---------------------------------------------------------------- giai đoạn 2
+def _D(price_mult=1.2):
+    s = _series()
+    r = _row(s, price=s[-1]["bps"] * price_mult)
+    r["beta"] = 1.0
+    peers = [{"ticker": t, "per": pe, "pbr": pb} for t, pe, pb in
+             (("a", 10, 1.0), ("b", 12, 1.2), ("c", 14, 1.4))]
+    return {"row": r, "series": s, "quarters": [], "extras": {}, "peers": peers, "ticker": r["ticker"]}
+
+
+def test_evaluate_runs_all_models():
+    D = _D()
+    drv = P.default_drivers(D["series"], D["row"], A, years=3)
+    drv[0].pop("_basis", None)
+    ev = P.evaluate(D, A, drv)
+    names = [r["name"] for r in ev["rec"]["rows"]]
+    assert any("RIM" in n for n in names) and ev["anchor"] is not None
+    assert ev["rec"]["fair"] is not None
+
+
+def test_shift_drivers_keeps_reported_year_and_handles_losses():
+    d = [{"Năm": "2026", "Tăng trưởng DT %": 10, "Biên LN ròng %": 10},
+         {"Năm": "2027", "Tăng trưởng DT %": 5, "Biên LN ròng %": -4}]
+    out = P.shift_drivers(d, -3, 0.85, keep_year1=True)
+    assert out[0] == d[0]
+    assert out[1]["Tăng trưởng DT %"] == 2
+    assert out[1]["Biên LN ròng %"] == pytest.approx(-4 * 1.15)    # bear: lỗ sâu hơn
+
+
+def test_scenarios_ordered_and_expected_value():
+    D = _D()
+    drv = P.default_drivers(D["series"], D["row"], A, years=5)
+    drv[0].pop("_basis", None)
+    sc = P.scenarios(D, A, drv, P.identify(D["row"]), {"cap": None}, None)
+    rim = {r["Kịch bản"]: r["RIM tường minh"] for r in sc["rows"]}
+    assert rim["Bear"] < rim["Base"] < rim["Bull"]
+    if all(r["Giá trị hợp lý"] for r in sc["rows"]):
+        assert sc["expected"] == pytest.approx(sum(r["Xác suất"] * r["Giá trị hợp lý"] for r in sc["rows"]))
+
+
+def test_scenarios_withhold_expected_when_one_blocked():
+    D = _D()
+    drv = P.default_drivers(D["series"], D["row"], A, years=3)
+    drv[0].pop("_basis", None)
+    spec = {"Bear": {"dg": -3, "mm": 0.85, "p": 0.25}, "Base": {"dg": 0, "mm": 1, "p": 0.5},
+            "Bull": {"dg": 60, "mm": 5.0, "p": 0.25}}          # bull phi lý → cổng chặn RIM
+    sc = P.scenarios(D, A, drv, P.identify(D["row"]), {"cap": None}, None, spec)
+    assert sc["rows"][2]["Cổng dự phóng"].startswith("❌")
+
+
+def test_sensitivity_higher_ke_lower_value():
+    for mult in (0.6, 1.2):
+        D = _D(mult)
+        drv = P.default_drivers(D["series"], D["row"], A, years=3)
+        drv[0].pop("_basis", None)
+        se = P.sensitivity(D, A, drv, P.identify(D["row"]), {"cap": None}, None, ke_shifts=(-0.005, 0.005),
+                           g_grid=(0.02,))
+        lo_ke, hi_ke = se["grid"][0]["values"][0.02], se["grid"][1]["values"][0.02]
+        if mult == 0.6:      # mọi mô hình trong dải → giảm đơn điệu
+            assert lo_ke and hi_ke and lo_ke > hi_ke
+        else:                # Ke cao đẩy lõi xuống dưới 0,4× giá → ô đó ⚪, không đổi bộ mô hình mà TĂNG
+            assert lo_ke and hi_ke is None
+
+
+def test_shifted_assumptions_only_moves_ke():
+    a2 = P.ShiftedAssumptions(rf=0.03, erp=0.05, ke_shift=0.01)
+    assert a2.ke_stock(1.0) == pytest.approx(A.ke_stock(1.0) + 0.01)
+    assert a2.g_term_capped() == A.g_term_capped()
+
+
+def test_football_field_only_passing_models():
+    rec = {"fair": 100, "low": 90, "high": 110,
+           "rows": [{"name": "ok", "value": 100, "pass": True}, {"name": "bad", "value": 999, "pass": False}]}
+    ff = P.football_field({"low_52w": 80, "high_52w": 120}, rec, None, None)
+    labels = [f["Dải"] for f in ff]
+    assert "ok" in labels and "bad" not in labels and "Giá 52 tuần" in labels
+
+
+def test_log_roundtrip_and_tracking(tmp_path):
+    path = str(tmp_path / "log.csv")
+    ctx = {"ticker": "000001", "name": "Test", "price": 100.0,
+           "conclusion": {"fair": 150.0, "low": 120.0, "high": 170.0, "upside": 50.0, "confidence": "Medium",
+                          "status": "✓"},
+           "coc": {"ke": 0.08, "g_term": 0.02}}
+    drv = [{"Năm": "2026", "Tăng trưởng DT %": 5, "Biên LN ròng %": 10, "Tỷ lệ cổ tức %": 30}]
+    P.log_append(path, P.log_entry(ctx, drv, A, None))
+    P.log_append(path, P.log_entry({**ctx, "ticker": "000002"}, drv, A, None))
+    rows = P.log_read(path, "000001")
+    assert len(rows) == 1 and rows[0]["Giá trị hợp lý"] == "150"
+    t = P.log_track(rows, 125.0)[0]
+    assert t["Giá đã đi %"] == pytest.approx(25.0)
+    assert t["Đi được về giá trị %"] == pytest.approx(50.0)
+
+
+def test_report_html_renders_tables_and_escapes():
+    md = "# Tiêu đề <x>\n\n- **đậm** thường\n\n| A | B |\n|---|---:|\n| 1 | 2 |\n\n_ghi chú_"
+    h = P.report_html(md, "T")
+    assert "<h1>Tiêu đề &lt;x&gt;</h1>" in h and "<b>đậm</b>" in h
+    assert "<td>1</td><td>2</td>" in h and "<i>ghi chú</i>" in h and "---" not in h
+
+
+def test_fair_same_set_withholds_when_member_drops_out():
+    rec = {"rows": [{"name": "a", "value": 10, "pass": True, "role": "primary"},
+                    {"name": "b", "value": 30, "pass": False, "role": "primary"}]}
+    assert P.fair_same_set(rec, ["a"]) == 10
+    assert P.fair_same_set(rec, ["a", "b"]) is None
+
+
+def test_scenarios_not_informative_when_forecast_blocked():
+    D = _D()
+    bad = [{"Năm": "2026", "Tăng trưởng DT %": 90, "Biên LN ròng %": 60, "Tỷ lệ cổ tức %": 0}]
+    sc = P.scenarios(D, A, bad, P.identify(D["row"]), {"cap": None}, None)
+    assert not sc["informative"] and sc["expected"] is None and sc["low"] is None

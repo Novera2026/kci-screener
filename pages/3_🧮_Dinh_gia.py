@@ -28,7 +28,7 @@ from screener import TickerRegistry                    # noqa: E402
 st.set_page_config(page_title="Quy trình định giá — KCI", page_icon="🧮", layout="wide")
 st.title("🧮 Quy trình định giá")
 st.caption("Đi từng bước cho **một mã**: nhận diện → kiểm dữ liệu → phân tích → **dự phóng 3–5 năm (chỉnh "
-           "được)** → chi phí vốn → định giá đa mô hình → kết luận. Mọi mô hình phải qua **cổng số** "
+           "được)** → chi phí vốn → định giá đa mô hình → kịch bản & độ nhạy → football field & nhật ký → kết luận. Mọi mô hình phải qua **cổng số** "
            f"(giá trị trong {V.RELIABLE_BAND[0]}–{V.RELIABLE_BAND[1]}× giá và {V.IRRECONCILABLE[0]}–"
            f"{V.IRRECONCILABLE[1]}× phép neo peer) mới được vào kết luận.")
 
@@ -105,7 +105,7 @@ if c_btn.button("▶️ Bắt đầu", type="primary", width="stretch") and q.st
 
 tk = st.session_state.get("vp_ticker")
 if not tk:
-    st.info("Nhập một mã rồi bấm **Bắt đầu**. Trang sẽ đi lần lượt 6 bước và ra một báo cáo tóm tắt.")
+    st.info("Nhập một mã rồi bấm **Bắt đầu**. Trang sẽ đi lần lượt 8 bước và ra một báo cáo tóm tắt.")
     st.stop()
 
 with st.spinner(f"Đang lấy dữ liệu {tk} (giá, BCTC Naver/DART, beta, peer cùng ngành)…"):
@@ -132,38 +132,8 @@ pm = P.peer_medians(peer_rows, exclude=tk)
 evidence = P.reported_evidence(series, quarters)
 
 
-def _run(drivers: list[dict]):
-    fc = P.run_forecast(series, row, drivers)
-    fg = P.forecast_gates(series, fc, financial=idn["financial"], evidence=evidence)
-    r_fwd = dict(row)
-    if fc:
-        r_fwd["fwd_eps"] = fc[0]["EPS"]
-        r_fwd["fwd_roe"] = fc[0]["EPS"] / fc[0]["BPS đầu kỳ"] if fc[0]["BPS đầu kỳ"] else None
-    base = V.value_stock(r_fwd, A, pm["pe"], pm["pb"], history=reals or None)
-    midc = "mid-cycle" in base.auto_method
-    anchor = P.peer_anchor(base.methods, midc)
-    bps0 = V._num(row.get("bps"))
-    rim = P.rim_explicit(bps0, fc, ke, w)
-    ddm = P.ddm_explicit(fc, ke, coc["g_term"])
-    fc_block = None if fg["ok"] else f"cổng dự phóng: {fg['n_fail']} vi phạm"
-    cands = [
-        {"name": f"Lõi KCI — {base.auto_method}", "value": base.fair_raw, "role": "primary",
-         "blocked": None if base.reliable else base.status},
-        {"name": f"RIM tường minh ({len(fc)} năm dự phóng)", "value": rim["value"] if rim else None,
-         "role": "primary", "blocked": fc_block},
-        {"name": f"DDM tường minh ({len(fc)} năm)", "value": ddm["value"] if ddm else None,
-         "role": "primary" if idn["dividend_model"] else "cross", "blocked": fc_block},
-        {"name": "P/E × trung vị peer", "value": base.methods.get("P/E vs median ngành"), "role": "cross"},
-        {"name": "P/B × trung vị peer", "value": base.methods.get("P/B vs median ngành"), "role": "cross"},
-    ]
-    if extras.get("cfo") is not None and mc and price:
-        fcff = V.fcff_value(extras.get("cfo"), extras.get("capex"), extras.get("debt"), extras.get("net_debt"),
-                            mc / price, ke, coc["kd"], coc["tax"], A.g_high, A.years_high, coc["g_term"],
-                            mc / 1e8)
-        cands.append({"name": "FCFF-DCF (DART, tăng trưởng phẳng)", "value": fcff, "role": "cross"})
-    caps = [dq["cap"], None if idn["data_ok"] else "Medium"]
-    rec = P.reconcile(price, cands, anchor, caps)
-    return fc, fg, base, anchor, rim, ddm, rec
+D_eval = {"row": row, "series": series, "quarters": quarters, "extras": extras, "peers": peer_rows, "ticker": tk}
+LOG_PATH = os.path.join(_ROOT, "valuation_log.csv")
 
 
 # ---------------------------------------------------------------------------- tiêu đề + bảng giả định
@@ -172,7 +142,7 @@ st.caption(f"{row.get('industry_kr') or '—'} · nguồn giá {row.get('source'
            f"vốn hóa {mc / 1e12:,.1f} nghìn tỷ KRW" if mc else "")
 
 tabs = st.tabs(["① Nhận diện", "② Dữ liệu", "③ Phân tích", "④ Dự phóng", "⑤ Chi phí vốn",
-                "⑥ Định giá", "📄 Kết luận & báo cáo"])
+                "⑥ Định giá", "⑦ Kịch bản & độ nhạy", "⑧ Football field & nhật ký", "📄 Kết luận & báo cáo"])
 
 # ④ trước để có giả định người dùng sửa — các tab khác đọc kết quả
 with tabs[3]:
@@ -194,7 +164,8 @@ with tabs[3]:
                                            for c in ("Tăng trưởng DT %", "Biên LN ròng %", "Tỷ lệ cổ tức %")})
         drivers = ed.to_dict("records")
 
-fc, fg, base, anchor, rim, ddm, rec = _run(drivers)
+EV = P.evaluate(D_eval, A, drivers, idn, dq, evidence)
+fc, fg, base, anchor, rim, ddm, rec = (EV[k] for k in ("fc", "fg", "base", "anchor", "rim", "ddm", "rec"))
 
 with tabs[3]:
     if fc:
@@ -303,12 +274,100 @@ with tabs[5]:
                          .rename(columns={"ticker": "Mã", "name": "Tên", "price": "Giá", "market_cap": "Vốn hóa",
                                           "per": "P/E", "pbr": "P/B"}), hide_index=True, width="stretch")
 
+# ---------------------------------------------------------------------------- ⑦ kịch bản & độ nhạy
+with tabs[6]:
+    st.markdown("#### ⑦ Kịch bản Bear / Base / Bull")
+    scen, sens = None, None
+    if not drivers:
+        st.warning("Cần dự phóng ở bước ④ để chạy kịch bản.")
+    else:
+        st.caption("Mỗi kịch bản dịch toàn bộ giả định ở bước ④ (tăng trưởng ± điểm %, biên LN × hệ số) rồi chạy "
+                   "**lại đúng quy trình và cổng số** như kết luận chính. "
+                   + ("Năm 1 đã có quý thực công bố nên **giữ nguyên** trong mọi kịch bản. " if evidence else "")
+                   + "Sửa bảng dưới để đổi kịch bản.")
+        sc_df = st.data_editor(
+            pd.DataFrame([{"Kịch bản": k, "Δ tăng trưởng (điểm %)": v["dg"], "× biên LN": v["mm"],
+                           "Xác suất": v["p"]} for k, v in P.SCENARIOS.items()]),
+            key=f"sc_{tk}", hide_index=True, width="stretch", disabled=["Kịch bản"])
+        spec = {r["Kịch bản"]: {"dg": float(r["Δ tăng trưởng (điểm %)"] or 0), "mm": float(r["× biên LN"] or 1),
+                                "p": max(float(r["Xác suất"] or 0), 0.0)} for r in sc_df.to_dict("records")}
+        scen = P.scenarios(D_eval, A, drivers, idn, dq, evidence, spec)
+        sdf = pd.DataFrame(scen["rows"])
+        num_cols = [c for c in sdf.columns if c in (EV["fc_model_name"], "Giá trị hợp lý")]
+        st.dataframe(sdf.style.format({c: "{:,.0f}" for c in num_cols} | {"Xác suất": "{:.0%}"}, na_rep="⚪ không công bố"),
+                     hide_index=True, width="stretch")
+        c1, c2 = st.columns(2)
+        c1.metric("Giá trị kỳ vọng (Σ xác suất × giá trị)", f"{scen['expected']:,.0f}" if scen["expected"] else "—",
+                  f"{(scen['expected'] / price - 1) * 100:+.1f}%" if (scen["expected"] and price) else None)
+        c2.metric("Dải Bear – Bull", f"{scen['low']:,.0f} – {scen['high']:,.0f}" if scen["low"] else "—")
+        if not scen["informative"]:
+            st.warning("Dự phóng ở bước ④ đang bị cổng số chặn nên **không mô hình chính nào dùng dự phóng** — các "
+                       "kịch bản không làm đổi kết luận. Sửa giả định ở bước ④ cho hết ❌ để kịch bản có ý nghĩa.")
+        elif scen["expected"] is None:
+            st.caption("⚪ Giá trị kỳ vọng chỉ công bố khi **cả ba** kịch bản đều có giá trị qua cổng số — một kịch "
+                       "bản bị chặn nghĩa là phân phối không đầy đủ, App không tự lấp số.")
+
+        st.markdown("#### Độ nhạy: Ke × g dài hạn")
+        sens = P.sensitivity(D_eval, A, drivers, idn, dq, evidence)
+        grid = pd.DataFrame({f"g {g * 100:.1f}%": [r["values"][g] for r in sens["grid"]] for g in sens["g_grid"]},
+                            index=[f"Ke {(EV['coc']['ke'] + r['ke_shift']) * 100:.2f}% ({r['ke_shift'] * 100:+.1f})"
+                                   for r in sens["grid"]])
+
+        def _c_up(v):
+            if v is None or pd.isna(v) or not price:
+                return "color:#999"
+            u = v / price - 1
+            return ("background-color:#d9f2e3" if u >= 0.2 else "background-color:#f9dcdc" if u <= -0.15 else "")
+        st.dataframe(grid.style.format("{:,.0f}", na_rep="⚪").map(_c_up), width="stretch")
+        st.caption(f"Giá trị hợp lý (đã qua cổng) khi Ke lệch ±1 điểm % và g dài hạn 1–2,5% · "
+                   f"{sens['n_ok']}/{sens['n_all']} ô công bố được. ⚪ = ô đó không qua cổng số. "
+                   "🟢 ≥ +20% so với giá · 🔴 ≤ −15%. g luôn bị chặn ≤ Rf.")
+
+# ---------------------------------------------------------------------------- ⑧ football field & nhật ký
+with tabs[7]:
+    st.markdown("#### ⑧ Football field")
+    ff = P.football_field(row, rec, scen, sens)
+    if ff and price:
+        import altair as alt
+        fdf = pd.DataFrame(ff)
+        fdf["label"] = [d if len(d) <= 34 else d[:33] + "…" for d in fdf["Dải"]]   # màu đã cho biết nhóm
+        order = list(fdf["label"])
+        y = alt.Y("label:N", sort=order, title=None, axis=alt.Axis(labelLimit=150))
+        bars = alt.Chart(fdf).mark_bar(height=14, cornerRadius=3).encode(
+            x=alt.X("low:Q", title="KRW / cổ phiếu", scale=alt.Scale(zero=False, nice=True)), x2="high:Q", y=y,
+            color=alt.Color("Nhóm:N", legend=alt.Legend(orient="bottom", title=None, columns=3, labelLimit=160)),
+            tooltip=["Nhóm", "Dải", alt.Tooltip("low:Q", format=",.0f"), alt.Tooltip("high:Q", format=",.0f")])
+        pts = alt.Chart(fdf[fdf["low"] == fdf["high"]]).mark_point(filled=True, size=90, shape="diamond").encode(
+            x="low:Q", y=y, color="Nhóm:N")
+        rule = alt.Chart(pd.DataFrame({"x": [price]})).mark_rule(strokeDash=[5, 3], color="#d62728").encode(x="x:Q")
+        txt = alt.Chart(pd.DataFrame({"x": [price], "t": [f"Giá {price:,.0f}"]})).mark_text(
+            align="left", dx=4, dy=-6, color="#d62728").encode(x="x:Q", text="t:N", y=alt.value(0))
+        st.altair_chart((bars + pts + rule + txt).properties(height=34 * len(fdf) + 40), width="stretch")
+        st.caption("Chỉ vẽ mô hình **đã qua cổng số**. Vạch đỏ = giá hiện tại. Kim cương = mô hình cho 1 con số.")
+    else:
+        st.info("Chưa đủ dữ liệu để vẽ.")
+
+    st.markdown("#### 📓 Nhật ký định giá")
+    st.caption("Lưu mỗi lần định giá (giá, giá trị hợp lý, giả định) để sau này so với giá thật. File "
+               "`valuation_log.csv` trong thư mục App — trên Streamlit Cloud file sẽ mất khi App khởi động lại.")
+    hist = P.log_read(LOG_PATH, tk)
+    if hist:
+        tdf = pd.DataFrame(P.log_track(hist, price))
+        st.dataframe(tdf.style.format({"Giá lúc định giá": "{:,.0f}", "Giá trị hợp lý": "{:,.0f}",
+                                       "Giá hôm nay": "{:,.0f}", "Giá đã đi %": "{:+.1f}",
+                                       "Đi được về giá trị %": "{:+.0f}"}, na_rep="—"),
+                     hide_index=True, width="stretch")
+        st.caption("**Đi được về giá trị %**: 100% = giá đã chạm giá trị hợp lý ước tính lúc đó; âm = giá đi ngược.")
+    else:
+        st.caption("Chưa có lần định giá nào được lưu cho mã này.")
+
 # ---------------------------------------------------------------------------- kết luận
 ctx = {"ticker": tk, "name": name, "date": _dt.date.today().isoformat(), "price": price, "identify": idn,
-       "dq": dq, "forecast": fc, "fgates": fg, "coc": coc, "conclusion": rec, "peers": pm, "anchor": anchor}
+       "dq": dq, "forecast": fc, "fgates": fg, "coc": EV["coc"], "conclusion": rec, "peers": EV["pm"],
+       "anchor": anchor, "scen": scen, "sens": sens}
 md = P.report_markdown(ctx)
 
-with tabs[6]:
+with tabs[8]:
     st.markdown("#### Kết luận")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Giá hiện tại", f"{price:,.0f}" if price else "—")
@@ -328,13 +387,25 @@ with tabs[6]:
         pd.DataFrame(ratios).to_excel(xw, sheet_name="Phân tích", index=False)
         pd.DataFrame(fc).to_excel(xw, sheet_name="Dự phóng", index=False)
         pd.DataFrame(rec["rows"]).to_excel(xw, sheet_name="Mô hình", index=False)
+        if scen:
+            pd.DataFrame(scen["rows"]).to_excel(xw, sheet_name="Kịch bản", index=False)
+        if sens:
+            grid.to_excel(xw, sheet_name="Độ nhạy")
         if peer_rows:
             pd.DataFrame(peer_rows).to_excel(xw, sheet_name="Peer", index=False)
-    d1, d2 = st.columns(2)
+    d1, d2, d3, d4 = st.columns(4)
     d1.download_button("⬇️ Báo cáo (.md)", md.encode("utf-8"), f"dinh_gia_{tk}_{ctx['date']}.md",
                        "text/markdown", width="stretch")
     d2.download_button("⬇️ Bảng tính (.xlsx)", buf.getvalue(), f"dinh_gia_{tk}_{ctx['date']}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+    d3.download_button("⬇️ Báo cáo in PDF (.html)", P.report_html(md, f"Định giá {name} {tk}").encode("utf-8"),
+                       f"dinh_gia_{tk}_{ctx['date']}.html", "text/html", width="stretch",
+                       help="Mở file trong trình duyệt → In (⌘P) → Lưu thành PDF")
+    if d4.button("📓 Lưu vào nhật ký", width="stretch", disabled=not rec["fair"],
+                 help="Chỉ lưu được khi có giá trị hợp lý công bố"):
+        P.log_append(LOG_PATH, P.log_entry(ctx, drivers, A, scen))
+        st.toast("Đã lưu vào nhật ký định giá")
+        st.rerun()
 
 # tóm tắt luôn hiện ở đầu trang (dưới tiêu đề) — kết quả thay đổi ngay khi sửa giả định
 st.sidebar.markdown("---")

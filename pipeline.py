@@ -521,8 +521,307 @@ def report_markdown(ctx: dict) -> str:
     for r in rec["rows"]:
         L.append(f"| {r['name']} | {'chính' if r['role'] == 'primary' else 'đối chiếu'} | {_f0(r.get('value'))} | "
                  f"{'✅' if r['pass'] else '❌'} | {r['why']} |")
+    sc, se = ctx.get("scen"), ctx.get("sens")
+    if sc:
+        L += ["", "## 7. Kịch bản", "", "| Kịch bản | Xác suất | Δ tăng trưởng | × biên | Cổng dự phóng | Giá trị hợp lý |",
+              "|---|---:|---:|---:|---|---:|"]
+        for r in sc["rows"]:
+            L.append(f"| {r['Kịch bản']} | {r['Xác suất']:.0%} | {r['Δ tăng trưởng (điểm %)']:+.1f} | "
+                     f"{r['× biên LN']:.2f} | {r['Cổng dự phóng']} | {_f0(r['Giá trị hợp lý'])} |")
+        L += ["", f"Giá trị kỳ vọng: **{_f0(sc['expected'])} KRW**" if sc["expected"] else
+              "Giá trị kỳ vọng: không công bố (có kịch bản không qua cổng số)"]
+    if se:
+        gs = se["g_grid"]
+        L += ["", "## 8. Độ nhạy Ke × g", "", "| Ke lệch | " + " | ".join(f"g {g * 100:.1f}%" for g in gs) + " |",
+              "|---|" + "---:|" * len(gs)]
+        for r in se["grid"]:
+            L.append(f"| {r['ke_shift'] * 100:+.1f} điểm | " + " | ".join(
+                _f0(r["values"][g]) if r["values"][g] is not None else "⚪" for g in gs) + " |")
     pm = ctx.get("peers") or {}
     L += ["", f"Phép neo peer: P/E trung vị {pm.get('pe') or '—'} ({pm.get('n_pe', 0)} mã), "
               f"P/B trung vị {pm.get('pb') or '—'} ({pm.get('n_pb', 0)} mã) → neo {_f0(ctx.get('anchor'))} KRW",
           "", "_Đây là ước lượng có kỷ luật cho nghiên cứu, không phải khuyến nghị đầu tư._"]
     return "\n".join(L)
+
+
+# ============================================================================ GIAI ĐOẠN 2
+# Toàn bộ bước 6 + kết luận gom vào evaluate() để kịch bản / độ nhạy dùng CHUNG công thức và cổng số với kết
+# luận chính — không có đường tắt nào cho một kịch bản né cổng.
+from dataclasses import dataclass as _dc   # noqa: E402
+import csv as _csv                          # noqa: E402
+import html as _html                        # noqa: E402
+import json as _json                        # noqa: E402
+import os as _os                            # noqa: E402
+
+
+@_dc
+class ShiftedAssumptions(V.Assumptions):
+    """Assumptions với Ke dịch thêm ke_shift (cho bảng độ nhạy). Rf/g cap giữ nguyên."""
+    ke_shift: float = 0.0
+
+    def ke(self) -> float:
+        return super().ke() + self.ke_shift
+
+    def ke_stock(self, beta_raw: Optional[float]) -> float:
+        return super().ke_stock(beta_raw) + self.ke_shift
+
+
+def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict] = None,
+             dq: Optional[dict] = None, evidence: Optional[dict] = None) -> dict:
+    """Bước 4–6 + kết luận cho 1 bộ giả định. D = {row (có beta), series, quarters, extras, peers, ticker}."""
+    row, series = D["row"], D["series"]
+    extras = D.get("extras") or {}
+    reals = _reals(series)
+    idn = idn or identify(row)
+    price, mc = _num(row.get("price")), _num(row.get("market_cap"))
+    coc = cost_of_capital(a, _num(row.get("beta")), mc, extras)
+    ke, w = coc["ke"], a.persistence
+    pm = peer_medians(D.get("peers") or [], exclude=D.get("ticker"))
+    fc = run_forecast(series, row, drivers)
+    fg = forecast_gates(series, fc, financial=idn["financial"], evidence=evidence)
+    r_fwd = dict(row)
+    if fc:
+        r_fwd["fwd_eps"] = fc[0]["EPS"]
+        r_fwd["fwd_roe"] = fc[0]["EPS"] / fc[0]["BPS đầu kỳ"] if fc[0]["BPS đầu kỳ"] else None
+    base = V.value_stock(r_fwd, a, pm["pe"], pm["pb"], history=reals or None)
+    anchor = peer_anchor(base.methods, "mid-cycle" in base.auto_method)
+    rim = rim_explicit(_num(row.get("bps")), fc, ke, w)
+    ddm = ddm_explicit(fc, ke, coc["g_term"])
+    fc_block = None if fg["ok"] else f"cổng dự phóng: {fg['n_fail']} vi phạm"
+    cands = [
+        # tên gắn trạng thái tam giác hóa: lõi đổi sang 50/50 với peer = một mô hình KHÁC (fair_same_set)
+        {"name": f"Lõi KCI — {base.auto_method}" + (" · △ 50/50 peer" if base.triangulated else ""),
+         "value": base.fair_raw, "role": "primary", "blocked": None if base.reliable else base.status},
+        {"name": f"RIM tường minh ({len(fc)} năm dự phóng)", "value": rim["value"] if rim else None,
+         "role": "primary", "blocked": fc_block},
+        {"name": f"DDM tường minh ({len(fc)} năm)", "value": ddm["value"] if ddm else None,
+         "role": "primary" if idn["dividend_model"] else "cross", "blocked": fc_block},
+        {"name": "P/E × trung vị peer", "value": base.methods.get("P/E vs median ngành"), "role": "cross"},
+        {"name": "P/B × trung vị peer", "value": base.methods.get("P/B vs median ngành"), "role": "cross"},
+    ]
+    if extras.get("cfo") is not None and mc and price:
+        fcff = V.fcff_value(extras.get("cfo"), extras.get("capex"), extras.get("debt"), extras.get("net_debt"),
+                            mc / price, ke, coc["kd"], coc["tax"], a.g_high, a.years_high, coc["g_term"],
+                            mc / 1e8)
+        cands.append({"name": "FCFF-DCF (DART, tăng trưởng phẳng)", "value": fcff, "role": "cross"})
+    caps = [(dq or {}).get("cap"), None if idn["data_ok"] else "Medium"]
+    rec = reconcile(price, cands, anchor, caps)
+    fc_model = ddm if idn["dividend_model"] else rim
+    return {"fc": fc, "fg": fg, "base": base, "anchor": anchor, "rim": rim, "ddm": ddm, "rec": rec,
+            "coc": coc, "pm": pm, "fc_model": fc_model["value"] if fc_model else None,
+            "fc_model_name": "DDM tường minh" if idn["dividend_model"] else "RIM tường minh"}
+
+
+def fair_same_set(rec: dict, names: list[str]) -> Optional[float]:
+    """Trung vị đúng bộ mô hình chính `names` (bộ đã qua cổng ở trường hợp gốc). Có mô hình nào trong bộ không
+    qua cổng ở ô này → None. Giữ nguyên bộ mô hình để kịch bản/độ nhạy đo tác động của GIẢ ĐỊNH, không phải
+    tác động của việc một mô hình rơi ra/vào cổng (Ke +0,5 điểm làm lõi tụt dưới 0,4× giá → trung vị đổi
+    sang bộ khác và giá trị lại TĂNG — sai chiều)."""
+    if not names:
+        return None
+    by = {r["name"]: r for r in rec["rows"]}
+    vals = [by[n]["value"] for n in names if n in by and by[n]["pass"]]
+    return V._median(vals) if len(vals) == len(names) else None
+
+
+def primary_set(rec: dict) -> list[str]:
+    return [r["name"] for r in rec["rows"] if r["pass"] and r["role"] == "primary"]
+
+
+# ---------------------------------------------------------------------------- Bước 7a — kịch bản
+SCENARIOS = {   # dịch tăng trưởng (điểm %/năm), nhân biên LN ròng, xác suất
+    "Bear": {"dg": -3.0, "mm": 0.85, "p": 0.25},
+    "Base": {"dg": 0.0, "mm": 1.00, "p": 0.50},
+    "Bull": {"dg": 3.0, "mm": 1.15, "p": 0.25},
+}
+
+
+def shift_drivers(drivers: list[dict], dg: float, mm: float, keep_year1: bool = False) -> list[dict]:
+    """Dịch giả định: tăng trưởng + dg điểm %, biên × mm. keep_year1: năm 1 đã có ≥2 quý thực → giữ nguyên
+    (số đã công bố không phải giả định để lạc quan/bi quan)."""
+    out = []
+    for i, d in enumerate(drivers):
+        d2 = dict(d)
+        if not (keep_year1 and i == 0):
+            d2["Tăng trưởng DT %"] = (_num(d.get("Tăng trưởng DT %")) or 0.0) + dg
+            m = _num(d.get("Biên LN ròng %")) or 0.0
+            # biên âm: kịch bản xấu là lỗ sâu hơn, tốt là lỗ ít hơn
+            d2["Biên LN ròng %"] = m * mm if m >= 0 else m * (2 - mm)
+        out.append(d2)
+    return out
+
+
+def scenarios(D: dict, a: V.Assumptions, drivers: list[dict], idn: dict, dq: dict,
+              evidence: Optional[dict], spec: Optional[dict] = None) -> dict:
+    """Chạy evaluate() cho Bear/Base/Bull. Giá trị kỳ vọng Σp·fair chỉ công bố khi CẢ BA kịch bản đều có
+    giá trị hợp lý qua cổng (một kịch bản bị chặn = phân phối không đầy đủ, không bịa số thay).
+    Giá trị mỗi kịch bản = trung vị CÙNG bộ mô hình chính đã qua cổng ở giả định gốc (fair_same_set)."""
+    spec = spec or SCENARIOS
+    names = primary_set(evaluate(D, a, drivers, idn, dq, evidence)["rec"])
+    # không mô hình chính nào dùng dự phóng (RIM/DDM bị cổng chặn) → kịch bản không đổi gì, Σp·fair vô nghĩa
+    informative = any(n.startswith(("RIM tường minh", "DDM tường minh")) for n in names)
+    rows = []
+    for nm, s in spec.items():
+        drv = shift_drivers(drivers, s["dg"], s["mm"], keep_year1=bool(evidence))
+        ev = evaluate(D, a, drv, idn, dq, evidence)
+        rows.append({"Kịch bản": nm, "Xác suất": s["p"], "Δ tăng trưởng (điểm %)": s["dg"],
+                     "× biên LN": s["mm"], "Cổng dự phóng": "✅" if ev["fg"]["ok"] else f"❌ {ev['fg']['n_fail']}",
+                     ev["fc_model_name"]: ev["fc_model"], "Giá trị hợp lý": fair_same_set(ev["rec"], names),
+                     "Độ tin cậy": ev["rec"]["confidence"]})
+    fairs = [r["Giá trị hợp lý"] for r in rows]
+    psum = sum(r["Xác suất"] for r in rows)
+    ev_fair = (sum(r["Xác suất"] * r["Giá trị hợp lý"] for r in rows) / psum
+               if informative and psum > 0 and all(f is not None for f in fairs) else None)
+    if not informative:
+        fairs = []
+    return {"rows": rows, "expected": ev_fair, "informative": informative,
+            "low": min((f for f in fairs if f), default=None), "high": max((f for f in fairs if f), default=None)}
+
+
+# ---------------------------------------------------------------------------- Bước 7b — độ nhạy
+KE_SHIFTS = (-0.01, -0.005, 0.0, 0.005, 0.01)
+G_GRID = (0.010, 0.015, 0.020, 0.025)
+
+
+def sensitivity(D: dict, a: V.Assumptions, drivers: list[dict], idn: dict, dq: dict,
+                evidence: Optional[dict], ke_shifts=KE_SHIFTS, g_grid=G_GRID) -> dict:
+    """Giá trị hợp lý theo lưới Ke ± Δ × g dài hạn, cùng bộ mô hình chính của trường hợp gốc (fair_same_set).
+    None = có mô hình trong bộ không qua cổng ở ô đó."""
+    from dataclasses import asdict
+    base_kw = {k: v for k, v in asdict(a).items() if k in V.Assumptions.__dataclass_fields__}
+    names = primary_set(evaluate(D, a, drivers, idn, dq, evidence)["rec"])
+    grid = []
+    for s in ke_shifts:
+        line = {}
+        for g in g_grid:
+            a2 = ShiftedAssumptions(**{**base_kw, "g_terminal": g}, ke_shift=s)
+            line[g] = fair_same_set(evaluate(D, a2, drivers, idn, dq, evidence)["rec"], names)
+        grid.append({"ke_shift": s, "values": line})
+    vals = [v for r in grid for v in r["values"].values() if v is not None]
+    n_all = len(ke_shifts) * len(g_grid)
+    return {"grid": grid, "g_grid": list(g_grid), "low": min(vals, default=None),
+            "high": max(vals, default=None), "n_ok": len(vals), "n_all": n_all}
+
+
+# ---------------------------------------------------------------------------- Bước 8 — football field
+def football_field(row: dict, rec: dict, scen: Optional[dict], sens: Optional[dict]) -> list[dict]:
+    """Các dải để vẽ: [{Nhóm, Dải, low, high}]. Chỉ đưa mô hình ĐÃ qua cổng."""
+    out = []
+    lo, hi = _num(row.get("low_52w")), _num(row.get("high_52w"))
+    if lo and hi:
+        out.append({"Nhóm": "Thị trường", "Dải": "Giá 52 tuần", "low": lo, "high": hi})
+    for r in rec.get("rows", []):
+        if r["pass"] and r.get("value"):
+            out.append({"Nhóm": "Mô hình (qua cổng)", "Dải": r["name"], "low": r["value"], "high": r["value"]})
+    if scen and scen.get("low") and scen.get("high"):
+        out.append({"Nhóm": "Kịch bản", "Dải": "Bear – Bull", "low": scen["low"], "high": scen["high"]})
+    if sens and sens.get("low") and sens.get("high"):
+        out.append({"Nhóm": "Độ nhạy", "Dải": "Ke ±1 điểm × g 1–2,5%", "low": sens["low"], "high": sens["high"]})
+    if rec.get("fair"):
+        out.append({"Nhóm": "Kết luận", "Dải": "Khoảng giá trị hợp lý", "low": rec["low"], "high": rec["high"]})
+    return out
+
+
+# ---------------------------------------------------------------------------- Bước 9 — nhật ký định giá
+LOG_FIELDS = ["Thời điểm", "Mã", "Tên", "Giá", "Giá trị hợp lý", "Thấp", "Cao", "Chênh %", "Độ tin cậy",
+              "Trạng thái", "Kỳ vọng kịch bản", "Ke %", "ERP %", "g %", "Số năm", "Giả định"]
+
+
+def log_entry(ctx: dict, drivers: list[dict], a: V.Assumptions, scen: Optional[dict]) -> dict:
+    rec, coc = ctx["conclusion"], ctx["coc"]
+
+    def r0(x):
+        return round(x) if isinstance(x, (int, float)) and math.isfinite(x) else ""
+    return {"Thời điểm": _dt.datetime.now().isoformat(timespec="seconds"), "Mã": ctx["ticker"],
+            "Tên": ctx["name"], "Giá": r0(ctx["price"]), "Giá trị hợp lý": r0(rec["fair"]),
+            "Thấp": r0(rec["low"]), "Cao": r0(rec["high"]),
+            "Chênh %": round(rec["upside"], 1) if rec["upside"] is not None else "",
+            "Độ tin cậy": rec["confidence"], "Trạng thái": rec["status"],
+            "Kỳ vọng kịch bản": r0((scen or {}).get("expected")), "Ke %": round(coc["ke"] * 100, 2),
+            "ERP %": round(a.erp * 100, 2), "g %": round(coc["g_term"] * 100, 2), "Số năm": len(drivers),
+            "Giả định": _json.dumps([{k: d[k] for k in ("Năm", "Tăng trưởng DT %", "Biên LN ròng %",
+                                                         "Tỷ lệ cổ tức %") if k in d} for d in drivers],
+                                    ensure_ascii=False)}
+
+
+def log_append(path: str, entry: dict) -> None:
+    new = not _os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=LOG_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerow({k: entry.get(k, "") for k in LOG_FIELDS})
+
+
+def log_read(path: str, ticker: Optional[str] = None) -> list[dict]:
+    if not _os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        rows = list(_csv.DictReader(f))
+    return [r for r in rows if ticker is None or r.get("Mã") == ticker]
+
+
+def log_track(entries: list[dict], price_now: Optional[float]) -> list[dict]:
+    """So các lần định giá cũ với giá hôm nay: giá đã đi bao nhiêu % và đã đi được bao nhiêu % quãng
+    từ giá lúc định giá tới giá trị hợp lý (100% = chạm giá trị hợp lý; âm = đi ngược)."""
+    out = []
+    for e in entries:
+        p0, fair = _num(e.get("Giá")), _num(e.get("Giá trị hợp lý"))
+        chg = (price_now / p0 - 1) * 100 if (price_now and p0) else None
+        prog = ((price_now - p0) / (fair - p0) * 100
+                if (price_now and p0 and fair and abs(fair - p0) > 1e-9) else None)
+        out.append({"Thời điểm": e.get("Thời điểm"), "Giá lúc định giá": p0, "Giá trị hợp lý": fair,
+                    "Độ tin cậy": e.get("Độ tin cậy"), "Giá hôm nay": price_now,
+                    "Giá đã đi %": chg, "Đi được về giá trị %": prog})
+    return out
+
+
+# ---------------------------------------------------------------------------- Báo cáo HTML (in ra PDF)
+def _inline(s: str) -> str:
+    """**đậm** và cả dòng _nghiêng_ (chỉ khi cả dòng bọc trong _…_, để tên như S_RIM không bị hỏng)."""
+    s = _html.escape(s)
+    italic = len(s) > 2 and s.startswith("_") and s.endswith("_")
+    if italic:
+        s = s[1:-1]
+    parts = s.split("**")
+    out = "".join(f"<b>{p}</b>" if i % 2 else p for i, p in enumerate(parts))
+    return f"<i>{out}</i>" if italic else out
+
+
+def report_html(md: str, title: str) -> str:
+    """Chuyển Markdown của report_markdown (tập con: #, -, bảng |, **, _…_) sang HTML có CSS in ấn.
+    Mở file trong trình duyệt → In → Lưu PDF (không cần thêm thư viện PDF)."""
+    body, i, lines = [], 0, md.splitlines()
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("|"):
+            tbl = []
+            while i < len(lines) and lines[i].startswith("|"):
+                tbl.append([c.strip() for c in lines[i].strip("|").split("|")])
+                i += 1
+            head, rows = tbl[0], [r for r in tbl[1:] if not all(set(c) <= set("-:") for c in r)]
+            body.append("<table><thead><tr>" + "".join(f"<th>{_inline(c)}</th>" for c in head) + "</tr></thead><tbody>"
+                        + "".join("<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in r) + "</tr>" for r in rows)
+                        + "</tbody></table>")
+            continue
+        if ln.startswith("- "):
+            items = []
+            while i < len(lines) and lines[i].startswith("- "):
+                items.append(f"<li>{_inline(lines[i][2:])}</li>")
+                i += 1
+            body.append("<ul>" + "".join(items) + "</ul>")
+            continue
+        m = len(ln) - len(ln.lstrip("#"))
+        if 1 <= m <= 4 and ln[m:m + 1] == " ":
+            body.append(f"<h{m}>{_inline(ln[m + 1:])}</h{m}>")
+        elif ln.strip():
+            body.append(f"<p>{_inline(ln)}</p>")
+        i += 1
+    css = ("body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;max-width:900px;margin:24px auto;"
+           "padding:0 16px;color:#1b1f24;line-height:1.5}h1{font-size:22px;border-bottom:2px solid #1b1f24}"
+           "h2{font-size:17px;margin-top:22px;border-bottom:1px solid #ccc}table{border-collapse:collapse;"
+           "width:100%;font-size:13px;margin:8px 0}th,td{border:1px solid #ccc;padding:4px 6px;text-align:left}"
+           "th{background:#f2f4f7}td:nth-child(n+2){font-variant-numeric:tabular-nums}"
+           "@media print{body{margin:0}h2{break-after:avoid}table{break-inside:avoid}}")
+    return (f"<!doctype html><html lang='vi'><head><meta charset='utf-8'><title>{_html.escape(title)}</title>"
+            f"<style>{css}</style></head><body>{''.join(body)}</body></html>")
