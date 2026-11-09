@@ -115,3 +115,16 @@ và nằm trong 0,67–1,5× phép neo peer. Tải báo cáo `.md` và bảng t�
    sẽ mất khi App khởi động lại). Bảng theo dõi: giá đã đi bao nhiêu % và đã đi được bao nhiêu % quãng về giá trị hợp lý.
 
 Báo cáo `.html` mở trong trình duyệt → In (⌘P) → Lưu PDF.
+
+### Giai đoạn 3 (10/11/2026): mô hình chuyên ngành — tab 🏭 (logic ở `sector_models.py`)
+
+App **không tự lấy** được đầu vào chính của 3 nhóm này. Anh nhập từ 사업보고서 DART / IR; mọi đầu vào qua **cổng số**.
+
+| Nhóm (tự chọn theo ngành) | Đầu vào | Kết quả | Cổng số |
+|---|---|---|---|
+| **Đóng tàu, quốc phòng — Backlog** | 수주잔고 (억), số năm đốt, biên LN trên backlog, book-to-bill | Thành **giả định bước ④** (DT = backlog đốt đều + đơn mới) | backlog ≤ 8 năm DT · 1–6 năm đốt · biên ≤ max lịch sử + 10 điểm · book-to-bill 0–3 |
+| **Pin — Công suất GWh** | GWh hiện tại / năm cuối, hiệu suất, giá bán 억/GWh, biên; EV/GWh tùy chọn | Thành **giả định bước ④** + mô hình đối chiếu EV/GWh | hiệu suất 0–100% · giá bán 0,5–1,5× giá ngụ ý từ doanh thu thực · biên như trên |
+| **Dược, biotech — rNPV** | Bảng thuốc: pha, doanh số đỉnh, năm ra mắt, PoS, biên/royalty, chi phí PT còn lại; tiền ròng, chi phí chung | **Mô hình chính** ở ⑥ (chiết khấu Ke riêng mã) | PoS ≤ 1,5× chuẩn pha (BIO/Informa 2011–2020) · biên ≤ 60% · năm ra mắt ≥ năm nay |
+
+Biên mặc định = biên LN ròng **năm gần nhất** (đơn mới ký theo giá hiện tại). Giả định từ 🏭 đi qua đúng cổng dự
+phóng, kịch bản và độ nhạy như mọi giả định khác.

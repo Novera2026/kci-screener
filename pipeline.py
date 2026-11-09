@@ -521,6 +521,11 @@ def report_markdown(ctx: dict) -> str:
     for r in rec["rows"]:
         L.append(f"| {r['name']} | {'chính' if r['role'] == 'primary' else 'đối chiếu'} | {_f0(r.get('value'))} | "
                  f"{'✅' if r['pass'] else '❌'} | {r['why']} |")
+    sp = ctx.get("special")
+    if sp:
+        L += ["", f"## Mô hình chuyên ngành — {sp['name']}", f"- {sp['summary']}" if sp.get("summary") else ""]
+        L += [f"- {c['Kết quả']} {c['Kiểm tra']}: {c['Giá trị']}" + (f" — {c['Ghi chú']}" if c["Ghi chú"] else "")
+              for c in sp.get("checks", [])]
     sc, se = ctx.get("scen"), ctx.get("sens")
     if sc:
         L += ["", "## 7. Kịch bản", "", "| Kịch bản | Xác suất | Δ tăng trưởng | × biên | Cổng dự phóng | Giá trị hợp lý |",
@@ -604,6 +609,11 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
                             mc / price, ke, coc["kd"], coc["tax"], a.g_high, a.years_high, coc["g_term"],
                             mc / 1e8)
         cands.append({"name": "FCFF-DCF (DART, tăng trưởng phẳng)", "value": fcff, "role": "cross"})
+    # mô hình chuyên ngành (sector_models): hàm(coc) → ứng viên, để độ nhạy Ke dịch cả rNPV / EV-GWh
+    for fn in D.get("extra") or []:
+        c = fn(coc)
+        if c:
+            cands.append(c)
     caps = [(dq or {}).get("cap"), None if idn["data_ok"] else "Medium"]
     rec = reconcile(price, cands, anchor, caps)
     fc_model = ddm if idn["dividend_model"] else rim

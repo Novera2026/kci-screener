@@ -22,6 +22,7 @@ except Exception:
     pass
 
 import pipeline as P                                   # noqa: E402
+import sector_models as P_S                            # noqa: E402
 import valuation as V                                  # noqa: E402
 from screener import TickerRegistry                    # noqa: E402
 
@@ -132,7 +133,9 @@ pm = P.peer_medians(peer_rows, exclude=tk)
 evidence = P.reported_evidence(series, quarters)
 
 
-D_eval = {"row": row, "series": series, "quarters": quarters, "extras": extras, "peers": peer_rows, "ticker": tk}
+D_extra: list = []       # mô hình chuyên ngành thêm vào ⑥ (tab 🏭 điền)
+D_eval = {"row": row, "series": series, "quarters": quarters, "extras": extras, "peers": peer_rows, "ticker": tk,
+          "extra": D_extra}
 LOG_PATH = os.path.join(_ROOT, "valuation_log.csv")
 
 
@@ -141,20 +144,154 @@ st.subheader(f"{name} · {tk}")
 st.caption(f"{row.get('industry_kr') or '—'} · nguồn giá {row.get('source') or '—'} · "
            f"vốn hóa {mc / 1e12:,.1f} nghìn tỷ KRW" if mc else "")
 
-tabs = st.tabs(["① Nhận diện", "② Dữ liệu", "③ Phân tích", "④ Dự phóng", "⑤ Chi phí vốn",
-                "⑥ Định giá", "⑦ Kịch bản & độ nhạy", "⑧ Football field & nhật ký", "📄 Kết luận & báo cáo"])
+_TAB_NAMES = ["① Nhận diện", "② Dữ liệu", "③ Phân tích", "🏭 Chuyên ngành", "④ Dự phóng", "⑤ Chi phí vốn",
+              "⑥ Định giá", "⑦ Kịch bản & độ nhạy", "⑧ Football field & nhật ký", "📄 Kết luận & báo cáo"]
+T = dict(zip(["1", "2", "3", "sec", "4", "5", "6", "7", "8", "end"], st.tabs(_TAB_NAMES)))
+
+# 🏭 chuyên ngành trước ④: backlog / công suất sinh giả định cho ④; rNPV / EV-GWh thành mô hình ở ⑥
+SPEC_MODES = {"none": "Không dùng", "backlog": "Backlog — đóng tàu, quốc phòng",
+              "capacity": "Công suất GWh — pin", "rnpv": "rNPV danh mục thuốc — dược, biotech"}
+special = None            # {"name", "checks", "summary"} cho báo cáo
+spec_drivers, spec_basis = None, ""
+shares = (mc / price) if (mc and price) else None
+net_debt = extras.get("net_debt")
+_hm = [c["net_profit"] / c["revenue"] * 100 for c in reals if c.get("net_profit") is not None and c.get("revenue")]
+_m_med = max(V._median(_hm) or 0.0, 0.0)
+# biên mặc định cho backlog / công suất: năm gần nhất (đơn hàng mới ký theo giá hiện tại — trung vị nhiều năm
+# kéo cả các năm lỗ 2021–23 của đóng tàu về ~0%); năm gần nhất âm thì dùng trung vị
+_m_last = _hm[-1] if _hm else 0.0
+_m_def = round(_m_last if _m_last > 0 else _m_med, 1)
+with T["sec"]:
+    st.markdown("#### 🏭 Mô hình chuyên ngành")
+    st.caption("Ba nhóm ngành không định giá đúng được bằng ROE/EPS quá khứ. App **không tự lấy** được đầu vào chính "
+               "(수주잔고, công suất GWh, danh mục thuốc) — anh nhập từ **사업보고서 DART / tài liệu IR**. Mọi đầu "
+               "vào phải qua **cổng số**; ❌ là mô hình bị loại, không có ô giải trình nào mở được cổng.")
+    _def = P_S.SPECIAL_BUCKETS.get(idn["bucket"], "none")
+    mode = st.selectbox("Mô hình", list(SPEC_MODES), index=list(SPEC_MODES).index(_def),
+                        format_func=SPEC_MODES.get, key=f"spec_mode_{tk}")
+    rev0 = reals[-1].get("revenue") if reals else None
+
+    if mode == "backlog":
+        c1, c2, c3, c4 = st.columns(4)
+        bl = c1.number_input("수주잔고 (억원)", 0.0, value=0.0, step=1000.0, key=f"bl_{tk}",
+                             help="사업보고서 → II. 사업의 내용 → 수주상황 (đơn vị 억원)")
+        by = c2.number_input("Số năm đốt backlog", 1.0, 6.0, 3.0, 0.5, key=f"by_{tk}")
+        bm = c3.number_input("Biên LN ròng trên backlog (%)", -20.0, 60.0, _m_def, 0.5, key=f"bm_{tk}",
+                             help="Mặc định = biên LN ròng năm gần nhất")
+        bb = c4.number_input("Book-to-bill đơn mới", 0.0, 3.0, 1.0, 0.1, key=f"bb_{tk}",
+                             help="Đơn mới mỗi năm ÷ doanh thu năm đó. 1,0 = giữ quy mô")
+        if rev0:
+            st.caption(f"Doanh thu năm gần nhất {rev0:,.0f}억 · biên LN ròng năm gần nhất {_m_last:.1f}%, "
+                       f"trung vị lịch sử {_m_med:.1f}%.")
+        if bl > 0:
+            res = P_S.backlog_drivers(series, bl, by, bm / 100, bb, years=years,
+                                      payout=(P._payout_hist(reals) or 0.0))
+            st.dataframe(pd.DataFrame(res["checks"]).astype({"Giá trị": str}), hide_index=True, width="stretch")
+            if res["ok"]:
+                st.dataframe(pd.DataFrame({"Năm": [d["Năm"] for d in res["drivers"]],
+                                           "Doanh thu (억)": res["revenue"]}).style.format({"Doanh thu (억)": "{:,.0f}"}),
+                             hide_index=True)
+                if st.checkbox("Dùng làm giả định bước ④", True, key=f"bl_use_{tk}"):
+                    spec_drivers = res["drivers"]
+                    spec_basis = f"backlog {bl:,.0f}억 đốt trong {by:g} năm, biên {bm:.1f}%, book-to-bill {bb:.2f}"
+            special = {"name": "Backlog", "checks": res["checks"],
+                       "summary": f"수주잔고 {bl:,.0f}억 ({bl / rev0:.1f} năm doanh thu) · đốt {by:g} năm · biên "
+                                  f"{bm:.1f}% · book-to-bill {bb:.2f}" if rev0 else ""}
+        else:
+            st.info("Nhập 수주잔고 để dựng dự phóng từ backlog.")
+
+    elif mode == "capacity":
+        c1, c2, c3 = st.columns(3)
+        g0 = c1.number_input("Công suất hiện tại (GWh)", 0.0, value=0.0, step=10.0, key=f"g0_{tk}")
+        gN = c2.number_input(f"Công suất năm thứ {years} (GWh)", 0.0, value=0.0, step=10.0, key=f"gN_{tk}")
+        ut = c3.number_input("Hiệu suất sử dụng (%)", 1.0, 100.0, 70.0, 5.0, key=f"ut_{tk}") / 100
+        imp = (rev0 / (g0 * ut)) if (rev0 and g0 > 0) else None
+        c4, c5, c6 = st.columns(3)
+        asp = c4.number_input("Giá bán (억원/GWh)", 0.0, value=float(round(imp or 0.0)), step=10.0, key=f"asp_{tk}_{g0}_{ut}",
+                              help="Mặc định = doanh thu năm gần nhất ÷ (GWh hiện tại × hiệu suất)")
+        cm = c5.number_input("Biên LN ròng (%)", -30.0, 60.0, _m_def, 0.5, key=f"cm_{tk}",
+                             help="Mặc định = biên LN ròng năm gần nhất")
+        evg = c6.number_input("EV/GWh đối chiếu (억원/GWh, 0 = bỏ)", 0.0, value=0.0, step=10.0, key=f"evg_{tk}")
+        if g0 > 0 and gN > 0:
+            path = [g0 + (gN - g0) * t / years for t in range(1, years + 1)]
+            res = P_S.capacity_drivers(series, g0, path, ut, asp, cm / 100, payout=(P._payout_hist(reals) or 0.0))
+            st.dataframe(pd.DataFrame(res["checks"]).astype({"Giá trị": str}), hide_index=True, width="stretch")
+            ie = P_S.implied_ev_per_gwh(mc, net_debt, g0)
+            if ie:
+                st.caption(f"Thị trường đang trả **EV/GWh ≈ {ie:,.0f}억** cho công suất hiện tại"
+                           + ("" if net_debt is not None else " (chưa trừ nợ ròng — thiếu DART)") + ".")
+            if res["ok"] and st.checkbox("Dùng làm giả định bước ④", True, key=f"cap_use_{tk}"):
+                spec_drivers = res["drivers"]
+                spec_basis = f"công suất {g0:g}→{gN:g} GWh × hiệu suất {ut:.0%} × {asp:,.0f}억/GWh, biên {cm:.1f}%"
+            if evg > 0 and res["ok"]:
+                v = P_S.ev_per_gwh_value(gN, evg, net_debt or 0.0, shares)
+                D_extra.append(lambda coc, v=v: {"name": f"EV/GWh × {gN:g} GWh (nhập tay)", "value": v,
+                                                 "role": "cross"})
+            special = {"name": "Công suất GWh", "checks": res["checks"],
+                       "summary": f"{g0:g} → {gN:g} GWh · hiệu suất {ut:.0%} · {asp:,.0f}억/GWh · biên {cm:.1f}%"
+                                  + (f" · EV/GWh {evg:,.0f}억" if evg else "")}
+        else:
+            st.info("Nhập công suất hiện tại và năm cuối để dựng dự phóng từ công suất.")
+
+    elif mode == "rnpv":
+        st.caption("Mỗi dòng một thuốc/ứng viên. **PoS** để trống = chuẩn theo pha (BIO/Informa 2011–2020: pha 1 "
+                   "7,9% · pha 2 15,3% · pha 3 57,8% · nộp hồ sơ 90,6%); nhập tay không được vượt 1,5× chuẩn. "
+                   "**Biên LN %** = biên sau thuế nếu tự bán, hoặc tỷ lệ royalty nếu chỉ thu phí bản quyền.")
+        _cols = ["Tên", "Pha", "Doanh số đỉnh (억)", "Năm ra mắt", "PoS %", "Biên LN %", "Chi phí PT còn lại (억)"]
+        ed_a = st.data_editor(pd.DataFrame(columns=_cols).astype({"Tên": str, "Pha": str}), num_rows="dynamic",
+                              key=f"rn_{tk}", hide_index=True, width="stretch",
+                              column_config={"Pha": st.column_config.SelectboxColumn(
+                                  "Pha", options=list(P_S.POS_BY_PHASE), required=True)})
+        c1, c2 = st.columns(2)
+        _nc_def = float(-net_debt) if net_debt is not None else 0.0
+        nc = c1.number_input("Tiền ròng (억, + = tiền > nợ vay)", value=_nc_def, step=100.0, key=f"nc_{tk}",
+                             help="Mặc định từ DART (tiền − nợ vay)" if net_debt is not None else "Thiếu DART — nhập tay")
+        oh = c2.number_input("Chi phí chung hằng năm (억)", 0.0, value=0.0, step=10.0, key=f"oh_{tk}",
+                             help="Trừ như niên kim vĩnh viễn ÷ Ke")
+        assets = [r for r in ed_a.to_dict("records") if str(r.get("Tên") or "").strip() not in ("", "nan", "None")]
+        if assets:
+            _role = "primary" if idn["bucket"] == "Pharma/Biotech" else "cross"
+            this_year = _dt.date.today().year
+
+            def _rn(coc, assets=assets, nc=nc, oh=oh):
+                out = P_S.rnpv(assets, coc["ke"], shares, nc, this_year, overhead_eok=oh)
+                return {"name": f"rNPV danh mục ({len(out['rows'])} tài sản)", "value": out["value"], "role": _role,
+                        "blocked": None if out["ok"] else f"cổng rNPV: {out['n_fail']} vi phạm"}
+            D_extra.append(_rn)
+            out = P_S.rnpv(assets, ke, shares, nc, this_year, overhead_eok=oh)
+            st.dataframe(pd.DataFrame(out["checks"]).astype({"Giá trị": str}), hide_index=True, width="stretch")
+            if out["rows"]:
+                st.dataframe(pd.DataFrame(out["rows"]).style.format(
+                    {c: "{:,.0f}" for c in ("PV dòng tiền (억)", "PV chi phí PT (억)", "rNPV (억)")}),
+                    hide_index=True, width="stretch")
+                st.caption(f"Σ rNPV {out['sum_assets']:,.0f}억 + tiền ròng {nc:,.0f}억 − chi phí chung "
+                           f"{out['overhead_pv']:,.0f}억 = **{out['equity']:,.0f}억**"
+                           + (f" → **{out['value']:,.0f} KRW/cp**" if out["value"] else " → không công bố")
+                           + f" · chiết khấu Ke {ke * 100:.2f}%.")
+            special = {"name": "rNPV", "checks": out["checks"],
+                       "summary": f"{len(assets)} tài sản · Σ rNPV {out['sum_assets']:,.0f}억 · tiền ròng {nc:,.0f}억"}
+        else:
+            st.info("Thêm dòng vào bảng để định giá danh mục thuốc.")
 
 # ④ trước để có giả định người dùng sửa — các tab khác đọc kết quả
-with tabs[3]:
+if spec_drivers:
+    drv_default, basis = [dict(d) for d in spec_drivers], spec_basis
+    import zlib
+    drv_key = f"drv_{tk}_{years}_{g_term}_{zlib.crc32(spec_basis.encode())}"   # đổi đầu vào 🏭 → bảng ④ làm mới
+with T["4"]:
     st.markdown("#### ④ Dự phóng nhiều năm — sửa trực tiếp các ô giả định")
+    if spec_drivers:
+        st.info(f"🏭 Giả định đang lấy từ **mô hình chuyên ngành**: {spec_basis}. Bỏ chọn ở tab 🏭 để quay về "
+                "giả định từ lịch sử.")
     if not drv_default:
         st.warning("Không đủ dữ liệu (cần ≥ 2 năm doanh thu thực) để dự phóng.")
         drivers = []
     else:
-        st.caption(f"Mặc định: năm 1 theo **{basis or 'CAGR × biên xu hướng'}**; tăng trưởng giảm dần về "
-                   f"g dài hạn {coc['g_term'] * 100:.1f}% ở năm cuối"
-                   + ("; biên LN trượt về **trung vị lịch sử (mid-cycle)** vì là ngành chu kỳ / đang lỗ"
-                      if idn["cyclical"] else "") + "; tỷ lệ cổ tức = trung vị lịch sử.")
+        if not spec_drivers:
+            st.caption(f"Mặc định: năm 1 theo **{basis or 'CAGR × biên xu hướng'}**; tăng trưởng giảm dần về "
+                       f"g dài hạn {coc['g_term'] * 100:.1f}% ở năm cuối"
+                       + ("; biên LN trượt về **trung vị lịch sử (mid-cycle)** vì là ngành chu kỳ / đang lỗ"
+                          if idn["cyclical"] else "") + "; tỷ lệ cổ tức = trung vị lịch sử.")
         if st.button("↺ Khôi phục giả định mặc định"):
             st.session_state.pop(drv_key, None)
             st.rerun()
@@ -167,7 +304,7 @@ with tabs[3]:
 EV = P.evaluate(D_eval, A, drivers, idn, dq, evidence)
 fc, fg, base, anchor, rim, ddm, rec = (EV[k] for k in ("fc", "fg", "base", "anchor", "rim", "ddm", "rec"))
 
-with tabs[3]:
+with T["4"]:
     if fc:
         fdf = pd.DataFrame(fc)
         st.dataframe(fdf.style.format({c: "{:,.0f}" for c in ("Doanh thu (억)", "LN ròng (억)", "EPS", "DPS",
@@ -187,7 +324,7 @@ with tabs[3]:
                    + (f" Năm 1 đã có **{evidence['k']} quý thực** (DT {evidence['growth'] * 100:+.0f}%, biên "
                       f"{evidence['margin'] * 100:.1f}%) → dải năm 1 nới theo số đã công bố." if evidence else ""))
 
-with tabs[0]:
+with T["1"]:
     st.markdown("#### ① Nhận diện doanh nghiệp")
     c1, c2, c3 = st.columns(3)
     c1.metric("Nhóm định giá", idn["bucket"])
@@ -199,7 +336,7 @@ with tabs[0]:
         st.caption("Ngành cần dữ liệu sâu hơn (backlog/capex/SOTP/pipeline) mà App chưa có → độ tin cậy kết luận "
                    "bị chặn trần **Medium**.")
 
-with tabs[1]:
+with T["2"]:
     st.markdown(f"#### ② Dữ liệu & chất lượng — {dq['n_fail']} ❌ · {dq['n_warn']} ⚠️")
     if dq["cap"]:
         st.warning(f"Trần độ tin cậy do dữ liệu: **{dq['cap']}**")
@@ -213,7 +350,7 @@ with tabs[1]:
                             [c.get(k) for k in keys] for c in reals}, index=[lbl[k] for k in keys])
         st.dataframe(tbl.style.format("{:,.0f}", na_rep="—"), width="stretch")
 
-with tabs[2]:
+with T["3"]:
     st.markdown("#### ③ Phân tích & chuẩn hóa")
     if ratios:
         rdf = pd.DataFrame(ratios)
@@ -232,7 +369,7 @@ with tabs[2]:
     else:
         st.warning("Không có BCTC năm thực.")
 
-with tabs[4]:
+with T["5"]:
     st.markdown("#### ⑤ Chi phí vốn")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rf", f"{coc['rf'] * 100:.2f}%")
@@ -244,7 +381,7 @@ with tabs[4]:
     st.caption(f"ERP {coc['erp'] * 100:.2f}% · Kd ≈ Rf + 1,5% = {coc['kd'] * 100:.2f}% · thuế {coc['tax'] * 100:.0f}% · "
                f"g dài hạn {coc['g_term'] * 100:.1f}%. β hồi quy 52 tuần vs KOSPI, kẹp 0,5–1,8 rồi Blume 0,67β+0,33.")
 
-with tabs[5]:
+with T["6"]:
     st.markdown("#### ⑥ Định giá đa mô hình")
     st.caption(f"Peer cùng ngành KRX: {pm['n']} mã · P/E trung vị **{pm['pe']:.1f}** ({pm['n_pe']} mã hợp lệ)"
                if pm["pe"] else f"Peer cùng ngành KRX: {pm['n']} mã · P/E trung vị: — (cần ≥ {V.MIN_PEERS} mã hợp lệ)")
@@ -275,7 +412,7 @@ with tabs[5]:
                                           "per": "P/E", "pbr": "P/B"}), hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------------------- ⑦ kịch bản & độ nhạy
-with tabs[6]:
+with T["7"]:
     st.markdown("#### ⑦ Kịch bản Bear / Base / Bull")
     scen, sens = None, None
     if not drivers:
@@ -324,7 +461,7 @@ with tabs[6]:
                    "🟢 ≥ +20% so với giá · 🔴 ≤ −15%. g luôn bị chặn ≤ Rf.")
 
 # ---------------------------------------------------------------------------- ⑧ football field & nhật ký
-with tabs[7]:
+with T["8"]:
     st.markdown("#### ⑧ Football field")
     ff = P.football_field(row, rec, scen, sens)
     if ff and price:
@@ -364,10 +501,10 @@ with tabs[7]:
 # ---------------------------------------------------------------------------- kết luận
 ctx = {"ticker": tk, "name": name, "date": _dt.date.today().isoformat(), "price": price, "identify": idn,
        "dq": dq, "forecast": fc, "fgates": fg, "coc": EV["coc"], "conclusion": rec, "peers": EV["pm"],
-       "anchor": anchor, "scen": scen, "sens": sens}
+       "anchor": anchor, "scen": scen, "sens": sens, "special": special}
 md = P.report_markdown(ctx)
 
-with tabs[8]:
+with T["end"]:
     st.markdown("#### Kết luận")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Giá hiện tại", f"{price:,.0f}" if price else "—")
