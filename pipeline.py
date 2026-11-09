@@ -21,7 +21,8 @@ import math
 from typing import Optional
 
 import valuation as V
-from financials import _shares_estimate, _trend_value, _ytd_run_rate, project_forecast
+from financials import (_shares_estimate, _trend_value, _ytd_run_rate, conversion_ratio, one_off_core,
+                        project_forecast)
 
 # ---------------------------------------------------------------------------- hằng số cổng
 FC_GROWTH_BAND = (-0.30, 0.40)    # tăng trưởng doanh thu 1 năm ngoài dải → ❌
@@ -136,6 +137,16 @@ def data_quality(row: dict, series: list[dict], quarters: Optional[list[dict]] =
                              "" if q_age <= 6 else "Quý mới nhất >6 tháng — dự phóng năm 1 bỏ qua số mới"))
     else:
         checks.append(_check("Quý thực gần nhất", "—", WARN, "Không có BCTC quý"))
+    # lãi/lỗ bất thường một lần trong các quý thực (so với tỷ lệ LN thuần/LN HĐ của chính mã)
+    ratio = conversion_ratio(reals)
+    odd = [c for c in qs[-5:] if one_off_core(c, ratio) is not None]
+    if qs:
+        checks.append(_check("Lãi/lỗ bất thường (quý)",
+                             ", ".join(f"{str(c['period'])[:4]}.{str(c['period'])[4:6]}: LN {c['net_profit']:,.0f}억 "
+                                       f"vs lõi {one_off_core(c, ratio):,.0f}억" for c in odd) or "không",
+                             WARN if odd else OK,
+                             f"LN thuần/LN HĐ lệch xa tỷ lệ thường của mã ({ratio:.2f}) — số công bố giữ nguyên, "
+                             "nhưng KHÔNG ngoại suy cho các quý chưa công bố" if odd else ""))
     checks.append(_check("Beta riêng mã (52 tuần)", f"{beta:.2f}" if beta else "—",
                          OK if beta else WARN, "" if beta else "Dùng β = 1"))
 
@@ -168,6 +179,8 @@ def ratio_table(series: list[dict]) -> list[dict]:
         prev = rev
     roes = [r["ROE %"] for r in rows if r["ROE %"] is not None]
     med = V._median(roes)
+    ratio = conversion_ratio(reals)
+    odd_years = {str(c.get("period", ""))[:4] for c in reals if one_off_core(c, ratio) is not None}
     for r in rows:
         x, flag = r["ROE %"], ""
         if x is not None and med is not None and med != 0:
@@ -175,6 +188,8 @@ def ratio_table(series: list[dict]) -> list[dict]:
                 flag = "ROE khác dấu trung vị"
             elif abs(x) > 2 * abs(med) or abs(x) < 0.5 * abs(med):
                 flag = "ROE lệch >2× trung vị"
+        if r["Năm"] in odd_years:
+            flag = (flag + " · " if flag else "") + "LN thuần lệch LN HĐ (lãi/lỗ một lần?)"
         r["Năm bất thường"] = flag
     return rows
 
@@ -200,11 +215,17 @@ def reported_evidence(series: list[dict], quarters: Optional[list[dict]]) -> Opt
     rev_last = _num(reals[-1].get("revenue")) if reals else None
     if not ytd or ytd["k"] < 2 or not rev_last or rev_last <= 0 or ytd.get("net_profit") is None:
         return None
-    return {"k": ytd["k"], "growth": ytd["revenue"] / rev_last - 1, "margin": ytd["net_profit"] / ytd["revenue"]}
+    rep = ytd["net_profit"] / ytd["revenue"]
+    core = ytd.get("net_profit_core", ytd["net_profit"]) / ytd["revenue"]
+    # margin = biên LÕI (bỏ lãi/lỗ bất thường một lần) — dùng cho 'max lịch sử' và điểm xuất phát năm 2+;
+    # margin_reported = biên công bố (gồm phần một lần) — chỉ là trần của RIÊNG năm 1
+    return {"k": ytd["k"], "growth": ytd["revenue"] / rev_last - 1, "margin": core, "margin_reported": rep,
+            "one_offs": ytd.get("one_offs", []), "conv_ratio": ytd.get("conv_ratio")}
 
 
 def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int = 5,
-                    quarters: Optional[list[dict]] = None, cyclical: bool = False) -> list[dict]:
+                    quarters: Optional[list[dict]] = None, cyclical: bool = False,
+                    financial: bool = False) -> list[dict]:
     """Giả định mặc định cho dự phóng (người dùng sửa trên bảng):
 
       • Năm 1: theo financials.project_forecast (đã tính các quý thực đã công bố của năm đó).
@@ -213,6 +234,8 @@ def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int 
       • Biên LN ròng: ngành chu kỳ / biên năm 1 âm → trượt dần về trung vị lịch sử (mid-cycle);
         còn lại giữ biên xu hướng.
       • Tỷ lệ cổ tức: trung vị lịch sử (kẹp 0–90%), không có → 0.
+      • Năm 1 có lãi/lỗ bất thường một lần (quý thực): năm 1 giữ số công bố; năm 2+ xuất phát từ biên LÕI và
+        (doanh nghiệp phi tài chính) không vượt trần biên của cổng dự phóng — mặc định luôn qua cổng.
     """
     reals = _reals(series)
     if len(reals) < 2:
@@ -231,7 +254,8 @@ def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int 
     if m1 is None:
         return []
     m_mid = V._median(hm)
-    fade_margin = (cyclical or m1 <= 0) and m_mid is not None
+    m1_rest = ev["margin"] if ev else m1          # điểm xuất phát năm 2+: biên lõi, không mang phần một lần
+    fade_margin = (cyclical or m1_rest <= 0) and m_mid is not None
     g_long = a.g_term_capped()
     payout = _payout_hist(reals) or 0.0
     y0 = int(str(reals[-1]["period"])[:4])
@@ -242,7 +266,12 @@ def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int 
     for t in range(1, years + 1):
         k = (t - 1) / (years - 1) if years > 1 else 1.0
         g = g1 if t == 1 else g_from + (g_long - g_from) * k
-        m = (m1 + (m_mid - m1) * k) if fade_margin else m1
+        if t == 1:
+            m = m1
+        else:
+            m = (m1_rest + (m_mid - m1_rest) * k) if fade_margin else m1_rest
+            if not financial:
+                m = min(m, FC_MARGIN_MAX)
         out.append({"Năm": str(y0 + t), "Tăng trưởng DT %": round(g * 100, 1),
                     "Biên LN ròng %": round(m * 100, 2), "Tỷ lệ cổ tức %": round(payout * 100, 1)})
     if out:
@@ -301,14 +330,18 @@ def forecast_gates(series: list[dict], fc: list[dict], financial: bool = False,
             checks.append(_check(f"{y}: tăng trưởng DT", f"{g * 100:+.1f}%", FAIL,
                                  f"ngoài [{lo * 100:.0f}%; +{hi * 100:.0f}%]"))
         m = f["Biên LN ròng %"] / 100
-        if m_max is not None and m > m_max + FC_MARGIN_HEADROOM:
+        # năm 1 đã có ≥2 quý thực: biên ≤ biên CÔNG BỐ (+2 điểm) là số thật, không phải giả định → qua
+        # (gồm cả lãi một lần đã ghi nhận — nó vào vốn chủ MỘT lần; năm 2+ không mang theo)
+        y1_reported = (i == 0 and evidence is not None
+                       and m <= evidence.get("margin_reported", evidence["margin"]) + 0.02)
+        if not y1_reported and m_max is not None and m > m_max + FC_MARGIN_HEADROOM:
             checks.append(_check(f"{y}: biên LN ròng", f"{m * 100:.1f}%", FAIL,
                                  f"> max lịch sử/đã công bố {m_max * 100:.1f}% + {FC_MARGIN_HEADROOM * 100:.0f} điểm"))
-        if not financial and m > FC_MARGIN_MAX:
+        if not y1_reported and not financial and m > FC_MARGIN_MAX:
             checks.append(_check(f"{y}: biên LN ròng", f"{m * 100:.1f}%", FAIL,
                                  f"> {FC_MARGIN_MAX * 100:.0f}% (doanh nghiệp phi tài chính)"))
         roe = f.get("ROE %")
-        if roe is not None and roe / 100 > FC_ROE_MAX:
+        if not y1_reported and roe is not None and roe / 100 > FC_ROE_MAX:
             checks.append(_check(f"{y}: ROE", f"{roe:.1f}%", FAIL, f"> {FC_ROE_MAX * 100:.0f}%"))
         if f["BPS cuối kỳ"] is not None and f["BPS cuối kỳ"] <= 0:
             checks.append(_check(f"{y}: BPS", f"{f['BPS cuối kỳ']:,.0f}", FAIL, "vốn chủ âm"))

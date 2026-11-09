@@ -202,6 +202,42 @@ def _next_label(reals: list[dict]) -> str:
     return "FCST"
 
 
+# ---------------------------------------------------------------------------
+# Lãi/lỗ bất thường một lần (10/11/2026): LN thuần ≠ LN HĐ×(1−thuế) rất phổ biến và phần lớn LẶP LẠI (lãi công
+# ty liên kết của Hyundai Mobis ~1,2× LN HĐ, lãi tiền gửi của DN nhiều tiền) → KHÔNG thay LN thuần bằng LN HĐ
+# hàng loạt. Chỉ cờ một quý khi tỷ lệ LN thuần/LN HĐ lệch xa CHÍNH LỊCH SỬ của mã và phần lệch đáng kể so với
+# doanh thu quý, hoặc LN thuần > doanh thu (Hynix Q2/2026: 93,9조 trên 79,3조).
+# ---------------------------------------------------------------------------
+ONE_OFF_REL = (2 / 3, 1.5)     # tỷ lệ quý ÷ tỷ lệ trung vị năm của mã ngoài dải này…
+ONE_OFF_MIN_SHARE = 0.15       # …VÀ |LN thuần − LN HĐ × tỷ lệ trung vị| > 15% doanh thu quý
+DEFAULT_CONV = 0.78            # LN thuần ≈ LN HĐ × (1 − 22% thuế) khi thiếu lịch sử
+
+
+def conversion_ratio(reals: list[dict]) -> float:
+    """Tỷ lệ LN thuần / LN HĐ trung vị của chính mã (năm thực có LN HĐ > 0 và LN thuần > 0), kẹp [0,3; 2].
+    < 3 năm → DEFAULT_CONV: trung vị 2 năm mà 1 năm có lãi một lần thì 'tỷ lệ thường' tự nó đã méo (Alteogen
+    2024–25: 2,39 / 1,36 → 1,87, làm biên lõi 96% > biên công bố 84%)."""
+    xs = [c["net_profit"] / c["op_profit"] for c in reals
+          if c.get("op_profit") and c["op_profit"] > 0 and c.get("net_profit") and c["net_profit"] > 0]
+    if len(xs) < 3:
+        return DEFAULT_CONV
+    return min(max(_median(xs), 0.3), 2.0)
+
+
+def one_off_core(c: dict, ratio: float) -> Optional[float]:
+    """LN thuần 'lõi' của 1 kỳ nếu kỳ đó có lãi/lỗ bất thường (= LN HĐ × tỷ lệ của mã), không thì None."""
+    np_, op, rev = c.get("net_profit"), c.get("op_profit"), c.get("revenue")
+    if np_ is None or op is None or op <= 0 or not rev or rev <= 0:
+        return None
+    core = op * ratio
+    if np_ > rev:
+        return core
+    rel = (np_ / op) / ratio
+    if not ONE_OFF_REL[0] <= rel <= ONE_OFF_REL[1] and abs(np_ - core) > ONE_OFF_MIN_SHARE * rev:
+        return core
+    return None
+
+
 def _ytd_run_rate(reals: list[dict], quarters: Optional[list[dict]]) -> Optional[dict]:
     """Năm dự phóng ĐÃ CÓ quý thực công bố → ước cả năm = lũy kế các quý đã công bố
     + mỗi quý còn lại bằng trung bình 2 quý thực gần nhất (run-rate, không ngoại suy).
@@ -219,14 +255,34 @@ def _ytd_run_rate(reals: list[dict], quarters: Optional[list[dict]]) -> Optional
     if not 1 <= k <= 4:
         return None
     recent = q_real[-2:]
-    out = {"k": k}
+    ratio = conversion_ratio(reals)
+
+    def core(c: dict, m: str):
+        """LN của quý sau khi bỏ phần bất thường (chỉ cho LN thuần / LN cổ đông mẹ)."""
+        v = c.get(m)
+        if m not in ("net_profit", "ctrl_net") or v is None:
+            return v
+        cn = one_off_core(c, ratio)
+        if cn is None:
+            return v
+        np_ = c.get("net_profit")
+        return cn if m == "net_profit" else (cn * v / np_ if np_ else cn)
+
+    out = {"k": k, "conv_ratio": ratio,
+           "one_offs": [{"period": c["period"], "net_profit": c["net_profit"],
+                         "core": one_off_core(c, ratio)} for c in q_real
+                        if one_off_core(c, ratio) is not None and c in (ytd + recent)]}
     for m in ("revenue", "op_profit", "net_profit", "ctrl_net"):
         vals = [c.get(m) for c in ytd]
-        rr = [c.get(m) for c in recent if c.get(m) is not None]
+        # quý còn lại ngoại suy theo 2 quý gần nhất ĐÃ BỎ lãi/lỗ bất thường — số công bố giữ nguyên (thật),
+        # nhưng một lần không được nhân lên cho các quý chưa công bố
+        rr = [core(c, m) for c in recent if c.get(m) is not None]
         if any(v is None for v in vals) or not rr:
             out[m] = None
             continue
         out[m] = sum(vals) + (4 - k) * sum(rr) / len(rr)
+        if m in ("net_profit", "ctrl_net"):
+            out[m + "_core"] = sum(core(c, m) for c in ytd) + (4 - k) * sum(rr) / len(rr)
     return out if out.get("revenue") else None
 
 

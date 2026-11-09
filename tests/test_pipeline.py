@@ -285,3 +285,23 @@ def test_scenarios_not_informative_when_forecast_blocked():
     bad = [{"Năm": "2026", "Tăng trưởng DT %": 90, "Biên LN ròng %": 60, "Tỷ lệ cổ tức %": 0}]
     sc = P.scenarios(D, A, bad, P.identify(D["row"]), {"cap": None}, None)
     assert not sc["informative"] and sc["expected"] is None and sc["low"] is None
+
+
+def test_one_off_year1_kept_but_not_carried_to_later_years():
+    """Năm 1 giữ số công bố (có lãi một lần) và qua cổng; năm 2+ xuất phát từ biên lõi, ≤ trần biên."""
+    s = _series(rev0=1000, g=0.0, margin=0.10)
+    r = _row(s)
+    qs = [{"period": "202603", "is_consensus": False, "revenue": 250, "op_profit": 32, "net_profit": 25,
+           "ctrl_net": 25},
+          {"period": "202606", "is_consensus": False, "revenue": 250, "op_profit": 32, "net_profit": 300,
+           "ctrl_net": 300}]                                              # LN > DT: lãi một lần
+    ev = P.reported_evidence(s, qs)
+    assert ev["margin"] < 0.15 < ev["margin_reported"]
+    d = P.default_drivers(s, r, A, years=4, quarters=qs)
+    d[0].pop("_basis", None)
+    assert d[0]["Biên LN ròng %"] == pytest.approx(ev["margin_reported"] * 100, abs=0.3)   # năm 1 = số công bố
+    assert all(x["Biên LN ròng %"] <= P.FC_MARGIN_MAX * 100 for x in d[1:])
+    assert d[1]["Biên LN ròng %"] == pytest.approx(ev["margin"] * 100, abs=0.01)
+    assert P.forecast_gates(s, P.run_forecast(s, r, d), evidence=ev)["ok"]
+    dq = P.data_quality(r, s, qs, 1.0)
+    assert any(c["Kiểm tra"].startswith("Lãi/lỗ bất thường") and c["Kết quả"] == "⚠️" for c in dq["checks"])

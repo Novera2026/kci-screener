@@ -208,3 +208,44 @@ def test_dart_year_cache_skips_repeat_requests(monkeypatch):
     assert calls.count(("X", 2025)) == 1 and calls.count(("X", 2026)) == 3
     D._fetch_year("X", 2025)["revenue"] = 99        # sửa bản trả về không làm bẩn cache
     assert D._fetch_year("X", 2025)["revenue"] == 1.0
+
+
+# ---------------------------------------------------------------- lãi/lỗ bất thường một lần (10/11/2026)
+def _yr(y, rev, op, np_):
+    return {"period": f"{y}12", "is_consensus": False, "revenue": rev, "op_profit": op, "net_profit": np_,
+            "ctrl_net": np_, "eps": np_, "bps": 1000, "dps": 0}
+
+
+def _q(p, rev, op, np_):
+    return {"period": p, "is_consensus": False, "revenue": rev, "op_profit": op, "net_profit": np_, "ctrl_net": np_}
+
+
+def test_conversion_ratio_uses_own_history():
+    import financials as F
+    reals = [_yr(2023, 100, 10, 12), _yr(2024, 100, 10, 12), _yr(2025, 100, 10, 12)]   # lãi liên kết đều
+    assert F.conversion_ratio(reals) == pytest.approx(1.2)
+    assert F.conversion_ratio(reals[:2]) == F.DEFAULT_CONV        # < 3 năm: không tin tỷ lệ riêng
+
+
+def test_one_off_not_flagged_when_structural():
+    """Kiểu Hyundai Mobis: LN thuần ~1,2× LN HĐ đều đặn → không phải bất thường."""
+    import financials as F
+    assert F.one_off_core(_q("202606", 100, 10, 12.5), 1.2) is None
+
+
+def test_one_off_flagged_when_far_from_own_ratio_or_above_revenue():
+    import financials as F
+    assert F.one_off_core(_q("202606", 79, 60, 94), 0.84) == pytest.approx(60 * 0.84)   # LN > DT (Hynix)
+    assert F.one_off_core(_q("202512", 100, 30, 115), 1.36) == pytest.approx(30 * 1.36)  # 3,8× vs 1,36
+    assert F.one_off_core(_q("202512", 100, 2, 5), 0.8) is None     # lệch tỷ lệ nhưng nhỏ so với doanh thu
+
+
+def test_run_rate_does_not_extrapolate_one_off():
+    import financials as F
+    reals = [_yr(2023, 400, 40, 32), _yr(2024, 400, 40, 32), _yr(2025, 400, 40, 32)]
+    qs = [_q("202603", 100, 10, 8), _q("202606", 100, 10, 60)]            # Q2: lãi một lần +52
+    out = F._ytd_run_rate(reals, qs)
+    # số công bố giữ nguyên (8 + 60), 2 quý còn lại = TB(8, lõi 8) = 8, KHÔNG phải TB(8, 60) = 34
+    assert out["net_profit"] == pytest.approx(8 + 60 + 2 * 8)
+    assert out["net_profit_core"] == pytest.approx(8 + 8 + 2 * 8)
+    assert [o["period"] for o in out["one_offs"]] == ["202606"]

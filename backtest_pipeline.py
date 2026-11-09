@@ -54,7 +54,8 @@ def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years
                 idn = P.identify(row)
                 t_day = _dt.date(int(p["date"][:4]), int(p["date"][4:6]), int(p["date"][6:8]))
                 dq = P.data_quality(row, hist, [], row["beta"], today=t_day)
-                drv = P.default_drivers(hist, row, ap, years=years_fc, cyclical=idn["cyclical"])
+                drv = P.default_drivers(hist, row, ap, years=years_fc, cyclical=idn["cyclical"],
+                                         financial=idn["financial"])
                 if drv:
                     drv[0].pop("_basis", None)
                 ev = P.evaluate(D, ap, drv, idn, dq)

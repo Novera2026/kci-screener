@@ -124,7 +124,8 @@ dq = P.data_quality(row, series, quarters, beta)
 ratios = P.ratio_table(series)
 
 drv_key = f"drv_{tk}_{years}_{g_term}"
-drv_default = P.default_drivers(series, row, A, years=years, quarters=quarters, cyclical=idn["cyclical"])
+drv_default = P.default_drivers(series, row, A, years=years, quarters=quarters, cyclical=idn["cyclical"],
+                                 financial=idn["financial"])
 basis = drv_default[0].pop("_basis", "") if drv_default else ""
 coc = P.cost_of_capital(A, beta, mc, extras)
 ke = coc["ke"]

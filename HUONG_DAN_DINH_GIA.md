@@ -128,3 +128,22 @@ App **không tự lấy** được đầu vào chính của 3 nhóm này. Anh nh
 
 Biên mặc định = biên LN ròng **năm gần nhất** (đơn mới ký theo giá hiện tại). Giả định từ 🏭 đi qua đúng cổng dự
 phóng, kịch bản và độ nhạy như mọi giả định khác.
+
+### Lãi/lỗ bất thường một lần (10/11/2026)
+
+LN thuần khác LN HĐ × (1 − thuế) là **chuyện thường** (30–70% số kỳ ở nhiều ngành): lãi công ty liên kết (Hyundai
+Mobis ~1,2× LN HĐ đều đặn), lãi tiền gửi của DN nhiều tiền. Vì vậy App **không** thay LN thuần bằng LN HĐ hàng loạt.
+
+Một quý bị coi là bất thường khi **LN thuần > doanh thu**, hoặc khi đủ cả hai điều kiện:
+- Tỷ lệ LN thuần/LN HĐ của quý nằm ngoài 0,67–1,5× tỷ lệ trung vị năm của **chính mã đó**. Cần ≥ 3 năm lịch sử,
+  thiếu thì dùng 0,78.
+- Phần lệch lớn hơn 15% doanh thu quý.
+
+Khi đó:
+- Số **đã công bố giữ nguyên** (lãi đó có thật, vào vốn chủ một lần).
+- Các quý **chưa công bố** không ngoại suy phần một lần (Hynix Q2/2026: LN 93,9조 so với lõi 51,1조).
+- Năm 2+ của dự phóng xuất phát từ **biên lõi**, và với DN phi tài chính không vượt trần 50% của cổng.
+
+Bước ② có dòng kiểm "Lãi/lỗ bất thường (quý)"; bước ③ đánh dấu năm có LN thuần lệch LN HĐ. Sửa này cũng áp vào dự
+phóng 1 năm của trang chính (`financials._ytd_run_rate`). Backtest không đo được phần này vì không có BCTC quý
+point-in-time.
