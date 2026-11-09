@@ -80,3 +80,24 @@ App đã **tự gợi ý** phương pháp + ghi chú cho từng mã ở mục **
   được ở Chi tiết 1 mã (`fair_raw`) và bảng phương pháp. Backtest chấm số thô để không mất các điểm cực trị.
 
 > ⚠️ Đây là công cụ sàng lọc, **không phải khuyến nghị đầu tư**. Luôn đối chiếu báo cáo tài chính gốc (DART/KRX) trước khi quyết định.
+
+---
+
+## 🧮 Trang "Quy trình định giá" (giai đoạn 1 — 09/11/2026)
+
+Trang riêng cho **1 mã**, đi theo thứ tự (logic ở `pipeline.py`):
+
+1. **Nhận diện** — nhóm định giá theo ngành KRX, mô hình chính/đối chiếu, ngành chu kỳ?
+2. **Dữ liệu** — kiểm bằng số: số năm BCTC, số năm DART, BPS > 0, EPS×số cp khớp LN, ROE công bố khớp EPS/BPS,
+   độ mới BCTC năm/quý, beta. Có ❌ → trần độ tin cậy **Low**; ≥ 2 ⚠️ → **Medium**.
+3. **Phân tích** — tăng trưởng, biên, ROE, nợ, tỷ lệ cổ tức từng năm; đánh dấu năm bất thường (ROE lệch > 2× trung vị).
+4. **Dự phóng 3–5 năm (sửa trực tiếp)** — tăng trưởng DT, biên LN ròng, tỷ lệ cổ tức từng năm. Năm 1 dùng quý thực đã
+   công bố. **Cổng dự phóng:** tăng trưởng −30%…+40%/năm, biên ≤ max lịch sử + 10 điểm và ≤ 50%, ROE ≤ 60%, BPS > 0.
+   Chỉ số quý thực công bố mới nới được dải năm 1. Vi phạm → RIM/DDM tường minh bị loại khỏi kết luận.
+5. **Chi phí vốn** — Rf, β (Blume), ERP, Ke, Kd, WACC (nợ vay DART).
+6. **Định giá** — lõi KCI (như bảng chính) + **RIM tường minh** và **DDM tường minh** trên dự phóng + P/E, P/B × trung vị
+   peer (top vốn hóa cùng ngành KRX, bỏ chính mã) + FCFF (DART).
+
+**Kết luận:** mỗi mô hình phải nằm trong 0,4–2,5× giá và 0,25–4× phép neo peer. Giá trị hợp lý = trung vị các mô
+hình **chính** qua cổng; khoảng = min–max mọi mô hình qua cổng. **High** chỉ khi ≥ 2 mô hình chính lệch nhau ≤ ±20%
+và nằm trong 0,67–1,5× phép neo peer. Tải báo cáo `.md` và bảng tính `.xlsx` ở tab cuối.

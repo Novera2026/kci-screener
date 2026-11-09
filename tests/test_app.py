@@ -39,6 +39,13 @@ def test_super_stock_page_boots():
     assert not at.exception, at.exception
 
 
+def test_valuation_pipeline_page_boots():
+    """Trang 🧮 chỉ gọi mạng sau khi nhập mã (Rf FRED lỗi thì fallback 3,2%)."""
+    page = next(p for p in PAGES if "Dinh_gia" in p)
+    at = AppTest.from_file(page, default_timeout=120).run()
+    assert not at.exception, at.exception
+
+
 @pytest.mark.skipif(os.environ.get("KCI_E2E") != "1",
                     reason="Trang 📰 tải tin/chủ đề từ Naver ngay khi mở: chạy  KCI_E2E=1 pytest")
 def test_hot_news_page_boots():
