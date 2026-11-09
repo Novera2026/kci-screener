@@ -79,3 +79,33 @@ Bảng **theo confidence**: nếu nhóm **High** có sai số nhỏ hơn / IC ca
   có tín hiệu dương (IC 0.85, spread +43.8%).
 - `value_points` dùng đúng engine `valuation.value_stock` + median ngành theo cross-section as-of.
 - Phần fetch giá OHLCV chạy live OK; fetch fundamental cần chạy trên máy bạn.
+
+---
+
+## Backtest quy trình định giá (trang 🧮) — `backtest_pipeline.py`
+
+Chạy toàn bộ quy trình (`pipeline.evaluate`, giả định mặc định, cổng số) trên **đúng các lát cắt point-in-time** của
+`backtest_dart` rồi so với lõi KCI trên cùng điểm. Dùng chung cache `.cache/`.
+
+```bash
+python backtest_pipeline.py            # 78 mã bluechip curated, mốc 15/4/2021–2025
+python backtest_pipeline.py 005930 000660 ...
+```
+
+### Kết quả lần chạy 10/11/2026 — 337 điểm, 247 công bố (73%)
+
+| Tín hiệu | IC TB theo năm | t | IC từng năm |
+|---|---:|---:|---|
+| **Kết luận công bố (quy trình)** | **+0,106** | 3,21 | 2021 +0,18 · 2022 +0,02 · 2023 +0,04 · 2024 +0,12 · 2025 +0,17 |
+| Lõi KCI, cùng các điểm | +0,011 | 0,20 | +0,03 · −0,13 · −0,07 · +0,19 · +0,04 |
+
+- Bỏ bất kỳ năm nào, IC quy trình vẫn +0,09…+0,13 (lõi −0,03…+0,05). Mỗi năm đều dương.
+- **Cổng số có tác dụng:** điểm bị giữ lại mất > 30% ở 19% trường hợp, điểm được công bố là 12%.
+- **Độ tin cậy High/Medium/Low CHƯA tách được lợi suất** (High chỉ 14 điểm; trung vị vượt KOSPI +2,1% / −2,9% /
+  −4,5%, tỷ lệ thắng ~50% cả ba). Hiện nó chỉ nên đọc là "các mô hình có đồng thuận không", chưa phải "mã tốt hơn".
+- Fair thô < 0,4× giá là nhóm tệ nhất (trung vị −7,1%, 20% mất > 30%); > 2,5× (23 điểm) không tệ hơn 1,5–2,5×.
+- **Ngân hàng chỉ có 10 điểm** (DART chưa có BCTC cấu trúc cho công ty tài chính trước năm tài chính 2023) → chưa đủ
+  dữ liệu để hiệu chỉnh nhóm này bằng backtest.
+
+Giới hạn: 78 mã đang niêm yết và được chọn theo quy mô **hiện tại** (thiên lệch sống sót + chọn vũ trụ nhìn trước),
+lợi suất chỉ tính giá, chỉ 5 năm, không có BCTC quý point-in-time.
