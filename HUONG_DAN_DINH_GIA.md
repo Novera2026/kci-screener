@@ -147,3 +147,32 @@ Khi đó:
 Bước ② có dòng kiểm "Lãi/lỗ bất thường (quý)"; bước ③ đánh dấu năm có LN thuần lệch LN HĐ. Sửa này cũng áp vào dự
 phóng 1 năm của trang chính (`financials._ytd_run_rate`). Backtest không đo được phần này vì không có BCTC quý
 point-in-time.
+
+---
+
+## Quy trình 5 bước (10/11/2026) — trang 🧮 sắp lại theo thứ tự nghiên cứu
+
+| Bước | Nội dung | Module |
+|---|---|---|
+| **① Đối thủ trong & ngoài nước** | Bảng P/E, P/B, tăng trưởng, biên, ROE, cổ tức: mã vs đối thủ **trong nước** (gợi ý Naver ∪ top vốn hóa cùng ngành, chỉ cổ phiếu thường) và **nước ngoài** (Naver world, đã quy KRW; sửa danh sách ở thanh bên). Vị thế từng chỉ số + chiết khấu so với quốc tế. | `peers.py` |
+| **② Phân tích & bóc tách** | Kiểm số liệu, tỉ số từng năm; DuPont (biên × vòng quay × đòn bẩy); cơ cấu LN trước thuế (HĐ / tài chính / liên kết / khác); dòng tiền (CFO/LN, FCF, capex); vốn lưu động. | `analysis.decompose` |
+| **③ Chất lượng tài sản** | Accruals, CFO/LN, phải thu & tồn kho so với doanh thu, lợi thế TM + vô hình/VCSH, Piotroski F-score (8 tiêu chí), Altman Z, khả năng trả lãi, nợ ròng/LN HĐ — mỗi chỉ tiêu ngưỡng số cố định. Hạng A–D; ≥ 2 ❌ tối đa C; ngành tài chính tối đa B. | `analysis.quality` |
+| **④ Định giá theo ngành** | Như trước: 🏭 chuyên ngành, dự phóng, chi phí vốn, các mô hình + cổng số, kịch bản & độ nhạy, football field & nhật ký. Phép neo dùng **đúng đối thủ trong nước ở ①**. | `pipeline`, `sector_models` |
+| **⑤ Kết luận & tổng quan** | 4 trụ 0–100 (định giá, sức khỏe tài chính, chất lượng tài sản, vị thế cạnh tranh) + kết luận theo **quy tắc số**. | `pipeline.overall_assessment` |
+
+Đối thủ nước ngoài **chỉ để so sánh**, không vào phép neo định giá (chiết khấu Hàn Quốc kinh niên). Kết luận không được
+🟢 khi chưa công bố giá trị, chất lượng tài sản hạng D / ≥ 3 ❌, hoặc ngành tài chính (chưa chấm được nợ xấu).
+
+**Hồ sơ:** mỗi bước ghi vào `dossiers/{mã}_{ngày}.json` (`dossier.py`, không đưa lên git; mất khi Streamlit Cloud
+khởi động lại).
+
+**Giới hạn đã biết:** ô tô có công ty tài chính hợp nhất (Hyundai Motor + Hyundai Capital) bị chấm thấp ở Altman Z /
+khả năng trả lãi vì nợ của mảng tài chính; F-score thiếu tiêu chí phát hành cổ phiếu; ngân hàng không có nợ xấu.
+
+## 🔍 Trang sàng lọc cổ phiếu rẻ (`screen.py`)
+
+① Vũ trụ: top vốn hóa / ngành KRX / chủ đề / nhập tay → ② lọc rẻ: P/E, P/B ÷ trung vị ngành **trong vũ trụ** (≥ 3 mã,
+thiếu thì so cả danh sách), P/E tối đa, cổ tức tối thiểu, bắt buộc có lãi → ③ định giá sâu K mã rẻ nhất bằng **đúng quy
+trình 🧮** (giả định mặc định, không đối thủ nước ngoài cho nhanh), lưu hồ sơ → ④ xếp hạng: kết luận → chênh lệch →
+chất lượng; mở mã bất kỳ trong 🧮 để đi đủ 5 bước. Backtest mới kiểm chứng phần **định giá**; lọc P/E thấp và điểm
+tổng hợp chưa được kiểm chứng riêng.

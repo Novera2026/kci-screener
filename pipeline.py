@@ -524,8 +524,46 @@ def report_markdown(ctx: dict) -> str:
              f" (khoảng {_f0(rec['low'])} – {_f0(rec['high'])})" if rec["fair"] else ""),
          f"- Chênh lệch so với giá: **{rec['upside']:+.1f}%** — {rec.get('verdict', '')}"
          if rec.get("upside") is not None else "- Chênh lệch: —",
-         f"- Độ tin cậy: **{rec['confidence']}** · Trạng thái: {rec['status']}", "",
-         "## 1. Nhận diện",
+         f"- Độ tin cậy: **{rec['confidence']}** · Trạng thái: {rec['status']}", ""]
+    ov = ctx.get("overall")
+    if ov:
+        L += ["## Đánh giá tổng quan", f"**{ov['verdict']}**", "",
+              "| Trụ | Điểm |", "|---|---:|"]
+        L += [f"| {k} | {'—' if v is None else f'{v:.0f}/100'} |" for k, v in ov["pillars"].items()]
+        tot = "—" if ov["total"] is None else f"{ov['total']:.0f}/100"
+        L += [f"| **Tổng** | **{tot}** |", ""]
+    ps = ctx.get("peer_set")
+    if ps:
+        L += ["## Đối thủ trong & ngoài nước", "",
+              "| Chỉ số | Mã | Trung vị trong nước | Trung vị nước ngoài | Nhận xét |", "|---|---:|---:|---:|---|"]
+        for r in ps["position"]:
+            def f2(x):
+                return "—" if x is None else f"{x:,.2f}"
+            L.append(f"| {r['Chỉ số']} | {f2(r['Mã'])} | {f2(r['Trung vị trong nước'])} | "
+                     f"{f2(r['Trung vị nước ngoài'])} | {r['Nhận xét']} |")
+        L += ["", "Trong nước: " + ", ".join(p["Tên"] or p["Mã"] for p in ps["domestic"]),
+              "Nước ngoài: " + (", ".join(p["Tên"] or p["Mã"] for p in ps["foreign"]) or "—"), ""]
+    dc = ctx.get("decomp")
+    if dc:
+        dp = dc["dupont"]
+
+        def f1(x, suf=""):
+            return "—" if x is None else f"{x:,.2f}{suf}"
+        L += [f"## Bóc tách tài chính (năm {dc['year']})",
+              f"- DuPont: biên LN {f1(dp['Biên LN ròng (cổ đông mẹ) %'], '%')} × vòng quay "
+              f"{f1(dp['Vòng quay tài sản (lần)'])} × đòn bẩy {f1(dp['Đòn bẩy (TS/VCSH)'])} = ROE "
+              f"{f1(dp['ROE = tích ba thành phần %'], '%')}",
+              "- Cơ cấu LN trước thuế: " + " · ".join(
+                  f"{r['Thành phần']} {f1(r['% LN trước thuế'], '%')}" for r in dc["structure"][:-1]),
+              f"- CFO/LN ròng {f1(dc['cash']['CFO / LN ròng'])}× · biên FCF {f1(dc['cash']['Biên FCF %'], '%')} · "
+              f"nợ ròng {f1(dc['balance']['Nợ ròng (억)'])}억", ""]
+    qu = ctx.get("quality")
+    if qu:
+        sc_q = "—" if qu["score"] is None else f"{qu['score']:.0f}"
+        L += [f"## Chất lượng tài sản — hạng {qu['grade']} ({sc_q}/100)"]
+        L += [f"- {c['Kết quả']} {c['Chỉ tiêu']}: {c['Giá trị']}" for c in qu["checks"]]
+        L.append("")
+    L += ["## 1. Nhận diện",
          f"- Ngành KRX: {idn.get('industry_kr') or '—'} → nhóm **{idn['bucket']}**"
          + (" (chu kỳ)" if idn["cyclical"] else ""),
          f"- Mô hình chính theo ngành: {idn['primary']} · đối chiếu: {', '.join(idn['cross'])}",
@@ -868,3 +906,52 @@ def report_html(md: str, title: str) -> str:
            "@media print{body{margin:0}h2{break-after:avoid}table{break-inside:avoid}}")
     return (f"<!doctype html><html lang='vi'><head><meta charset='utf-8'><title>{_html.escape(title)}</title>"
             f"<style>{css}</style></head><body>{''.join(body)}</body></html>")
+
+
+# ============================================================================ Bước 5 — đánh giá tổng quan
+PILLAR_WEIGHTS = {"Định giá": 1.0, "Sức khỏe tài chính": 1.0, "Chất lượng tài sản": 1.0, "Vị thế cạnh tranh": 1.0}
+
+
+def overall_assessment(rec: dict, fin_health: Optional[dict], quality: Optional[dict],
+                       peer_set: Optional[dict]) -> dict:
+    """Bảng điểm 4 trụ (0–100) + kết luận bằng QUY TẮC SỐ.
+
+    • Định giá: 50 + chênh lệch % (kẹp 0–100); không công bố giá trị hợp lý → không chấm.
+    • Sức khỏe tài chính: financials.assess_financials (điểm/tối đa).
+    • Chất lượng tài sản: analysis.quality (✅ 1 · ⚠️ 0,5 · ❌ 0).
+    • Vị thế cạnh tranh: hạng phần trăm TRONG NƯỚC trung bình của tăng trưởng DT, biên LN HĐ, ROE.
+    Kết luận không thể 'hấp dẫn' khi chưa công bố giá trị, chất lượng tài sản hạng D / ≥ 3 ❌, hoặc chất lượng tài
+    sản chưa chấm đầy đủ (ngành tài chính)."""
+    pillars = {}
+    up = rec.get("upside")
+    pillars["Định giá"] = max(0.0, min(100.0, 50 + up)) if (rec.get("fair") and up is not None) else None
+    if fin_health and fin_health.get("max"):
+        pillars["Sức khỏe tài chính"] = fin_health["score"] / fin_health["max"] * 100
+    else:
+        pillars["Sức khỏe tài chính"] = None
+    pillars["Chất lượng tài sản"] = (quality or {}).get("score")
+    ranks = [r.get("Hạng trong nước (%)") for r in (peer_set or {}).get("position", [])
+             if r["Chỉ số"] in ("Tăng trưởng DT 3 năm %", "Biên LN HĐ %", "ROE %")
+             and r.get("Hạng trong nước (%)") is not None]
+    pillars["Vị thế cạnh tranh"] = sum(ranks) / len(ranks) if len(ranks) >= 2 else None
+    have = {k: v for k, v in pillars.items() if v is not None}
+    total = (sum(v * PILLAR_WEIGHTS[k] for k, v in have.items()) / sum(PILLAR_WEIGHTS[k] for k in have)
+             if have else None)
+    g = (quality or {}).get("grade")
+    n_fail = (quality or {}).get("n_fail", 0)
+    if not rec.get("fair"):
+        verdict = "⚪ Chưa đủ cơ sở định giá — không mô hình chính nào qua cổng số"
+    elif g == "D" or n_fail >= 3:
+        verdict = "🔴 Rủi ro chất lượng tài sản — cần kiểm kỹ trước mọi kết luận về giá"
+    elif up is not None and up >= 20 and (quality or {}).get("fin_limited"):
+        verdict = ("🟡 Rẻ hơn giá trị ước tính, nhưng chất lượng tài sản ngành tài chính chưa chấm đầy đủ (không có "
+                   "nợ xấu) — đọc thuyết minh trước khi kết luận")
+    elif up is not None and up >= 20 and g in ("A", "B") and (total or 0) >= 60:
+        verdict = "🟢 Rẻ hơn giá trị ước tính và chất lượng tốt — đáng nghiên cứu sâu"
+    elif up is not None and up >= 20:
+        verdict = "🟡 Rẻ hơn giá trị ước tính nhưng chất lượng/vị thế chưa tốt — cẩn thận bẫy giá trị"
+    elif up is not None and up <= -15:
+        verdict = "🔴 Giá cao hơn giá trị ước tính"
+    else:
+        verdict = "⚪ Giá gần giá trị ước tính"
+    return {"pillars": pillars, "total": total, "verdict": verdict, "n_pillars": len(have)}

@@ -1,6 +1,7 @@
 """
-🧮 Quy trình định giá — đi từng bước cho 1 mã: nhận diện → dữ liệu → phân tích → dự phóng → chi phí vốn →
-định giá đa mô hình → kết luận + báo cáo. Logic ở pipeline.py (thuần, có test); trang này chỉ là giao diện.
+🧮 Quy trình định giá 5 bước cho 1 mã: ① so sánh đối thủ trong & ngoài nước → ② phân tích & bóc tách tài chính →
+③ chất lượng tài sản → ④ định giá theo mô hình hợp ngành → ⑤ kết luận & đánh giá tổng quan. Mỗi bước ghi vào hồ sơ
+(dossier.py) cho bước sau và trang sàng lọc. Logic ở peers / analysis / pipeline / sector_models; trang này là giao diện.
 """
 from __future__ import annotations
 
@@ -21,6 +22,9 @@ try:                                                   # cloud: key nằm trong 
 except Exception:
     pass
 
+import analysis as AN                                 # noqa: E402
+import dossier as DS                                   # noqa: E402
+import peers as PR                                     # noqa: E402
 import pipeline as P                                   # noqa: E402
 import sector_models as P_S                            # noqa: E402
 import valuation as V                                  # noqa: E402
@@ -28,8 +32,9 @@ from screener import TickerRegistry                    # noqa: E402
 
 st.set_page_config(page_title="Quy trình định giá — KCI", page_icon="🧮", layout="wide")
 st.title("🧮 Quy trình định giá")
-st.caption("Đi từng bước cho **một mã**: nhận diện → kiểm dữ liệu → phân tích → **dự phóng 3–5 năm (chỉnh "
-           "được)** → chi phí vốn → định giá đa mô hình → kịch bản & độ nhạy → football field & nhật ký → kết luận. Mọi mô hình phải qua **cổng số** "
+st.caption("Năm bước cho **một mã**: ① so sánh đối thủ **trong & ngoài nước** → ② phân tích & bóc tách tài chính → "
+           "③ chất lượng tài sản → ④ định giá theo mô hình hợp ngành → ⑤ kết luận & đánh giá tổng quan. Kết quả mỗi "
+           "bước được **lưu vào hồ sơ** cho bước sau. Mọi mô hình định giá phải qua **cổng số** "
            f"(giá trị trong {V.RELIABLE_BAND[0]}–{V.RELIABLE_BAND[1]}× giá và {V.IRRECONCILABLE[0]}–"
            f"{V.IRRECONCILABLE[1]}× phép neo peer) mới được vào kết luận.")
 
@@ -66,14 +71,26 @@ def _load(tk: str, n_peers: int) -> dict:
         extras = dart_api.valuation_extras(tk) or {}
     except Exception:
         pass
-    peers = []
-    ik = row.get("industry_kr")
-    if ik:
-        ptk = P.industry_peers(ik, exclude=tk, n=n_peers)
-        if ptk:
-            peers, _ = fetch_many(ptk, registry=reg, prefer="naver")
-    return {"row": row, "quarters": fin.get("quarter", []), "series": series, "beta": beta,
-            "extras": extras, "peers": peers}
+    # ① đối thủ trong nước: gợi ý Naver ∪ top vốn hóa cùng 업종 (chỉ cổ phiếu thường) — DÙNG LẠI cho phép neo ở ④
+    import concurrent.futures as _cf
+    peers, peer_fins = [], {}
+    ptk = PR.domestic_candidates(tk, row.get("industry_kr"), reg, n=n_peers)
+    if ptk:
+        peers, _ = fetch_many(ptk, registry=reg, prefer="naver")
+        with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+            peer_fins = dict(zip(ptk, ex.map(fetch_financials, ptk)))
+    # ②③ BCTC đầy đủ DART (mã tài khoản IFRS)
+    try:
+        fs_full = AN.fetch_full(tk)
+    except Exception:
+        fs_full = None
+    return {"row": row, "annual": fin.get("annual", []), "quarters": fin.get("quarter", []), "series": series,
+            "beta": beta, "extras": extras, "peers": peers, "peer_fins": peer_fins, "fs_full": fs_full}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _foreign(codes: tuple) -> list:
+    return PR.fetch_foreign(list(codes))
 
 
 reg = _reg()
@@ -89,7 +106,7 @@ with st.sidebar:
     g_term = st.number_input("g dài hạn (%)", 0.0, 2.5, 2.0, 0.1, help="Trần 2,5% và ≤ Rf") / 100
     w = st.select_slider("w — độ bền siêu lợi nhuận (RIM)", [0.8, 0.85, 0.9, 0.95, 1.0], 0.9)
     years = st.slider("Số năm dự phóng", 3, 5, 5)
-    n_peers = st.slider("Số mã peer cùng ngành", 5, 20, 12)
+    n_peers = st.slider("Số đối thủ trong nước", 5, 20, 12)
 
 A = V.Assumptions(rf=rf, erp=erp, g_terminal=g_term, persistence=w, years_high=years)
 
@@ -113,6 +130,7 @@ with st.spinner(f"Đang lấy dữ liệu {tk} (giá, BCTC Naver/DART, beta, pee
     D = _load(tk, n_peers)
 row, series, quarters = dict(D["row"]), D["series"], D["quarters"]
 beta, extras, peer_rows = D["beta"], D["extras"], D["peers"]
+fs_full = D.get("fs_full")
 row["beta"] = beta
 name = row.get("name") or tk
 price, mc = row.get("price"), row.get("market_cap")
@@ -122,6 +140,32 @@ reals = [c for c in series if not c.get("is_consensus")]
 idn = P.identify(row)
 dq = P.data_quality(row, series, quarters, beta)
 ratios = P.ratio_table(series)
+# ① đối thủ nước ngoài: mặc định theo nhóm ngành, người dùng sửa được (mã Reuters của Naver)
+with st.sidebar:
+    st.markdown("---")
+    _fdef = ", ".join(PR.FOREIGN_PEERS.get(idn["bucket"], []))
+    _fcodes = st.text_input("Đối thủ nước ngoài (mã Reuters)", _fdef, key=f"fx_{tk}",
+                            help="vd TSM, MU.O, 7203.T, 0700.HK — để trống = không so nước ngoài")
+foreign_codes = tuple(c.strip() for c in _fcodes.split(",") if c.strip())
+with st.spinner("Đang lấy đối thủ nước ngoài…"):
+    foreign = _foreign(foreign_codes) if foreign_codes else []
+peer_set = PR.build_peer_set(row, D.get("annual", []), idn["bucket"], peer_rows, D.get("peer_fins", {}),
+                             foreign_profiles=foreign)
+decomp = AN.decompose(fs_full) if fs_full else None
+quality = AN.quality(fs_full, (mc / 1e8) if mc else None, idn["bucket"]) if fs_full else None
+from financials import assess_financials  # noqa: E402
+fin_health = assess_financials(D.get("annual", []), row.get("sector"), row.get("industry_kr"))
+# hồ sơ: lưu ngay phần dữ liệu (①②③) để bước sau / trang sàng lọc đọc lại
+_meta = {"name": name, "industry_kr": row.get("industry_kr"),
+         "bucket": idn["bucket"], "price": row.get("price")}
+try:
+    DS.save_section(tk, "peers", peer_set, meta=_meta)
+    if decomp:
+        DS.save_section(tk, "financials", {"decomp": decomp, "ratios": ratios, "data_quality": dq["checks"]})
+    if quality:
+        DS.save_section(tk, "quality", quality)
+except Exception:
+    pass
 
 drv_key = f"drv_{tk}_{years}_{g_term}"
 drv_default = P.default_drivers(series, row, A, years=years, quarters=quarters, cyclical=idn["cyclical"],
@@ -145,9 +189,13 @@ st.subheader(f"{name} · {tk}")
 st.caption(f"{row.get('industry_kr') or '—'} · nguồn giá {row.get('source') or '—'} · "
            f"vốn hóa {mc / 1e12:,.1f} nghìn tỷ KRW" if mc else "")
 
-_TAB_NAMES = ["① Nhận diện", "② Dữ liệu", "③ Phân tích", "🏭 Chuyên ngành", "④ Dự phóng", "⑤ Chi phí vốn",
-              "⑥ Định giá", "⑦ Kịch bản & độ nhạy", "⑧ Football field & nhật ký", "📄 Kết luận & báo cáo"]
-T = dict(zip(["1", "2", "3", "sec", "4", "5", "6", "7", "8", "end"], st.tabs(_TAB_NAMES)))
+_OUTER = st.tabs(["① Đối thủ trong & ngoài nước", "② Phân tích & bóc tách tài chính", "③ Chất lượng tài sản",
+                  "④ Định giá theo ngành", "⑤ Kết luận & đánh giá tổng quan"])
+with _OUTER[3]:
+    _INNER = st.tabs(["🏭 Chuyên ngành", "Dự phóng", "Chi phí vốn", "Các mô hình", "Kịch bản & độ nhạy",
+                      "Football field & nhật ký"])
+T = {"1": _OUTER[0], "2": _OUTER[1], "3": _OUTER[1], "q": _OUTER[2], "sec": _INNER[0], "4": _INNER[1],
+     "5": _INNER[2], "6": _INNER[3], "7": _INNER[4], "8": _INNER[5], "end": _OUTER[4]}
 
 # 🏭 chuyên ngành trước ④: backlog / công suất sinh giả định cho ④; rNPV / EV-GWh thành mô hình ở ⑥
 SPEC_MODES = {"none": "Không dùng", "backlog": "Backlog — đóng tàu, quốc phòng",
@@ -280,7 +328,7 @@ if spec_drivers:
     import zlib
     drv_key = f"drv_{tk}_{years}_{g_term}_{zlib.crc32(spec_basis.encode())}"   # đổi đầu vào 🏭 → bảng ④ làm mới
 with T["4"]:
-    st.markdown("#### ④ Dự phóng nhiều năm — sửa trực tiếp các ô giả định")
+    st.markdown("#### Dự phóng nhiều năm — sửa trực tiếp các ô giả định")
     if spec_drivers:
         st.info(f"🏭 Giả định đang lấy từ **mô hình chuyên ngành**: {spec_basis}. Bỏ chọn ở tab 🏭 để quay về "
                 "giả định từ lịch sử.")
@@ -326,7 +374,7 @@ with T["4"]:
                       f"{evidence['margin'] * 100:.1f}%) → dải năm 1 nới theo số đã công bố." if evidence else ""))
 
 with T["1"]:
-    st.markdown("#### ① Nhận diện doanh nghiệp")
+    st.markdown("#### Nhận diện doanh nghiệp")
     c1, c2, c3 = st.columns(3)
     c1.metric("Nhóm định giá", idn["bucket"])
     c2.metric("Ngành chu kỳ?", "Có" if idn["cyclical"] else "Không")
@@ -337,8 +385,38 @@ with T["1"]:
         st.caption("Ngành cần dữ liệu sâu hơn (backlog/capex/SOTP/pipeline) mà App chưa có → độ tin cậy kết luận "
                    "bị chặn trần **Medium**.")
 
+    st.markdown("#### So sánh với đối thủ trong & ngoài nước")
+    _cols = ["Mã", "Tên", "Thị trường", "Vốn hóa (tỷ KRW)"] + PR.METRICS + ["Năm BCTC"]
+    _tbl = pd.DataFrame([{**peer_set["self"], "Tên": f"▶ {peer_set['self']['Tên']}"}] + peer_set["domestic"]
+                        + peer_set["foreign"])
+    _tbl = _tbl[[c for c in _cols if c in _tbl.columns]]
+
+    def _hl(r):
+        return ["background-color:#fff3cd; font-weight:600" if str(r["Tên"]).startswith("▶") else ""] * len(r)
+    st.dataframe(_tbl.style.apply(_hl, axis=1).format(
+        {"Vốn hóa (tỷ KRW)": "{:,.0f}", "P/E": "{:.1f}", "P/B": "{:.2f}"}
+        | {m: "{:+.1f}" if "Tăng trưởng" in m else "{:.1f}" for m in PR.METRICS if m not in ("P/E", "P/B")},
+        na_rep="—"), hide_index=True, width="stretch")
+    st.caption(f"Trong nước: {len(peer_set['domestic'])} mã (gợi ý Naver + top vốn hóa cùng ngành KRX, chỉ cổ phiếu "
+               f"thường) · nước ngoài: {len(peer_set['foreign'])} mã (Naver, đã quy KRW; sửa danh sách ở thanh bên). "
+               "ROE nước ngoài ≈ P/B ÷ P/E. P/E ≤ 0 hoặc > 200 không vào trung vị"
+               + (f" (loại: {', '.join(peer_set['foreign_excluded'])})" if peer_set["foreign_excluded"] else "") + ".")
+    st.markdown("**Vị thế của mã so với trung vị đối thủ**")
+    st.dataframe(pd.DataFrame(peer_set["position"]).style.format(
+        {"Mã": "{:,.2f}", "Trung vị trong nước": "{:,.2f}", "Trung vị nước ngoài": "{:,.2f}",
+         "Hạng trong nước (%)": "{:.0f}"}, na_rep="—"), hide_index=True, width="stretch")
+    _fd = peer_set["foreign_discount"]
+    if _fd.get("P/E") is not None or _fd.get("P/B") is not None:
+        st.info("🌐 **So với đối thủ nước ngoài:** "
+                + " · ".join(f"{m} {'thấp' if v < 0 else 'cao'} hơn trung vị {abs(v):.0f}%"
+                             for m, v in _fd.items() if v is not None)
+                + ". Đối thủ nước ngoài **chỉ để so sánh**, không vào phép neo định giá ở bước ④ — cổ phiếu Hàn có "
+                  "chiết khấu kinh niên, trộn bội số quốc tế sẽ đẩy giá trị hợp lý lên có hệ thống.")
+    st.caption(f"💾 Đã lưu vào hồ sơ `dossiers/{tk}_{_dt.date.today():%Y%m%d}.json` — bước ④ dùng lại đúng danh sách "
+               "đối thủ trong nước này làm phép neo.")
+
 with T["2"]:
-    st.markdown(f"#### ② Dữ liệu & chất lượng — {dq['n_fail']} ❌ · {dq['n_warn']} ⚠️")
+    st.markdown(f"#### Kiểm tra số liệu — {dq['n_fail']} ❌ · {dq['n_warn']} ⚠️")
     if dq["cap"]:
         st.warning(f"Trần độ tin cậy do dữ liệu: **{dq['cap']}**")
     st.dataframe(pd.DataFrame(dq["checks"]).astype({"Giá trị": str}), hide_index=True, width="stretch")
@@ -352,7 +430,7 @@ with T["2"]:
         st.dataframe(tbl.style.format("{:,.0f}", na_rep="—"), width="stretch")
 
 with T["3"]:
-    st.markdown("#### ③ Phân tích & chuẩn hóa")
+    st.markdown("#### Tỉ số từng năm & chuẩn hóa")
     if ratios:
         rdf = pd.DataFrame(ratios)
         st.dataframe(rdf.style.format({c: "{:,.1f}" for c in rdf.columns if c not in ("Năm", "Năm bất thường")}
@@ -370,8 +448,53 @@ with T["3"]:
     else:
         st.warning("Không có BCTC năm thực.")
 
+    st.markdown("#### Bóc tách tài chính" + (f" — năm {decomp['year']} ({'hợp nhất' if decomp['fs_div'] == 'CFS' else 'riêng'}, DART)"
+                                              if decomp else ""))
+    if not decomp:
+        st.info("Cần DART_API_KEY để bóc tách từ BCTC đầy đủ (DuPont, cơ cấu lợi nhuận, dòng tiền, vốn lưu động).")
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        _dp = decomp["dupont"]
+        c1.metric("Biên LN ròng", f"{_dp['Biên LN ròng (cổ đông mẹ) %']:.1f}%" if _dp["Biên LN ròng (cổ đông mẹ) %"] is not None else "—")
+        c2.metric("× Vòng quay tài sản", f"{_dp['Vòng quay tài sản (lần)']:.2f}" if _dp["Vòng quay tài sản (lần)"] else "—")
+        c3.metric("× Đòn bẩy (TS/VCSH)", f"{_dp['Đòn bẩy (TS/VCSH)']:.2f}" if _dp["Đòn bẩy (TS/VCSH)"] else "—")
+        c4.metric("= ROE (DuPont)", f"{_dp['ROE = tích ba thành phần %']:.1f}%" if _dp["ROE = tích ba thành phần %"] is not None else "—")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown("**Cơ cấu lợi nhuận trước thuế**")
+            st.dataframe(pd.DataFrame(decomp["structure"]).style.format({"억원": "{:,.0f}", "% LN trước thuế": "{:.0f}%"},
+                                                                         na_rep="—"), hide_index=True, width="stretch")
+        with cc2:
+            st.markdown("**Dòng tiền**")
+            st.dataframe(pd.DataFrame([{"Chỉ tiêu": k, "Giá trị": v} for k, v in decomp["cash"].items()])
+                         .style.format({"Giá trị": "{:,.2f}"}, na_rep="—"), hide_index=True, width="stretch")
+        cc3, cc4 = st.columns(2)
+        with cc3:
+            st.markdown("**Vốn lưu động**")
+            st.dataframe(pd.DataFrame([{"Chỉ tiêu": k, "Ngày": v} for k, v in decomp["working_capital"].items()])
+                         .style.format({"Ngày": "{:.0f}"}, na_rep="—"), hide_index=True, width="stretch")
+        with cc4:
+            st.markdown("**Cân đối & nợ**")
+            st.dataframe(pd.DataFrame([{"Chỉ tiêu": k, "Giá trị": v} for k, v in decomp["balance"].items()])
+                         .style.format({"Giá trị": "{:,.1f}"}, na_rep="—"), hide_index=True, width="stretch")
+        st.caption("'Khác (gồm một lần)' = LN trước thuế − LN hoạt động − tài chính ròng − công ty liên kết. Tỷ trọng "
+                   "lớn ở dòng này là lợi nhuận khó lặp lại.")
+
+with T["q"]:
+    st.markdown("#### ③ Chất lượng tài sản" + (f" — hạng **{quality['grade']}** ({quality['score']:.0f}/100)"
+                                              if quality and quality.get("score") is not None else ""))
+    if not quality:
+        st.info("Cần DART_API_KEY (BCTC đầy đủ) để chấm chất lượng tài sản.")
+    else:
+        if quality["fin_limited"]:
+            st.warning("Ngành tài chính: DART không có nợ xấu / dự phòng dạng cấu trúc → chỉ chấm được phần chung; "
+                       "hạng tối đa **B**. Chất lượng tài sản ngân hàng cần đọc thuyết minh 사업보고서.")
+        st.dataframe(pd.DataFrame(quality["checks"]).astype({"Giá trị": str}), hide_index=True, width="stretch")
+        st.caption("Mỗi chỉ tiêu có ngưỡng số cố định: ✅ = 1 điểm · ⚠️ = 0,5 · ❌ = 0. Hạng A ≥ 80 · B ≥ 65 · C ≥ 50 · "
+                   "D < 50; có ≥ 2 ❌ thì tối đa hạng C. F-score tính trên 8/9 tiêu chí (thiếu số cổ phiếu phát hành).")
+
 with T["5"]:
-    st.markdown("#### ⑤ Chi phí vốn")
+    st.markdown("#### Chi phí vốn")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rf", f"{coc['rf'] * 100:.2f}%")
     c2.metric("β dùng", f"{coc['beta_used']:.2f}",
@@ -383,7 +506,7 @@ with T["5"]:
                f"g dài hạn {coc['g_term'] * 100:.1f}%. β hồi quy 52 tuần vs KOSPI, kẹp 0,5–1,8 rồi Blume 0,67β+0,33.")
 
 with T["6"]:
-    st.markdown("#### ⑥ Định giá đa mô hình")
+    st.markdown("#### Các mô hình định giá")
     st.caption(f"Peer cùng ngành KRX: {pm['n']} mã · P/E trung vị **{pm['pe']:.1f}** ({pm['n_pe']} mã hợp lệ)"
                if pm["pe"] else f"Peer cùng ngành KRX: {pm['n']} mã · P/E trung vị: — (cần ≥ {V.MIN_PEERS} mã hợp lệ)")
     st.caption((f"P/B trung vị **{pm['pb']:.2f}** ({pm['n_pb']} mã)" if pm["pb"] else "P/B trung vị: —")
@@ -414,7 +537,7 @@ with T["6"]:
 
 # ---------------------------------------------------------------------------- ⑦ kịch bản & độ nhạy
 with T["7"]:
-    st.markdown("#### ⑦ Kịch bản Bear / Base / Bull")
+    st.markdown("#### Kịch bản Bear / Base / Bull")
     scen, sens = None, None
     if not drivers:
         st.warning("Cần dự phóng ở bước ④ để chạy kịch bản.")
@@ -463,7 +586,7 @@ with T["7"]:
 
 # ---------------------------------------------------------------------------- ⑧ football field & nhật ký
 with T["8"]:
-    st.markdown("#### ⑧ Football field")
+    st.markdown("#### Football field")
     ff = P.football_field(row, rec, scen, sens)
     if ff and price:
         import altair as alt
@@ -503,10 +626,31 @@ with T["8"]:
 ctx = {"ticker": tk, "name": name, "date": _dt.date.today().isoformat(), "price": price, "identify": idn,
        "dq": dq, "forecast": fc, "fgates": fg, "coc": EV["coc"], "conclusion": rec, "peers": EV["pm"],
        "anchor": anchor, "scen": scen, "sens": sens, "special": special}
+overall = P.overall_assessment(rec, fin_health, quality, peer_set)
+ctx.update(peer_set=peer_set, decomp=decomp, quality=quality, overall=overall)
 md = P.report_markdown(ctx)
+try:
+    DS.save_section(tk, "valuation", {"fair": rec["fair"], "low": rec["low"], "high": rec["high"],
+                                      "upside": rec["upside"], "confidence": rec["confidence"],
+                                      "status": rec["status"], "models": rec["rows"], "ke": ke,
+                                      "drivers": drivers, "expected_scenario": (scen or {}).get("expected")})
+    DS.save_section(tk, "overall", overall)
+except Exception:
+    pass
 
 with T["end"]:
-    st.markdown("#### Kết luận")
+    st.markdown("#### Đánh giá tổng quan")
+    st.markdown(f"### {overall['verdict']}")
+    _pc = st.columns(5)
+    for _i, (_k, _v) in enumerate(overall["pillars"].items()):
+        _pc[_i].metric(_k, f"{_v:.0f}/100" if _v is not None else "—")
+    _pc[4].metric("Tổng (trung bình trụ có điểm)", f"{overall['total']:.0f}/100" if overall["total"] is not None else "—")
+    st.caption("**Định giá** = 50 + chênh lệch % (không công bố → không chấm) · **Sức khỏe tài chính** = tiêu chí đầu "
+               "tư cơ bản · **Chất lượng tài sản** = bước ③ · **Vị thế cạnh tranh** = hạng trong nước của tăng trưởng, "
+               "biên LN HĐ, ROE. Kết luận theo quy tắc số: không thể 'rẻ và chất lượng tốt' khi chưa công bố giá trị "
+               "hoặc chất lượng hạng D / ≥ 3 ❌. Backtest 2021–25 mới kiểm chứng phần **định giá** (IC +0,106); điểm "
+               "tổng hợp là bản tóm tắt, chưa được kiểm chứng như một tín hiệu.")
+    st.markdown("#### Kết luận định giá")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Giá hiện tại", f"{price:,.0f}" if price else "—")
     c2.metric("Giá trị hợp lý", f"{rec['fair']:,.0f}" if rec["fair"] else "—",
@@ -525,6 +669,16 @@ with T["end"]:
         pd.DataFrame(ratios).to_excel(xw, sheet_name="Phân tích", index=False)
         pd.DataFrame(fc).to_excel(xw, sheet_name="Dự phóng", index=False)
         pd.DataFrame(rec["rows"]).to_excel(xw, sheet_name="Mô hình", index=False)
+        pd.DataFrame([peer_set["self"]] + peer_set["domestic"] + peer_set["foreign"]).to_excel(
+            xw, sheet_name="Đối thủ", index=False)
+        pd.DataFrame(peer_set["position"]).to_excel(xw, sheet_name="Vị thế", index=False)
+        if decomp:
+            pd.DataFrame(decomp["structure"]).to_excel(xw, sheet_name="Cơ cấu LN", index=False)
+        if quality:
+            pd.DataFrame(quality["checks"]).astype({"Giá trị": str}).to_excel(xw, sheet_name="Chất lượng TS",
+                                                                                index=False)
+        pd.DataFrame([{"Trụ": k, "Điểm": v} for k, v in overall["pillars"].items()]).to_excel(
+            xw, sheet_name="Tổng quan", index=False)
         if scen:
             pd.DataFrame(scen["rows"]).to_excel(xw, sheet_name="Kịch bản", index=False)
         if sens:

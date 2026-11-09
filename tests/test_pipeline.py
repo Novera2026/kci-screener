@@ -305,3 +305,18 @@ def test_one_off_year1_kept_but_not_carried_to_later_years():
     assert P.forecast_gates(s, P.run_forecast(s, r, d), evidence=ev)["ok"]
     dq = P.data_quality(r, s, qs, 1.0)
     assert any(c["Kiểm tra"].startswith("Lãi/lỗ bất thường") and c["Kết quả"] == "⚠️" for c in dq["checks"])
+
+
+def test_overall_assessment_rules():
+    rec = {"fair": 130, "upside": 30.0}
+    q = {"score": 85, "grade": "A", "n_fail": 0}
+    fh = {"score": 5, "max": 6}
+    ps = {"position": [{"Chỉ số": "ROE %", "Hạng trong nước (%)": 70},
+                       {"Chỉ số": "Biên LN HĐ %", "Hạng trong nước (%)": 60}]}
+    o = P.overall_assessment(rec, fh, q, ps)
+    assert o["pillars"]["Định giá"] == 80 and o["verdict"].startswith("🟢") and o["n_pillars"] == 4
+    assert P.overall_assessment(rec, fh, {"score": 40, "grade": "D", "n_fail": 3}, ps)["verdict"].startswith("🔴 Rủi ro")
+    assert P.overall_assessment({"fair": None, "upside": None}, fh, q, ps)["verdict"].startswith("⚪ Chưa đủ")
+    assert P.overall_assessment(rec, fh, {"score": 55, "grade": "C", "n_fail": 1}, ps)["verdict"].startswith("🟡")
+    bank_q = {"score": 83, "grade": "B", "n_fail": 0, "fin_limited": True}
+    assert P.overall_assessment(rec, fh, bank_q, ps)["verdict"].startswith("🟡")    # không 🟢 khi chưa chấm đủ

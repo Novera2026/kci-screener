@@ -87,3 +87,10 @@ def test_backtest_dart_runs_in_app():
     assert any("Điểm có lợi suất" in m.label for m in at.metric)
     at = at.slider(key="bt_h_dart").set_value(6).run()         # kết quả còn nguyên sau rerun
     assert any("Điểm có lợi suất" in m.label for m in at.metric)
+
+
+def test_screening_page_boots():
+    """Trang 🔍 chỉ gọi mạng khi bấm Lọc rẻ."""
+    page = next(p for p in PAGES if "Sang_loc" in p)
+    at = AppTest.from_file(page, default_timeout=120).run()
+    assert not at.exception, at.exception
