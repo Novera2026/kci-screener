@@ -76,7 +76,7 @@ Kiểm tra ngay: tab **Actions → Bot săn cổ phiếu → Run workflow**. Sau
 - Mỗi lần chạy đều lấy số liệu thị trường mới (giá, beta, Rf thời gian thực). Bot không dùng lại kết quả định giá cũ.
   Trạng thái "hôm trước" chỉ dùng để báo mã mới/rớt.
 - Backtest 2021–25 cho thấy chỉ **phần định giá** có bằng chứng (IC +0,116 / +0,086). Các bộ tiêu chuẩn **chưa thắng
-  trung bình vũ trụ có ý nghĩa thống kê** (xem `HUONG_DAN_BACKTEST.md`).
+  trung bình danh sách gốc có ý nghĩa thống kê** (xem `HUONG_DAN_BACKTEST.md`).
 - Danh sách là để **nghiên cứu tiếp, không phải khuyến nghị đầu tư**. Mở mã trong trang 🧮 để đi đủ 5 bước trước khi
   quyết định.
 - Nếu lộ token: gửi `/revoke` cho @BotFather để lấy token mới, rồi cập nhật `.env` và GitHub Secret.

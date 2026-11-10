@@ -193,7 +193,7 @@ if run:
     names = {u["ticker"]: u["name"] for u in uni}
     caps = {u["ticker"]: u["cap_eok"] for u in uni}
 
-    # Bước 1 — biểu đồ toàn vũ trụ
+    # Bước 1 — biểu đồ toàn danh sách gốc
     bar = st.progress(0.0, text=f"Bước 1/2 · Tải biểu đồ {len(uni)} mã…")
     daily = G.parallel_map(_daily, [u["ticker"] for u in uni],
                            progress=lambda d, n: bar.progress(d / n,

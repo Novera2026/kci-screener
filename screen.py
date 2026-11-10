@@ -1,15 +1,15 @@
 """
 KCI — quy trình SÀNG LỌC cổ phiếu rẻ rồi ĐỊNH GIÁ SÂU danh sách rẻ (trang 🔍).
 
-  ① Vũ trụ    : top vốn hóa (Naver marketValue) / ngành KRX / chủ đề / nhập tay
-  ② Lọc rẻ    : P/E, P/B so với trung vị NGÀNH trong chính vũ trụ (≥ 3 mã cùng ngành, thiếu thì so cả danh sách),
+  ① Danh sách gốc    : top vốn hóa (Naver marketValue) / ngành KRX / chủ đề / nhập tay
+  ② Lọc rẻ    : P/E, P/B so với trung vị NGÀNH trong chính danh sách gốc (≥ 3 mã cùng ngành, thiếu thì so cả danh sách),
                 tỷ suất cổ tức, bắt buộc có lãi; điểm rẻ = trung bình (P/E ÷ ngành, P/B ÷ ngành) — càng thấp càng rẻ
   ③ Định giá sâu: mỗi mã chạy ĐÚNG quy trình trang 🧮 (giả định mặc định, cổng số, chất lượng tài sản, tổng quan)
-                với đối thủ = các mã cùng ngành trong vũ trụ; lưu hồ sơ dossiers/ cho từng mã
+                với đối thủ = các mã cùng ngành trong danh sách gốc; lưu hồ sơ dossiers/ cho từng mã
   ④ Xếp hạng  : kết luận theo quy tắc số → chênh lệch → chất lượng
 
 Bằng chứng (backtest 2021–25, sau rà soát 10/11/2026): IC upside đã công bố +0,117 (78 mã, t 2,9) / +0,076 (top 200,
-t 1,95) — xếp HẠNG có tín hiệu yếu. Nhưng MUA nhóm 'rẻ' (chênh > 0) trong top 200 thua trung bình vũ trụ ~7%/năm
+t 1,95) — xếp HẠNG có tín hiệu yếu. Nhưng MUA nhóm 'rẻ' (chênh > 0) trong top 200 thua trung bình danh sách gốc ~7%/năm
 (2023–25 thị trường dẫn bởi mã tăng trưởng đắt) — danh sách là để nghiên cứu, không phải danh mục mua.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 FIN_INDUSTRIES = {"은행", "증권", "생명보험", "손해보험", "카드", "기타금융", "창업투자"}
 
 
-# ---------------------------------------------------------------------------- ① vũ trụ
+# ---------------------------------------------------------------------------- ① danh sách gốc
 def top_by_cap(market: str, n: int, registry) -> list[str]:
     """Top n cổ phiếu thường theo vốn hóa (Naver xếp sẵn giảm dần). market: KOSPI / KOSDAQ / ALL."""
     mkts = ["KOSPI", "KOSDAQ"] if market == "ALL" else [market]
@@ -72,7 +72,7 @@ def by_theme(theme: str) -> list[str]:
 # ---------------------------------------------------------------------------- ② lọc rẻ
 def cheap_stage(rows: list[dict], max_pe: float = 15.0, max_rel: float = 0.8, min_div: float = 0.0,
                 require_profit: bool = True, skip_financials: bool = False) -> list[dict]:
-    """Chấm rẻ tương đối theo ngành TRONG vũ trụ. Trả mọi mã kèm cột 'Qua lọc' và lý do, xếp rẻ → đắt."""
+    """Chấm rẻ tương đối theo ngành TRONG danh sách gốc. Trả mọi mã kèm cột 'Qua lọc' và lý do, xếp rẻ → đắt."""
     groups: dict = {}
     for r in rows:
         groups.setdefault(r.get("industry_kr"), []).append(r)
@@ -209,7 +209,7 @@ def rank(results: list[dict]) -> list[dict]:
 
 
 # ============================================================================ BỘ TIÊU CHUẨN "RẺ" CÓ SẴN
-# Mỗi bộ = tầng 1 (dữ liệu thị trường, lọc nhanh cả vũ trụ) + tầng 2 (kiểm sau khi định giá sâu, cần BCTC DART).
+# Mỗi bộ = tầng 1 (dữ liệu thị trường, lọc nhanh cả danh sách gốc) + tầng 2 (kiểm sau khi định giá sâu, cần BCTC DART).
 # Ghi rõ chỗ điều chỉnh so với bản gốc vì dữ liệu Hàn Quốc / dữ liệu App có.
 PRESETS: dict[str, dict] = {
     "kci": {
@@ -269,7 +269,7 @@ PRESETS: dict[str, dict] = {
     "piotroski": {
         "name": "Piotroski — P/B thấp + F-score cao",
         "source": "J. Piotroski (2000), 'Value Investing: The Use of Historical Financial Statement Information'.",
-        "desc": "20% mã có P/B thấp nhất vũ trụ → sau định giá: F-score ≥ 7/8.",
+        "desc": "20% mã có P/B thấp nhất trong danh sách gốc → sau định giá: F-score ≥ 7/8.",
         "adapt": "Bản gốc 9 tiêu chí, chọn F ≥ 8; App tính 8 tiêu chí (thiếu phát hành cổ phiếu) nên dùng ≥ 7/8.",
         "stage1": {"pb_bottom_pct": 0.20},
         "stage2": {"min_fscore": 7},
@@ -291,7 +291,7 @@ def _metrics(r: dict) -> dict:
 
 
 def apply_preset(rows: list[dict], key: str, overrides: Optional[dict] = None) -> list[dict]:
-    """Tầng 1 của bộ tiêu chuẩn `key` trên toàn vũ trụ. overrides: sửa ngưỡng (vd {'max_pe': 12})."""
+    """Tầng 1 của bộ tiêu chuẩn `key` trên toàn danh sách gốc. overrides: sửa ngưỡng (vd {'max_pe': 12})."""
     crit = {**PRESETS[key]["stage1"], **(overrides or {})}
     base = {r["Mã"]: r for r in cheap_stage(rows, max_pe=1e9, max_rel=1e9, min_div=0.0, require_profit=False)}
     pb_cut = None
@@ -387,7 +387,7 @@ def stage2_check(res: dict, key: str, overrides: Optional[dict] = None) -> tuple
 
 
 # Kết quả backtest_presets.py (chạy lại 10/11/2026 sau rà soát định giá): top 200 vốn hóa hiện tại, mốc 15/4/2021–2025, giữ 12 tháng, tầng 1+2,
-# danh mục chia đều. vs_univ = vượt trung bình vũ trụ cùng năm (TB/năm); t = t-thống kê theo năm; |t| < 2 = chưa có
+# danh mục chia đều. vs_univ = vượt trung bình danh sách gốc cùng năm (TB/năm); t = t-thống kê theo năm; |t| < 2 = chưa có
 # ý nghĩa thống kê. Hiện cạnh mỗi bộ trên trang 🔍 để người dùng thấy bằng chứng trước khi chọn.
 BACKTEST_2021_2025 = {
     "kci": {"vs_univ": -0.0043, "t": -0.10, "years_beat": "1/5", "vs_kospi": 0.1136, "avg_n": 20.4, "loss30": 0.085},

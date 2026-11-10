@@ -171,7 +171,7 @@ khả năng trả lãi vì nợ của mảng tài chính; F-score thiếu tiêu 
 
 ## 🔍 Trang sàng lọc cổ phiếu rẻ (`screen.py`)
 
-① Vũ trụ: top vốn hóa / ngành KRX / chủ đề / nhập tay → ② lọc rẻ: P/E, P/B ÷ trung vị ngành **trong vũ trụ** (≥ 3 mã,
+① Danh sách gốc: top vốn hóa / ngành KRX / chủ đề / nhập tay → ② lọc rẻ: P/E, P/B ÷ trung vị ngành **trong danh sách gốc** (≥ 3 mã,
 thiếu thì so cả danh sách), P/E tối đa, cổ tức tối thiểu, bắt buộc có lãi → ③ định giá sâu K mã rẻ nhất bằng **đúng quy
 trình 🧮** (giả định mặc định, không đối thủ nước ngoài cho nhanh), lưu hồ sơ → ④ xếp hạng: kết luận → chênh lệch →
 chất lượng; mở mã bất kỳ trong 🧮 để đi đủ 5 bước. Backtest mới kiểm chứng phần **định giá**; lọc P/E thấp và điểm
@@ -179,8 +179,8 @@ tổng hợp chưa được kiểm chứng riêng.
 
 ### Bộ tiêu chuẩn sàng lọc có sẵn (10/11/2026) — trang 🔍 chạy bằng 1 nút
 
-Chọn bộ tiêu chuẩn → **▶️ Chạy sàng lọc**. Vũ trụ mặc định: top 200 vốn hóa cả hai sàn. App làm hết phần còn lại:
-- **Tầng 1** — dữ liệu thị trường trên cả vũ trụ.
+Chọn bộ tiêu chuẩn → **▶️ Chạy sàng lọc**. Danh sách gốc mặc định: top 200 vốn hóa cả hai sàn. App làm hết phần còn lại:
+- **Tầng 1** — dữ liệu thị trường trên cả danh sách gốc.
 - **Định giá sâu** — tối đa 20 mã qua lọc, bằng đúng quy trình 🧮.
 - **Tầng 2** — kiểm bằng BCTC DART.
 - **Xếp hạng** — mã đạt tầng 2 lên trước.

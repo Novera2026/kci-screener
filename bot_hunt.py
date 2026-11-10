@@ -2,7 +2,7 @@
 🤖 KCI Bot săn cổ phiếu — chạy quy trình SÀNG LỌC + ĐỊNH GIÁ của App rồi gửi báo cáo Telegram.
 
 Mỗi lần chạy (mặc định sau giờ đóng cửa ngày giao dịch):
-  1. Vũ trụ: top N vốn hóa cả hai sàn — giá, P/E, P/B lấy MỚI (không dùng lại số cũ).
+  1. Danh sách gốc: top N vốn hóa cả hai sàn — giá, P/E, P/B lấy MỚI (không dùng lại số cũ).
   2. Áp các BỘ TIÊU CHUẨN của trang 🔍 (screen.PRESETS) — tầng 1 trên dữ liệu thị trường.
   3. Định giá sâu (cùng quy trình trang 🧮, screen.deep_stage) các mã qua tầng 1, rồi kiểm tầng 2 của từng bộ.
   4. Danh sách săn = mã đạt tầng 2 của ≥ 1 bộ, có giá trị hợp lý qua cổng số và rẻ hơn giá trị ước tính.
@@ -53,7 +53,7 @@ def aggregate(results: dict, hits: dict) -> list[dict]:
 
     Vào danh sách khi: đạt tầng 2 của ≥ 1 bộ, có giá trị hợp lý (qua cổng số) và chênh lệch > 0.
     Xếp: chênh lệch ↓ (tín hiệu định giá — phần duy nhất có IC dương). 10/11/2026: mô phỏng PIT 2021–25 top 200, 5 bộ
-    mặc định: top 12 xếp theo SỐ BỘ ĐẠT thua TB vũ trụ −14,1%/năm (t −2,29); xếp theo chênh lệch +0,4%/năm (t 0,11).
+    mặc định: top 12 xếp theo SỐ BỘ ĐẠT thua TB danh sách gốc −14,1%/năm (t −2,29); xếp theo chênh lệch +0,4%/năm (t 0,11).
     Xếp theo độ tin cậy trước cũng kém (−11%/năm) — không dùng. Số bộ đạt vẫn hiện để đọc, không dùng để xếp."""
     import screen as SC
     by_tk: dict = {}
@@ -101,9 +101,9 @@ def format_message(picks: list[dict], d: dict, meta: dict, top: int = 12) -> lis
     import screen as SC
     names = {k: SC.PRESETS[k]["name"].split(" — ")[0].split(" (")[0] for k in SC.PRESETS}
     L = [f"🤖 <b>KCI săn cổ phiếu</b> · {meta['at']:%d/%m/%Y %H:%M} KST",
-         f"Vũ trụ top {meta['universe']} · {len(meta['presets'])} bộ tiêu chuẩn · định giá sâu {meta['n_deep']} mã · "
+         f"Danh sách gốc top {meta['universe']} · {len(meta['presets'])} bộ tiêu chuẩn · định giá sâu {meta['n_deep']} mã · "
          f"Rf {meta['rf'] * 100:.2f}%" if meta.get("rf") else
-         f"Vũ trụ top {meta['universe']} · {len(meta['presets'])} bộ tiêu chuẩn · định giá sâu {meta['n_deep']} mã", ""]
+         f"Danh sách gốc top {meta['universe']} · {len(meta['presets'])} bộ tiêu chuẩn · định giá sâu {meta['n_deep']} mã", ""]
     if d["first_run"]:
         L.append("Lần chạy đầu — chưa có lần trước để so.")
     else:
@@ -157,7 +157,7 @@ def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=p
          tickers: Optional[list[str]] = None, market: str = "ALL", scope: str = "") -> dict:
     """Chạy sàng lọc + định giá sâu. Trả {picks, results, hits, rows, meta}.
 
-    Mặc định vũ trụ = top `universe` vốn hóa của `market` (ALL / KOSPI / KOSDAQ).
+    Mặc định danh sách gốc = top `universe` vốn hóa của `market` (ALL / KOSPI / KOSDAQ).
     Truyền `tickers` để săn trong danh sách riêng (ngành, chủ đề, mega trend…), tối đa 400 mã."""
     import screen as SC
     import valuation as V
@@ -169,7 +169,7 @@ def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=p
         scope = scope or f"{len(tks)} mã tự chọn"
     else:
         scope = scope or f"top {universe} vốn hóa " + ("cả hai sàn" if market == "ALL" else market)
-        progress(f"① Vũ trụ {scope}…")
+        progress(f"① Danh sách gốc {scope}…")
         tks = SC.top_by_cap(market, universe, reg)
     progress(f"① Lấy chỉ số {len(tks)} mã ({scope})…")
     rows, _ = fetch_many(tks, registry=reg, prefer="naver")

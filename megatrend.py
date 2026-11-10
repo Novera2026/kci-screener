@@ -119,7 +119,7 @@ def load_bot_state(path: str) -> Optional[dict]:
 
 
 def trend_tickers(key: str, per_theme: int = 100) -> list[str]:
-    """Toàn bộ mã của 1 mega trend (gộp thành viên các chủ đề Naver, bỏ trùng) — làm vũ trụ cho bot."""
+    """Toàn bộ mã của 1 mega trend (gộp thành viên các chủ đề Naver, bỏ trùng) — làm danh sách gốc cho bot."""
     m = next(x for x in MEGATRENDS if x["key"] == key)
     det = H.parallel(lambda no: H.theme_detail(no, per_theme), m["themes"])
     return list(dict.fromkeys(s["ticker"] for no in m["themes"] for s in (det.get(no) or {}).get("stocks", [])))

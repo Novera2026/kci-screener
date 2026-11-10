@@ -34,7 +34,7 @@ def _num(x) -> Optional[float]:
 
 
 # ----------------------------------------------------------------------------
-# Vũ trụ quét: xếp hạng vốn hóa (đã lọc ETF/ETN qua stockEndType)
+# Danh sách gốc quét: xếp hạng vốn hóa (đã lọc ETF/ETN qua stockEndType)
 # ----------------------------------------------------------------------------
 def universe_by_cap(min_cap_eok: float = 1000, markets=("KOSPI", "KOSDAQ"),
                     max_pages: int = 30) -> list[dict]:
@@ -114,7 +114,7 @@ CHART_CRITERIA = [
 
 
 def chart_metrics(d: dict) -> Optional[dict]:
-    """Trend Template 7 tiêu chí đầu (tiêu chí RS chấm sau khi có percentile toàn vũ trụ)
+    """Trend Template 7 tiêu chí đầu (tiêu chí RS chấm sau khi có percentile toàn danh sách gốc)
     + tín hiệu phụ. Cần ≥ 230 phiên."""
     c, h, lo, v = d.get("close", []), d.get("high", []), d.get("low", []), d.get("volume", [])
     n = len(c)

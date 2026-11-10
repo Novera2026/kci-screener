@@ -9,9 +9,9 @@ Tại mỗi mốc T = 15/4 năm Y (dữ liệu của backtest_dart: BCTC DART �
   • Danh mục chia đều các mã qua tầng 2 (và riêng tầng 1), giữ 12 tháng.
 
 Đo, theo năm và gộp:
-  • lợi suất vượt KOSPI và lợi suất vượt TRUNG BÌNH VŨ TRỤ (chia đều cả vũ trụ cùng năm) — vũ trụ là top vốn hóa
-    HIỆN TẠI nên có thiên lệch sống sót; so với chính vũ trụ tách được phần 'chọn mã' khỏi thiên lệch đó;
-  • tỷ lệ mã thắng vũ trụ, tỷ lệ mất > 30%, số mã/năm; t-thống kê của chênh lệch theo năm.
+  • lợi suất vượt KOSPI và lợi suất vượt TRUNG BÌNH DANH SÁCH GỐC (chia đều cả danh sách gốc cùng năm) — danh sách gốc là top vốn hóa
+    HIỆN TẠI nên có thiên lệch sống sót; so với chính danh sách gốc tách được phần 'chọn mã' khỏi thiên lệch đó;
+  • tỷ lệ mã thắng danh sách gốc, tỷ lệ mất > 30%, số mã/năm; t-thống kê của chênh lệch theo năm.
 Lợi suất chỉ tính giá (không cổ tức) — bất lợi cho bộ cổ tức cao.
 """
 from __future__ import annotations
@@ -136,7 +136,7 @@ def report_markdown(res: dict, meta: str = "") -> str:
     if meta:
         L += [f"_{meta}_", ""]
     L += ["## Tổng hợp — danh mục chia đều, giữ 12 tháng từ 15/4", "",
-          "| Bộ | Tầng | Mã/năm | Vượt vũ trụ TB/năm | t | Năm thắng vũ trụ | Vượt KOSPI TB/năm | Mã thắng vũ trụ | Mất >30% |",
+          "| Bộ | Tầng | Mã/năm | Vượt TB danh sách gốc/năm | t | Năm thắng TB | Vượt KOSPI TB/năm | Mã thắng TB | Mất >30% |",
           "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
     for k, v in res.items():
         for tag, lab in (("t1", "1 (thị trường)"), ("t2", "1+2 (đủ)")):
@@ -147,15 +147,15 @@ def report_markdown(res: dict, meta: str = "") -> str:
             L.append(f"| {SC.PRESETS[k]['name']} | {lab} | {s['avg_n']:.1f} | {_p(s['mean_vs_univ'])} | {t} | "
                      f"{s['years_beat_univ']}/{s['years']} | {_p(s['mean_vs_kospi'])} | "
                      f"{pct0(s['beat_univ'])} | {pct0(s['loss30'])} |")
-    L += ["", "## Theo năm — tầng 1+2, vượt trung bình vũ trụ (số mã)", ""]
+    L += ["", "## Theo năm — tầng 1+2, vượt trung bình danh sách gốc (số mã)", ""]
     yrs = sorted({r["year"] for v in res.values() for r in v["years"]})
     L += ["| Bộ | " + " | ".join(str(y) for y in yrs) + " |", "|---|" + "---:|" * len(yrs)]
     for k, v in res.items():
         by = {r["year"]: r for r in v["years"]}
         L.append(f"| {SC.PRESETS[k]['name']} | " + " | ".join(
             f"{_p(by[y]['t2']['vs_univ'], 0)} ({by[y]['t2']['n']})" if y in by else "—" for y in yrs) + " |")
-    L += ["", "_Lợi suất chỉ tính giá (không gồm cổ tức); vũ trụ = top vốn hóa hiện tại (thiên lệch sống sót — vì vậy "
-              "so với trung bình chính vũ trụ); 5 năm là mẫu nhỏ, |t| < 2 coi như chưa có ý nghĩa thống kê._"]
+    L += ["", "_Lợi suất chỉ tính giá (không gồm cổ tức); danh sách gốc = top vốn hóa hiện tại (thiên lệch sống sót — vì vậy "
+              "so với trung bình chính danh sách gốc); 5 năm là mẫu nhỏ, |t| < 2 coi như chưa có ý nghĩa thống kê._"]
     return "\n".join(L)
 
 
@@ -166,4 +166,4 @@ if __name__ == "__main__":
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 200
     tks = SC.top_by_cap("ALL", n, reg)
     pts, pipe = collect(tks, registry=reg, progress=lambda s, x: print(f"  [{x:4.0%}] {s}", flush=True))
-    print(report_markdown(run_presets(pts, pipe), f"Vũ trụ: top {len(tks)} vốn hóa hiện tại; {len(pts)} điểm PIT"))
+    print(report_markdown(run_presets(pts, pipe), f"Danh sách gốc: top {len(tks)} vốn hóa hiện tại; {len(pts)} điểm PIT"))

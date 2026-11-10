@@ -230,7 +230,7 @@ def report_markdown(res: dict, meta: Optional[dict] = None) -> str:
     L += [_row(c, g) for c, g in res["agreement"].items()]
     L += ["", "## 6. Theo nhóm ngành (điểm được công bố)", ""] + _HDR
     L += [_row(c, g) for c, g in res["by_bucket"].items()]
-    L += ["", "_Lợi suất chỉ tính giá, không gồm cổ tức; vũ trụ là mã đang niêm yết (thiên lệch sống sót); "
+    L += ["", "_Lợi suất chỉ tính giá, không gồm cổ tức; danh sách gốc là mã đang niêm yết (thiên lệch sống sót); "
               "giả định dự phóng = mặc định của App, không có BCTC quý point-in-time._"]
     return "\n".join(L)
 

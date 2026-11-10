@@ -107,7 +107,7 @@ python backtest_pipeline.py 005930 000660 ...
 - **Ngân hàng chỉ có 10 điểm** (DART chưa có BCTC cấu trúc cho công ty tài chính trước năm tài chính 2023) → chưa đủ
   dữ liệu để hiệu chỉnh nhóm này bằng backtest.
 
-Giới hạn: 78 mã đang niêm yết và được chọn theo quy mô **hiện tại** (thiên lệch sống sót + chọn vũ trụ nhìn trước),
+Giới hạn: 78 mã đang niêm yết và được chọn theo quy mô **hiện tại** (thiên lệch sống sót + chọn danh sách gốc nhìn trước),
 lợi suất chỉ tính giá, chỉ 5 năm, không có BCTC quý point-in-time.
 
 ---
@@ -119,10 +119,10 @@ python backtest_presets.py 200      # top 200 vốn hóa hiện tại, mốc 15/
 ```
 
 Mỗi mốc: tầng 1 trên lát cắt thị trường PIT, tầng 2 trên BCTC DART đầy đủ năm Y−1. Danh mục gồm các mã qua lọc, chia
-đều tỷ trọng, giữ 12 tháng. Kết quả được so với **trung bình chính vũ trụ** cùng năm: vũ trụ là các mã lớn *hiện tại*,
+đều tỷ trọng, giữ 12 tháng. Kết quả được so với **trung bình chính danh sách gốc** cùng năm: danh sách gốc là các mã lớn *hiện tại*,
 nên so với KOSPI sẽ bị thổi phồng bởi thiên lệch sống sót.
 
-| Bộ (tầng 1+2) | Vượt vũ trụ/năm | t | Năm thắng | Vượt KOSPI/năm | Mã/năm |
+| Bộ (tầng 1+2) | Vượt TB danh sách gốc/năm | t | Năm thắng | Vượt KOSPI/năm | Mã/năm |
 |---|---:|---:|---:|---:|---:|
 | KCI | −4,2% | −0,80 | 1/5 | +11,4% | 20 |
 | Graham phòng thủ | −11,6% | −1,31 | 1/5 | +4,1% | 19 |
@@ -132,16 +132,16 @@ nên so với KOSPI sẽ bị thổi phồng bởi thiên lệch sống sót.
 | Magic Formula | −0,7% | −0,11 | 2/5 | +14,9% | 29 |
 | Piotroski | −23,9% | −1,06 | 2/4 | −9,8% | 4 |
 
-**Kết luận:** chưa bộ nào thắng vũ trụ có ý nghĩa thống kê (|t| < 2). Tầng 2 (BCTC) cải thiện đa số bộ so với chỉ tầng 1
+**Kết luận:** chưa bộ nào thắng danh sách gốc có ý nghĩa thống kê (|t| < 2). Tầng 2 (BCTC) cải thiện đa số bộ so với chỉ tầng 1
 (Graham −14,7% → −11,6%; Value-up −2,0% → +2,7%; cổ tức −7,1% → −1,9%). Năm 2025 mọi bộ "rẻ" thua mạnh vì loại các mã
 tăng trưởng đắt (bán dẫn, quốc phòng).
 
 **Giới hạn:**
-- Vũ trụ chọn theo quy mô hiện tại, nên phần nào thiên vị các mã đã tăng mạnh.
+- Danh sách gốc chọn theo quy mô hiện tại, nên phần nào thiên vị các mã đã tăng mạnh.
 - Lợi suất chỉ tính giá, bất lợi cho bộ cổ tức.
 - 5 năm là mẫu nhỏ.
 
-Muốn kiểm chặt hơn cần vũ trụ point-in-time (top 200 *tại từng mốc*).
+Muốn kiểm chặt hơn cần danh sách gốc point-in-time (top 200 *tại từng mốc*).
 
 ## FCFF-DCF không vào kết luận (10/11/2026)
 

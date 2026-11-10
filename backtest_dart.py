@@ -18,7 +18,7 @@ tin có tại T:
   2. Dự phóng: financials.project_forecast (dữ liệu ≤ Y−1) dự báo năm Y so với DART thực,
      đặt cạnh mốc naive (năm Y = năm Y−1).
 
-Giới hạn: vũ trụ do người dùng chọn (thường là mã còn niêm yết → thiên lệch sống sót);
+Giới hạn: danh sách gốc do người dùng chọn (thường là mã còn niêm yết → thiên lệch sống sót);
 lợi suất chỉ tính giá, không gồm cổ tức; DART chưa điều chỉnh chia tách → tự điều chỉnh khi
 số cổ phiếu đổi > 1,5 lần theo tỷ lệ "tròn", không tròn (sáp nhập…) thì bỏ điểm.
 
@@ -615,7 +615,7 @@ def report_markdown(res: dict) -> str:
          "- **IC** = tương quan hạng giữa upside của mô hình và lợi suất vượt KOSPI sau đó. "
          "≈0: không dự báo được · >0,05: tín hiệu yếu · >0,10: tín hiệu tốt. Ít mã/ít năm thì "
          "rất nhiễu — xem thêm IC gộp và ngũ phân vị.",
-         "- Vũ trụ là các mã anh nhập (thường đang còn niêm yết) → thiên lệch sống sót; lợi "
+         "- Danh sách gốc là các mã anh nhập (thường đang còn niêm yết) → thiên lệch sống sót; lợi "
          "suất chỉ tính giá, không gồm cổ tức.", ""]
     ic = "—" if a["mean_ic"] is None else f"{a['mean_ic']:.3f}"
     t = "" if a.get("t_stat") is None else f" (t = {a['t_stat']:.2f})"
