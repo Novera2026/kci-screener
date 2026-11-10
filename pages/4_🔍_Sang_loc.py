@@ -39,14 +39,13 @@ def _reg():
     return TickerRegistry()
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def _rf():
+def _rf():                       # không cache: mỗi lần chạy sàng lọc lấy Rf mới
     from screener import fetch_kgb10y
     return fetch_kgb10y()
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def _rows(tickers: tuple) -> list:
+    """Giá, vốn hóa, P/E, P/B MỚI cho mỗi lần chạy — không cache (giá thay đổi theo phiên)."""
     from screener import fetch_many
     rows, _ = fetch_many(list(tickers), registry=_reg(), prefer="naver")
     return rows
@@ -148,8 +147,9 @@ if st.button("▶️ Chạy sàng lọc", type="primary"):
                              progress=lambda d, n: bar.progress(d / n, text=f"② Định giá sâu {d}/{n} mã"),
                              preset=key, overrides2=ov2)
         bar.empty()
+    import datetime as _dt
     st.session_state["sc"] = {"key": key, "st1": st1, "deep": deep, "n_univ": len(rows),
-                              "n_pass": sum(1 for r in st1 if r["Qua lọc"])}
+                              "n_pass": sum(1 for r in st1 if r["Qua lọc"]), "at": _dt.datetime.now()}
 
 res = st.session_state.get("sc")
 if not res:
@@ -158,6 +158,9 @@ if res["key"] != key:
     st.warning("Kết quả bên dưới là của bộ tiêu chuẩn trước — bấm **Chạy sàng lọc** để chạy bộ đang chọn.")
 
 deep = res["deep"]
+if res.get("at"):
+    st.caption(f"🕒 Kết quả tính lúc **{res['at']:%H:%M:%S %d/%m}** với giá, beta, Rf tại thời điểm đó. Bấm "
+               "**▶️ Chạy sàng lọc** để tính lại với số liệu mới — kết quả cũ không được dùng lại cho định giá.")
 n_ok = sum(1 for r in deep if r.get("Đạt tiêu chuẩn") == "✅")
 n_g = sum(1 for r in deep if str(r.get("Kết luận", "")).startswith("🟢") and r.get("Đạt tiêu chuẩn") == "✅")
 c1, c2, c3, c4 = st.columns(4)
@@ -196,6 +199,8 @@ else:
         tk = pick.split(" · ")[0]
         st.session_state["vp_ticker"] = tk
         st.session_state["vp_query"] = tk
+        st.session_state["vp_query_box"] = tk
+        st.session_state["vp_force"] = True        # trang 🧮 lấy số liệu thị trường mới, không dùng lại kết quả sàng lọc
         _page = next(f for f in sorted(os.listdir(os.path.join(_ROOT, "pages"))) if "Dinh_gia" in f)
         st.switch_page(f"pages/{_page}")
 

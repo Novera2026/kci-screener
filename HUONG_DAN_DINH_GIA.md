@@ -208,3 +208,20 @@ Mọi bước vẫn được tính đầy đủ, chỉ phần đang chọn đư�
 **Giả định** gom vào mục thu gọn "⚙️ Giả định chi phí vốn & dự phóng". Dòng tóm tắt cho biết đang dùng mặc định KCI
 hay đã chỉnh mấy mục, kèm Ke thực tế; có nút ↺ về mặc định. Danh sách đối thủ (số mã trong nước, mã nước ngoài) nằm
 trong bước ①.
+
+### Số liệu thị trường luôn mới (11/11/2026)
+
+Kết quả định giá **không lưu để dùng lại**. App tách hai loại dữ liệu:
+
+| Loại | Gồm | Cách lấy |
+|---|---|---|
+| **Tĩnh** | BCTC Naver/DART, danh sách đối thủ và BCTC của họ | Cache ≤ 6 giờ. Chỉ đổi khi DN nộp báo cáo |
+| **Thị trường** | Giá, vốn hóa, P/E–P/B đối thủ trong & ngoài nước, beta 52 tuần, Rf (FRED) | **Lấy mới mỗi lần bấm Bắt đầu** hoặc 🔄 Cập nhật; không cache |
+
+- Trong **một** lần phân tích (sửa giả định, đổi bước), App giữ nguyên ảnh chụp thị trường đó để các con số nhất quán.
+  Thời điểm lấy hiện dưới tên mã.
+- Rf: ô Rf tự theo giá trị FRED mới, trừ khi anh đã tự sửa.
+- Trang 🔍 không cache giá. Kết quả sàng lọc ghi giờ tính; bấm "Mở trong 🧮" sẽ định giá lại với số liệu mới.
+- Hồ sơ `dossiers/` và nhật ký chỉ là bản ghi, không bao giờ được đọc lại để định giá.
+- Trang chính (`app.py`): Rf, KOSPI, beta từng mã, vốn hóa công ty con (SOTP) chỉ giữ trong **một lần bấm 🚀 Cào &
+  định giá**. Bộ nhớ nằm trong phiên của từng người dùng (trước đây cache chung tới 24 giờ) và bị xóa mỗi lần chạy mới.

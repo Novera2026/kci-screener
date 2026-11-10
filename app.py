@@ -58,24 +58,37 @@ reg = _get_registry()
 
 
 # ---- Tham số thị trường live (định nghĩa TRƯỚC sidebar vì sidebar dùng ngay) ----
-@st.cache_data(ttl=86400, show_spinner=False)
+# KHÔNG st.cache_data cho số liệu thị trường (Rf, KOSPI, beta, vốn hóa): cache đó dùng chung mọi phiên/người dùng
+# và giữ tới 24 giờ. Thay bằng bộ nhớ THEO LẦN CHẠY trong session_state, xóa mỗi lần bấm 🚀 → mỗi lần định giá
+# dùng số liệu thực tại thời điểm đó; trong một lần chạy (sửa giả định, xem chi tiết) không gọi lại mạng.
+def _run_memo(name: str, key, fn):
+    store = st.session_state.setdefault("_mkt_memo", {})
+    k = (name, key)
+    if k not in store:
+        store[k] = fn()
+    return store[k]
+
+
+def _new_market_run():
+    """on_click của 🚀: bỏ số liệu thị trường của lần trước."""
+    st.session_state["_mkt_memo"] = {}
+
+
 def _rf_live():
     """Rf live = TPCP Hàn 10Y (FRED), dạng thập phân. None nếu lỗi."""
     from screener import fetch_kgb10y
-    return fetch_kgb10y()
+    return _run_memo("rf", None, fetch_kgb10y)
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
 def _kospi_weekly():
     from screener import fetch_weekly_closes
-    return fetch_weekly_closes("KOSPI")
+    return _run_memo("kospi", None, lambda: fetch_weekly_closes("KOSPI"))
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
 def _beta(ticker: str):
     """Beta 52T (vs KOSPI) của 1 mã, kẹp [0.5,1.8]. None nếu thiếu dữ liệu."""
     from screener import fetch_weekly_closes, beta_vs_market
-    return beta_vs_market(fetch_weekly_closes(ticker), _kospi_weekly())
+    return _run_memo("beta", ticker, lambda: beta_vs_market(fetch_weekly_closes(ticker), _kospi_weekly()))
 
 
 # ---- Sidebar: cấu hình ----
@@ -298,7 +311,7 @@ with col1:
 with col2:
     st.write("")
     st.write("")
-    run_btn = st.button("🚀 Cào & định giá", type="primary", width="stretch")
+    run_btn = st.button("🚀 Cào & định giá", type="primary", width="stretch", on_click=_new_market_run)
     st.button("🧹 Xóa ô", width="stretch", on_click=_clear)
     st.caption("Mẹo: dán cả danh sách từ Excel cũng được.")
 
@@ -354,16 +367,17 @@ def _dart_extras(ticker: str) -> dict:
     return e
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def _mktcap_eok(query: str):
-    """Vốn hóa (억) của 1 mã (cho SOTP — định giá phần niêm yết). None nếu không thấy."""
-    try:
-        from screener import fetch_one
-        tk = reg.resolve(query) or query
-        mc = fetch_one(tk, registry=reg, prefer="naver").to_dict().get("market_cap")
-        return round(mc / 1e8) if mc else None
-    except Exception:
-        return None
+    """Vốn hóa (억) của 1 mã (cho SOTP — định giá phần niêm yết). None nếu không thấy. Giữ trong lần chạy hiện tại."""
+    def _get():
+        try:
+            from screener import fetch_one
+            tk = reg.resolve(query) or query
+            mc = fetch_one(tk, registry=reg, prefer="naver").to_dict().get("market_cap")
+            return round(mc / 1e8) if mc else None
+        except Exception:
+            return None
+    return _run_memo("mktcap", query, _get)
 
 
 def _period_label(c: dict) -> str:

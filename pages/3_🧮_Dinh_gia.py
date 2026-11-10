@@ -46,70 +46,73 @@ def _reg():
     return TickerRegistry()
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def _rf_live():
+# ---------------------------------------------------------------------------- dữ liệu
+# HAI LOẠI DỮ LIỆU — không trộn:
+#  • TĨNH (BCTC Naver/DART, danh sách đối thủ): chỉ đổi khi DN nộp báo cáo → cache để nhanh.
+#  • THỊ TRƯỜNG (giá, vốn hóa, P/E–P/B đối thủ, beta, Rf): KHÔNG cache, KHÔNG dùng lại kết quả cũ — lấy mới mỗi lần
+#    bấm "Bắt đầu" (hoặc 🔄). Trong MỘT lần phân tích (sửa giả định, đổi bước) giữ nguyên ảnh chụp đó cho nhất quán.
+def _fresh_rf():
     from screener import fetch_kgb10y
-    return fetch_kgb10y()
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load(tk: str, n_peers: int) -> dict:
-    """Mọi dữ liệu mạng cho 1 mã — cache 1 giờ. Đổi giả định không cào lại."""
-    from screener import fetch_one, fetch_many, fetch_weekly_closes, beta_vs_market
-    from financials import fetch_financials, build_annual_series
-    reg = _reg()
-    row = fetch_one(tk, registry=reg, prefer="naver").to_dict()
-    fin = fetch_financials(tk)
-    series = build_annual_series(tk, fin.get("annual", []), row.get("market_cap"), row.get("price"),
-                                 years=6, quarters=fin.get("quarter"))
     try:
-        beta = beta_vs_market(fetch_weekly_closes(tk), fetch_weekly_closes("KOSPI"))
+        return fetch_kgb10y()
     except Exception:
-        beta = None
+        return None
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _load_static(tk: str, industry_kr: str, n_peers: int) -> dict:
+    """BCTC của mã + danh sách đối thủ trong nước và BCTC của họ (không có giá/vốn hóa/beta)."""
+    from financials import fetch_financials
+    import concurrent.futures as _cf
+    reg = _reg()
+    fin = fetch_financials(tk)
     extras = {}
     try:
         import dart_api
         extras = dart_api.valuation_extras(tk) or {}
     except Exception:
         pass
-    # ① đối thủ trong nước: gợi ý Naver ∪ top vốn hóa cùng 업종 (chỉ cổ phiếu thường) — DÙNG LẠI cho phép neo ở ④
-    import concurrent.futures as _cf
-    peers, peer_fins = [], {}
-    ptk = PR.domestic_candidates(tk, row.get("industry_kr"), reg, n=n_peers)
-    if ptk:
-        peers, _ = fetch_many(ptk, registry=reg, prefer="naver")
-        with _cf.ThreadPoolExecutor(max_workers=5) as ex:
-            peer_fins = dict(zip(ptk, ex.map(fetch_financials, ptk)))
-    # ②③ BCTC đầy đủ DART (mã tài khoản IFRS)
     try:
         fs_full = AN.fetch_full(tk)
     except Exception:
         fs_full = None
-    # EV/EBIT đối thủ trong nước: EV = vốn hóa + nợ ròng + thiểu số (DART), EBIT = LN HĐ năm gần nhất (Naver)
-    peer_ev = []
-    if peers:
-        def _ev(r):
-            try:
-                pfs = AN.fetch_full(r["ticker"])
-            except Exception:
-                pfs = None
-            ann = [c for c in (peer_fins.get(r["ticker"]) or {}).get("annual", []) if not c.get("is_consensus")]
-            # EBIT 4 quý gần nhất (cùng cơ sở với mã đang định giá); thiếu quý → EBIT năm gần nhất
-            ebit = DCF.ttm_ebit((peer_fins.get(r["ticker"]) or {}).get("quarter", []))
-            if ebit is None:
-                ebit = ann[-1].get("op_profit") if ann else None
-            return {"Mã": r["ticker"], "Tên": r.get("name"), "EBIT 4 quý (억)": ebit,
-                    "EV/EBIT": DCF.ev_ebit_of(r.get("market_cap"), ebit, pfs)}
-        with _cf.ThreadPoolExecutor(max_workers=4) as ex:
-            peer_ev = list(ex.map(_ev, peers))
-    return {"row": row, "annual": fin.get("annual", []), "quarters": fin.get("quarter", []), "series": series,
-            "beta": beta, "extras": extras, "peers": peers, "peer_fins": peer_fins, "fs_full": fs_full,
-            "peer_ev": peer_ev}
+    ptk = PR.domestic_candidates(tk, industry_kr, reg, n=n_peers)
+
+    def _pfs(t):
+        try:
+            return AN.fetch_full(t)
+        except Exception:
+            return None
+    peer_fins, peer_fs = {}, {}
+    if ptk:
+        with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+            peer_fins = dict(zip(ptk, ex.map(fetch_financials, ptk)))
+            peer_fs = dict(zip(ptk, ex.map(_pfs, ptk)))
+    return {"annual": fin.get("annual", []), "quarters": fin.get("quarter", []), "extras": extras,
+            "fs_full": fs_full, "ptk": ptk, "peer_fins": peer_fins, "peer_fs": peer_fs}
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _foreign(codes: tuple) -> list:
-    return PR.fetch_foreign(list(codes))
+def _load_market(tk: str, ptk: tuple, fcodes: tuple) -> dict:
+    """Ảnh chụp thị trường MỚI (không cache): giá/vốn hóa/P/E–P/B của mã và đối thủ, beta 52 tuần, Rf, đối thủ
+    nước ngoài. Ghi thời điểm lấy."""
+    import concurrent.futures as _cf
+    from screener import beta_vs_market, fetch_many, fetch_one, fetch_weekly_closes
+    reg = _reg()
+    with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+        f_row = ex.submit(lambda: fetch_one(tk, registry=reg, prefer="naver").to_dict())
+        f_st = ex.submit(fetch_weekly_closes, tk)
+        f_kospi = ex.submit(fetch_weekly_closes, "KOSPI")
+        f_peers = ex.submit(lambda: fetch_many(list(ptk), registry=reg, prefer="naver")[0] if ptk else [])
+        f_for = ex.submit(lambda: PR.fetch_foreign(list(fcodes)) if fcodes else [])
+        f_rf = ex.submit(_fresh_rf)
+        row = f_row.result()
+        try:
+            beta = beta_vs_market(f_st.result(), f_kospi.result())
+        except Exception:
+            beta = None
+        return {"row": row, "beta": beta, "peers": f_peers.result(), "foreign": f_for.result(),
+                "rf": f_rf.result(), "at": _dt.datetime.now()}
+
 
 
 reg = _reg()
@@ -123,8 +126,10 @@ _POS = [(x, None) for x in STEPS[:3]] + [(STEPS[3], x) for x in SUB4] + [(STEPS[
 NAV = st.sidebar.container()          # điều hướng 5 bước — trên cùng thanh bên
 SUMMARY = st.sidebar.container()      # giá trị hợp lý + kết luận — luôn hiện, điền ở cuối trang
 
-_rf = _rf_live()
-DEF = {"as_rf": round((_rf or 0.032) * 100, 2), "as_erp": 4.87, "as_g": 2.0, "as_w": 0.9, "as_years": 5}
+if "_rf_auto" not in st.session_state:          # Rf live lúc mở trang (không cache dùng chung)
+    st.session_state["_rf_auto"] = round((_fresh_rf() or 0.032) * 100, 2)
+_rf = st.session_state["_rf_auto"] / 100
+DEF = {"as_rf": st.session_state["_rf_auto"], "as_erp": 4.87, "as_g": 2.0, "as_w": 0.9, "as_years": 5}
 
 
 def _reset_assump():
@@ -150,15 +155,36 @@ with st.sidebar:
 A = V.Assumptions(rf=rf, erp=erp, g_terminal=g_term, persistence=w, years_high=years)
 
 # ---------------------------------------------------------------------------- chọn mã
+def _refresh_rf():
+    """Lấy Rf mới; nếu người dùng chưa tự sửa Rf thì ô Rf theo giá trị mới."""
+    new = round((_fresh_rf() or 0.032) * 100, 2)
+    if st.session_state.get("as_rf") == st.session_state.get("_rf_auto"):
+        st.session_state["as_rf"] = new
+    st.session_state["_rf_auto"] = new
+
+
+def _start():
+    q_ = (st.session_state.get("vp_query_box") or "").strip()
+    if not q_:
+        return
+    tk_ = reg.resolve(q_)
+    st.session_state["vp_query"], st.session_state["vp_ticker"] = q_, tk_
+    st.session_state["vp_err"] = None if tk_ else q_
+    st.session_state["vp_force"] = True          # phân tích mới → lấy số liệu thị trường mới
+    _refresh_rf()
+
+
+def _refresh_market():
+    st.session_state["vp_force"] = True
+    _refresh_rf()
+
+
+st.session_state.setdefault("vp_query_box", st.session_state.get("vp_query", ""))
 c_in, c_btn = st.columns([4, 1])
-q = c_in.text_input("Mã hoặc tên cổ phiếu", value=st.session_state.get("vp_query", ""),
-                    placeholder="vd 005930, Samsung, 삼성전자, KB금융")
-if c_btn.button("▶️ Bắt đầu", type="primary", width="stretch") and q.strip():
-    tk_new = reg.resolve(q.strip())
-    st.session_state["vp_query"] = q.strip()
-    st.session_state["vp_ticker"] = tk_new
-    if not tk_new:
-        st.error(f"Không nhận diện được “{q}”.")
+c_in.text_input("Mã hoặc tên cổ phiếu", key="vp_query_box", placeholder="vd 005930, Samsung, 삼성전자, KB금융")
+c_btn.button("▶️ Bắt đầu", type="primary", width="stretch", on_click=_start)
+if st.session_state.get("vp_err"):
+    st.error(f"Không nhận diện được “{st.session_state['vp_err']}”.")
 
 tk = st.session_state.get("vp_ticker")
 if not tk:
@@ -207,11 +233,37 @@ PEER_CFG = _C[0].expander("⚙️ Danh sách đối thủ (không bắt buộc)"
 with PEER_CFG:
     n_peers = st.slider("Số đối thủ trong nước", 5, 20, 12, key="vp_npeers")
 
-with st.spinner(f"Đang lấy dữ liệu {tk} (giá, BCTC Naver/DART, beta, đối thủ cùng ngành)…"):
-    D = _load(tk, n_peers)
-row, series, quarters = dict(D["row"]), D["series"], D["quarters"]
-beta, extras, peer_rows = D["beta"], D["extras"], D["peers"]
-fs_full = D.get("fs_full")
+_ik0 = reg.industry_of(tk)
+_bucket0 = P.identify({"sector": reg.sector_of(tk), "industry_kr": _ik0})["bucket"]
+with PEER_CFG:
+    _fdef = ", ".join(PR.FOREIGN_PEERS.get(_bucket0, []))
+    _fcodes = st.text_input("Đối thủ nước ngoài (mã Reuters của Naver)", _fdef, key=f"fx_{tk}",
+                            help="vd TSM, MU.O, 7203.T, 0700.HK — để trống = không so nước ngoài")
+foreign_codes = tuple(c.strip() for c in _fcodes.split(",") if c.strip())
+with st.spinner(f"Đang lấy BCTC {tk} và đối thủ cùng ngành…"):
+    S0 = _load_static(tk, _ik0 or "", n_peers)
+_snap_key = (tk, tuple(S0["ptk"]), foreign_codes)
+_snap = st.session_state.get("vp_snap")
+if st.session_state.pop("vp_force", False) or not _snap or _snap.get("key") != _snap_key:
+    with st.spinner("Đang lấy số liệu thị trường mới (giá, vốn hóa, đối thủ, beta, Rf)…"):
+        _snap = {"key": _snap_key, **_load_market(tk, tuple(S0["ptk"]), foreign_codes)}
+    st.session_state["vp_snap"] = _snap
+
+from financials import build_annual_series  # noqa: E402
+row = dict(_snap["row"])
+beta, peer_rows, foreign = _snap["beta"], _snap["peers"], _snap["foreign"]
+quarters, extras, fs_full = S0["quarters"], S0["extras"], S0["fs_full"]
+series = build_annual_series(tk, S0["annual"], row.get("market_cap"), row.get("price"), years=6, quarters=quarters)
+_peer_ev = []
+for _r in peer_rows:                                  # vốn hóa MỚI của đối thủ + BCTC (tĩnh) → EV/EBIT
+    _pf = S0["peer_fins"].get(_r["ticker"]) or {}
+    _eb = DCF.ttm_ebit(_pf.get("quarter", []))
+    if _eb is None:
+        _ann = [c for c in _pf.get("annual", []) if not c.get("is_consensus")]
+        _eb = _ann[-1].get("op_profit") if _ann else None
+    _peer_ev.append({"Mã": _r["ticker"], "Tên": _r.get("name"), "EBIT 4 quý (억)": _eb,
+                     "EV/EBIT": DCF.ev_ebit_of(_r.get("market_cap"), _eb, S0["peer_fs"].get(_r["ticker"]))})
+D = {"annual": S0["annual"], "peer_fins": S0["peer_fins"], "peer_ev": _peer_ev}
 row["beta"] = beta
 name = row.get("name") or tk
 price, mc = row.get("price"), row.get("market_cap")
@@ -222,13 +274,6 @@ idn = P.identify(row)
 dq = P.data_quality(row, series, quarters, beta)
 ratios = P.ratio_table(series)
 # ① đối thủ nước ngoài: mặc định theo nhóm ngành, người dùng sửa được (mã Reuters của Naver)
-with PEER_CFG:
-    _fdef = ", ".join(PR.FOREIGN_PEERS.get(idn["bucket"], []))
-    _fcodes = st.text_input("Đối thủ nước ngoài (mã Reuters của Naver)", _fdef, key=f"fx_{tk}",
-                            help="vd TSM, MU.O, 7203.T, 0700.HK — để trống = không so nước ngoài")
-foreign_codes = tuple(c.strip() for c in _fcodes.split(",") if c.strip())
-with st.spinner("Đang lấy đối thủ nước ngoài…"):
-    foreign = _foreign(foreign_codes) if foreign_codes else []
 peer_set = PR.build_peer_set(row, D.get("annual", []), idn["bucket"], peer_rows, D.get("peer_fins", {}),
                              foreign_profiles=foreign, self_quarters=quarters)
 decomp = AN.decompose(fs_full) if fs_full else None
@@ -269,6 +314,14 @@ with HDR:
     st.subheader(f"{name} · {tk}")
     st.caption(f"{row.get('industry_kr') or '—'} · nguồn giá {row.get('source') or '—'} · "
                f"vốn hóa {mc / 1e12:,.1f} nghìn tỷ KRW" if mc else "")
+    _h1, _h2 = st.columns([4, 1])
+    _bt = f"{beta:.2f}" if beta is not None else "—"
+    _rfv = f"{_snap['rf'] * 100:.2f}%" if _snap.get("rf") else "—"
+    _h1.caption(f"🕒 Số liệu thị trường (giá, vốn hóa, P/E–P/B đối thủ, beta {_bt}, Rf FRED {_rfv}) lấy lúc "
+                f"**{_snap['at']:%H:%M:%S %d/%m}** — mỗi lần bấm Bắt đầu đều lấy mới; kết quả định giá không dùng lại "
+                "từ lần trước.")
+    _h2.button("🔄 Cập nhật", on_click=_refresh_market, width="stretch",
+               help="Lấy lại giá, vốn hóa, đối thủ, beta, Rf ngay bây giờ")
 
 # 🏭 chuyên ngành trước ④: backlog / công suất sinh giả định cho ④; rNPV / EV-GWh thành mô hình ở ⑥
 SPEC_MODES = {"none": "Không dùng", "backlog": "Backlog — đóng tàu, quốc phòng",
