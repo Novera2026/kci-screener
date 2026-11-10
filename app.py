@@ -18,7 +18,8 @@ import reload_guard
 reload_guard.drop_stale(os.path.dirname(os.path.abspath(__file__)))
 
 PAGES = [
-    st.Page("views/tong_hop.py", title="Định giá tổng hợp", icon="📈", default=True),
+    st.Page("views/trang_chu.py", title="Trang chủ", icon="🏠", default=True),
+    st.Page("views/tong_hop.py", title="Định giá tổng hợp", icon="📈", url_path="Tong_hop"),
     st.Page("pages/1_🚀_Sieu_co_phieu.py", title="Siêu cổ phiếu", icon="🚀", url_path="Sieu_co_phieu"),
     st.Page("pages/2_📰_Tin_nong.py", title="Tin nóng", icon="📰", url_path="Tin_nong"),
     st.Page("pages/4_🔍_Sang_loc.py", title="Sàng lọc", icon="🔍", url_path="Sang_loc"),

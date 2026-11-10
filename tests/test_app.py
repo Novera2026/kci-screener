@@ -106,12 +106,24 @@ def test_navigation_names_and_order():
     tree = ast.parse(open(APP, encoding="utf-8").read())
     pages = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "Page"]
     titles = [next(k.value.value for k in p.keywords if k.arg == "title") for p in pages]
-    assert titles == ["Định giá tổng hợp", "Siêu cổ phiếu", "Tin nóng", "Sàng lọc", "Định giá"]
+    assert titles == ["Trang chủ", "Định giá tổng hợp", "Siêu cổ phiếu", "Tin nóng", "Sàng lọc", "Định giá"]
     urls = {next(k.value.value for k in p.keywords if k.arg == "title"):
             next((k.value.value for k in p.keywords if k.arg == "url_path"), "") for p in pages}
     assert urls["Định giá"] == "Dinh_gia" and urls["Sàng lọc"] == "Sang_loc"
     for p in pages:                                     # mọi trang khai báo đều tồn tại
         assert os.path.exists(os.path.join(ROOT, p.args[0].value))
+
+
+def test_home_page_boots():
+    """Trang chủ chạy thật (Naver realtime): có chỉ số, bảng mega trend, mã dẫn dắt."""
+    at = AppTest.from_file(APP, default_timeout=180).run()     # trang mặc định = Trang chủ
+    assert not at.exception, at.exception
+    frames = [d.value for d in at.dataframe]
+    if not frames:                       # mất mạng → trang báo lỗi rõ ràng, không văng
+        assert at.error
+        return
+    mt = next(f for f in frames if "Xu hướng" in f.columns)
+    assert len(mt) == 11
 
 
 def test_tong_hop_view_boots():
