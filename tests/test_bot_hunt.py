@@ -54,3 +54,18 @@ def test_aggregate_ranks_by_valuation_upside_not_preset_count():
     picks = BH.aggregate(res, hits)
     assert [p["ticker"] for p in picks] == ["B", "A"]          # C (chênh âm) bị loại; B chênh cao hơn đứng đầu
     assert len(picks[1]["presets"]) == 3                       # số bộ đạt vẫn giữ để hiển thị
+
+
+def test_export_payload_has_sheet_fields():
+    import datetime as dt
+    res = {"a": {**_res("a", 30), "F-score": 6, "Độ tin cậy": "Medium", "Nhóm": "Food"}}
+    picks = BH.aggregate(res, {"kci": ["a"]})
+    out = {"picks": picks, "results": res,
+           "meta": {"at": dt.datetime(2026, 11, 10, 16, 30), "scope": "top 200", "universe": 200, "n_deep": 1,
+                    "presets": ["kci"], "rf": 0.0385}}
+    d = BH.diff({}, picks)
+    j = BH.export_payload(out, d)
+    assert j["at"] == "10/11/2026 16:30" and j["vs_previous"]["first_run"]
+    r = j["picks"][0]
+    assert r["rank"] == 1 and r["ticker"] == "a" and r["upside_pct"] == 30 and r["F-score"] == 6
+    assert r["presets"] and r["presets"][0].startswith("KCI")

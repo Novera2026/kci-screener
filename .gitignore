@@ -26,3 +26,4 @@ dossiers/
 
 # trạng thái bot săn cổ phiếu (lần quét trước)
 bot_state.json
+bot_export.json

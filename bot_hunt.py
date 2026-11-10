@@ -13,6 +13,7 @@ Chạy:
     python bot_hunt.py --dry-run     # quét và IN tin nhắn, không gửi
     python bot_hunt.py               # quét và gửi Telegram
     python bot_hunt.py --chat-id     # lấy chat id sau khi anh nhắn /start cho bot
+    python bot_hunt.py --export out.json --force   # quét, ghi JSON (cho tác vụ Claude ghi Google Sheet), không gửi
 Biến môi trường (.env khi chạy máy, GitHub Secrets khi chạy tự động):
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DART_API_KEY
     BOT_PRESETS (mặc định "kci,valueup,magic,dividend,graham"), BOT_UNIVERSE (200), BOT_MAX_DEEP (15/bộ)
@@ -224,12 +225,42 @@ def tg_chat_ids(token: str) -> list[dict]:
     return list(seen.values())
 
 
+_EXPORT_FIELDS = ("Điểm chất lượng", "F-score", "Nợ/VCSH", "Thanh toán hiện hành", "Có năm lỗ", "Tổng quan",
+                  "Độ tin cậy", "Trạng thái", "Nhóm")
+
+
+def export_payload(out: dict, d: dict, registry=None) -> dict:
+    """Kết quả 1 lần săn → JSON cho tác vụ Claude (ghi Google Sheet + nhận định AI). Chỉ số liệu của App."""
+    import screen as SC
+    names = {k: SC.PRESETS[k]["name"].split(" — ")[0].split(" (")[0] for k in SC.PRESETS}
+    mk = {}
+    if registry is not None:
+        mk = dict(zip(registry.df["ticker"].astype(str).str.zfill(6), registry.df["market"]))
+    rows = []
+    for i, p in enumerate(out["picks"], 1):
+        r = out["results"].get(p["ticker"], {})
+        rows.append({"rank": i, "ticker": p["ticker"], "name": p["name"], "market": mk.get(p["ticker"], ""),
+                     "industry": p.get("industry") or "", "price": p["price"], "fair": round(p["fair"]),
+                     "upside_pct": round(p["upside"], 1), "verdict": p["verdict"], "quality": p.get("quality") or "",
+                     "presets": [names.get(k, k) for k in p["presets"]],
+                     **{k: r.get(k) for k in _EXPORT_FIELDS}})
+    m = out["meta"]
+    return {"at": m["at"].strftime("%d/%m/%Y %H:%M"), "scope": m.get("scope"), "universe": m["universe"],
+            "n_deep": m["n_deep"], "rf": m.get("rf"), "presets": [names.get(k, k) for k in m["presets"]],
+            "picks": rows,
+            "vs_previous": {"first_run": d["first_run"], "new": [p["ticker"] for p in d["new"]],
+                            "dropped": [{"ticker": x["ticker"], "name": x.get("name")} for x in d["dropped"]],
+                            "changed": [{"ticker": p["ticker"], "from": (o.get("verdict") or "")[:1],
+                                         "to": (p["verdict"] or "")[:1]} for p, o in d["changed"]]}}
+
+
 def main(argv=None) -> int:
     _env()
     ap = argparse.ArgumentParser(description="KCI bot săn cổ phiếu")
     ap.add_argument("--dry-run", action="store_true", help="quét và in tin nhắn, không gửi")
     ap.add_argument("--chat-id", action="store_true", help="in chat id (sau khi nhắn /start cho bot)")
     ap.add_argument("--force", action="store_true", help="chạy cả ngày sàn nghỉ")
+    ap.add_argument("--export", metavar="PATH", help="ghi kết quả ra JSON (cho tác vụ Claude) thay vì gửi Telegram")
     args = ap.parse_args(argv)
     token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
     if args.chat_id:
@@ -246,6 +277,14 @@ def main(argv=None) -> int:
     prev = json.load(open(STATE_PATH, encoding="utf-8")) if os.path.exists(STATE_PATH) else {}
     d = diff(prev, out["picks"])
     msgs = format_message(out["picks"], d, out["meta"])
+    if args.export:
+        from screener import TickerRegistry
+        with open(args.export, "w", encoding="utf-8") as f:
+            json.dump(export_payload(out, d, TickerRegistry()), f, ensure_ascii=False, indent=1, default=str)
+        json.dump(state_of(out["picks"], out["meta"]["at"]), open(STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+        prev_txt = "chưa có" if d["first_run"] else f"{len(d['new'])} mới, {len(d['dropped'])} rớt"
+        print(f"EXPORT {args.export} · {len(out['picks'])} mã · so lần trước: {prev_txt}")
+        return 0
     if args.dry_run:
         print("\n---\n".join(msgs)); return 0
     if not token or not chat:
