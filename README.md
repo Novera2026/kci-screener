@@ -192,3 +192,16 @@ Trang **Tin nong** (logic ở `hotnews.py`) theo dõi realtime, **tự làm mớ
 - **🔥 Chủ đề nóng** — xếp hạng 264 chủ đề Naver theo % tăng hôm nay, độ rộng (% mã cùng tăng), mã dẫn đầu; xem từng chủ đề: mô tả, thành viên + lý do thuộc chủ đề, tin của chủ đề; nút **gửi cả chủ đề sang trang 🚀 Siêu cổ phiếu** để lọc.
 - **⭐ Tin giá trị cao** — gom tin nhanh / tin chính / tin đọc nhiều + tin của các mã dẫn đầu, **chấm điểm giá trị 0–100**: 🟢 xúc tác mạnh (hợp đồng, kết quả kỷ lục, chuyển lãi, phê duyệt, M&A, 상한가) · 🔴 rủi ro (유상증자, CB, kiện tụng) · 🔵 phân tích · ⚪ tin chung/thị trường; cộng điểm khi là 특징주, có số tiền, thuộc chủ đề nóng, mới ≤ 3 giờ. Nhận diện mã theo ranh giới từ tiếng Hàn (không nhầm "하이브리드" thành 하이브).
 - **📢 Công bố DART** — công bố chính thức của DN niêm yết, chỉ giữ loại có giá trị (hợp đồng cung cấp, kết quả sơ bộ, chuyển giao công nghệ, cấp phép, cổ phiếu quỹ, M&A…) và rủi ro (phát hành thêm, CB/BW, tham ô, xem xét niêm yết…), kèm % giá hôm nay.
+
+## Cấu trúc trang (11/11/2026)
+
+`app.py` chỉ là bộ điều hướng (`st.navigation`). Nó khai báo tên tiếng Việt và thứ tự trên thanh bên:
+
+1. **Định giá tổng hợp** — `views/tong_hop.py` (cào hàng loạt + định giá nhanh, trước đây là nội dung của `app.py`)
+2. **Siêu cổ phiếu** — `pages/1_🚀_Sieu_co_phieu.py`
+3. **Tin nóng** — `pages/2_📰_Tin_nong.py`
+4. **Sàng lọc** — `pages/4_🔍_Sang_loc.py`
+5. **Định giá** — `pages/3_🧮_Dinh_gia.py` (quy trình 5 bước cho 1 mã)
+
+Địa chỉ giữ nguyên (`/Dinh_gia`, `/Sang_loc`, …). Muốn đổi tên hay thứ tự thì sửa danh sách `PAGES` trong `app.py`.
+Chạy vẫn là `streamlit run app.py`, Streamlit Cloud vẫn dùng Main file `app.py`.

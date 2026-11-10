@@ -1,0 +1,1486 @@
+"""
+KCI — trang "Định giá tổng hợp" (cào hàng loạt + định giá nhanh nhiều mã). Được app.py gọi qua st.navigation.
+
+Chạy:
+    pip install -r requirements.txt
+    streamlit run app.py
+
+Mở tự động ở http://localhost:8501
+"""
+from __future__ import annotations
+import datetime as _dt
+import io
+import os
+import sys
+import pandas as pd
+import streamlit as st
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # thư mục dự án (views/ nằm trong đó)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+# Trên Streamlit Cloud KHÔNG có .env → nạp key từ Streamlit Secrets vào os.environ
+# để dart_api / toss_api / pykrx (đọc os.environ) hoạt động. Local có .env thì bỏ qua.
+try:
+    for _k in ("DART_API_KEY", "TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "KRX_ID", "KRX_PW"):
+        if _k not in os.environ and _k in st.secrets:
+            os.environ[_k] = str(st.secrets[_k])
+except Exception:
+    pass
+
+from screener import (TickerRegistry, sector_aggregates, export_excel, COLUMN_KR)
+from valuation import (Assumptions, value_batch, value_stock, recommend_method,
+                       _cap_conf, ev_ebit_value, fcff_value, peer_key,
+                       effective_sector, CYCLICAL_SECTORS, RELIABLE_BAND)
+try:
+    import coverage
+except Exception:
+    coverage = None
+from financials import (fetch_financials, latest_actual, forward_eps,
+                        balance_sheet_of, assess_financials,
+                        build_annual_series, build_quarter_series,
+                        project_forecast, project_forecast_quarter,
+                        forecast_eps, consensus_eps, LABELS_VI)
+
+try:
+    import dart_api
+    dart_unavailable = not dart_api.available()
+except Exception:
+    dart_unavailable = True
+
+st.set_page_config(page_title="KCI Screener", page_icon="📈", layout="wide")
+
+# ---- Header ----
+st.title("📈 KCI Screener — KOSPI/KOSDAQ")
+st.caption("Nhập tên hoặc ticker → tự cào data hàng loạt → bảng đầy đủ + P/E toàn ngành")
+
+@st.cache_resource
+def _get_registry():
+    return TickerRegistry()
+
+
+reg = _get_registry()
+
+
+# ---- Tham số thị trường live (định nghĩa TRƯỚC sidebar vì sidebar dùng ngay) ----
+# KHÔNG st.cache_data cho số liệu thị trường (Rf, KOSPI, beta, vốn hóa): cache đó dùng chung mọi phiên/người dùng
+# và giữ tới 24 giờ. Thay bằng bộ nhớ THEO LẦN CHẠY trong session_state, xóa mỗi lần bấm 🚀 → mỗi lần định giá
+# dùng số liệu thực tại thời điểm đó; trong một lần chạy (sửa giả định, xem chi tiết) không gọi lại mạng.
+def _run_memo(name: str, key, fn):
+    store = st.session_state.setdefault("_mkt_memo", {})
+    k = (name, key)
+    if k not in store:
+        store[k] = fn()
+    return store[k]
+
+
+def _new_market_run():
+    """on_click của 🚀: bỏ số liệu thị trường của lần trước."""
+    st.session_state["_mkt_memo"] = {}
+
+
+def _rf_live():
+    """Rf live = TPCP Hàn 10Y (FRED), dạng thập phân. None nếu lỗi."""
+    from screener import fetch_kgb10y
+    return _run_memo("rf", None, fetch_kgb10y)
+
+
+def _kospi_weekly():
+    from screener import fetch_weekly_closes
+    return _run_memo("kospi", None, lambda: fetch_weekly_closes("KOSPI"))
+
+
+def _beta(ticker: str):
+    """Beta 52T (vs KOSPI) của 1 mã, kẹp [0.5,1.8]. None nếu thiếu dữ liệu."""
+    from screener import fetch_weekly_closes, beta_vs_market
+    return _run_memo("beta", ticker, lambda: beta_vs_market(fetch_weekly_closes(ticker), _kospi_weekly()))
+
+
+# ---- Sidebar: cấu hình ----
+with st.sidebar:
+    st.header("⚙️ Cấu hình")
+    prefer = st.selectbox(
+        "Nguồn giá ưu tiên",
+        ["naver", "toss", "pykrx"],
+        help="naver (mặc định) = nhanh nhất ~0.1s/mã, giá REALTIME trong phiên + 52T + P/E + "
+             "P/B + EPS + BPS + cổ tức, chạy được cả trên cloud. toss = giá realtime chính "
+             "thức của sàn (cần .env). pykrx = KRX chính thức nhưng chậm (~13s/mã) & bị chặn "
+             "trên server/cloud.",
+    )
+    if prefer == "toss":
+        ok = bool(os.environ.get("TOSS_CLIENT_ID")) or os.path.exists(".env")
+        st.success("Đã thấy cấu hình Toss (.env)") if ok else \
+            st.warning("Chưa có .env cho Toss — sẽ tự fallback Naver")
+    if prefer == "pykrx":
+        st.warning("pykrx chậm (~13s/mã) và thường bị KRX chặn trên cloud. "
+                   "Khuyến nghị dùng **naver** cho nhanh.")
+
+    st.divider()
+    st.subheader("💰 Giả định định giá")
+    st.caption("House Korea (KRW nominal) — chỉnh nếu cần. Để mặc định cũng OK.")
+    _rf0 = _rf_live()                       # TPCP 10Y live (FRED)
+    _rf_def = round(_rf0 * 100, 2) if _rf0 else 3.2
+    rf = st.slider("Rf — TPCP Hàn 10Y (%)", 1.0, 6.0, _rf_def, 0.1) / 100
+    st.caption(f"🛰️ Rf mặc định LIVE từ FRED: **{_rf_def}%**" if _rf0 else
+               "⚠️ Không lấy được Rf live → mặc định 3.2%. Chỉnh tay nếu cần.")
+    erp = st.slider("ERP — phần bù rủi ro VCSH (%)", 4.0, 9.0, round(Assumptions().erp * 100, 2), 0.01,
+                    help="Mặc định = ERP tổng cho Hàn Quốc của Damodaran (01/2026), cùng nguồn với "
+                         "KCI-Valuation-Lab. Beta riêng từng mã được điều chỉnh Blume (0,67β + 0,33).") / 100
+    beta_auto = st.checkbox("β riêng từng mã (52 tuần vs KOSPI, tự tính)", value=True,
+                            help="Bật: mỗi mã dùng beta thực 52T. Tắt: dùng beta phẳng dưới đây.")
+    beta = st.slider("Beta mặc định (khi tắt β riêng / thiếu dữ liệu)", 0.5, 1.8, 1.0, 0.05)
+    g_term = st.slider("g vĩnh viễn (%) — cap 2.5", 0.0, 2.5, 2.0, 0.1) / 100
+    with st.expander("Tham số nâng cao (DCF/DDM 2 giai đoạn)"):
+        g_high = st.slider("g giai đoạn đầu (%)", 0.0, 25.0, 8.0, 0.5) / 100
+        years_high = st.slider("Số năm tăng trưởng cao", 3, 10, 5, 1)
+        persistence = st.select_slider(
+            "Hệ số duy trì siêu LN (S-RIM, w)", options=[0.6, 0.8, 0.9, 1.0], value=0.9)
+    assume = Assumptions(rf=rf, erp=erp, beta=beta, g_terminal=g_term,
+                         g_high=g_high, years_high=years_high, persistence=persistence)
+    st.caption(f"→ Ke = {assume.ke()*100:.2f}% · g = {assume.g_term_capped()*100:.2f}%")
+
+# ---- Danh mục cổ phiếu (browse theo ngành / chủ đề, giống Naver) ----
+if "raw_input" not in st.session_state:
+    st.session_state["raw_input"] = st.session_state.get("main_list") or "삼성전자\nSK Hynix\n005490\nHyundai Motor"
+
+
+# map tra cứu nhanh (tránh lọc df 4.4k dòng mỗi lần render multiselect)
+_NAME_MAP = dict(zip(reg.df["ticker"],
+                     reg.df["name_en"].fillna(reg.df["name_kr"]).fillna(reg.df["ticker"])))
+
+
+def _label(t: str) -> str:
+    return f"{t} · {_NAME_MAP.get(t, '?')}"
+
+
+def _names_for(tickers: list[str]) -> list[str]:
+    return [_NAME_MAP.get(t, t) for t in tickers]
+
+
+def _load(tickers: list[str], append: bool):
+    picked = "\n".join(_names_for(tickers))
+    if append:
+        cur = st.session_state["raw_input"].strip()
+        st.session_state["raw_input"] = (cur + "\n" + picked).strip() if cur else picked
+    else:
+        st.session_state["raw_input"] = picked
+
+
+def _clear():
+    st.session_state["raw_input"] = ""
+
+
+MAX_DEFAULT = 40  # nhóm > ngưỡng này: không tự chọn hết (tránh định giá hàng loạt chậm)
+
+
+def _group_picker(tickers: list[str], key: str, label: str):
+    """Multiselect + 2 nút nạp cho 1 nhóm mã."""
+    n = len(tickers)
+    default = tickers if n <= MAX_DEFAULT else []
+    if n > MAX_DEFAULT:
+        st.caption(f"⚠️ Nhóm lớn ({n} mã) — chưa chọn sẵn. Tự chọn mã cần (định giá "
+                   f"nhiều mã sẽ chậm, ~0.4s/mã).")
+    sel = st.multiselect(label, tickers, default=default, format_func=_label, key=key)
+    c1, c2, _ = st.columns([1, 1, 2])
+    c1.button("📋 Thay vào ô", key=key + "_rep", width="stretch",
+              on_click=_load, args=(sel, False))
+    c2.button("➕ Thêm vào ô", key=key + "_add", width="stretch",
+              on_click=_load, args=(sel, True))
+
+
+# build map: sector EN -> tickers, chủ đề -> tickers, 업종 KRV -> tickers (cache)
+THEMES_ALL_PATH = os.path.join(_ROOT,
+                               "themes_all.csv")
+
+
+@st.cache_data
+def _build_maps():
+    df = reg.df
+    reg_tks = set(df["ticker"])
+    secs = sorted(df["sector"].dropna().unique())
+    ind = (df.dropna(subset=["industry_kr"])
+             .groupby("industry_kr")["ticker"].apply(list).to_dict())
+    # chủ đề curated (Việt) từ cột theme
+    seen: dict[str, set] = {}
+    tdf = df[["ticker", "theme"]].dropna(subset=["theme"])
+    for tk, theme in zip(tdf["ticker"], tdf["theme"]):
+        for x in str(theme).split(";"):
+            x = x.strip()
+            if x:
+                seen.setdefault(x, set()).add(tk)
+    # chủ đề Naver (테마, toàn sàn) từ themes_all.csv
+    if os.path.exists(THEMES_ALL_PATH):
+        tdf2 = pd.read_csv(THEMES_ALL_PATH, dtype=str)
+        for theme, tk in zip(tdf2["theme_kr"], tdf2["ticker"]):
+            tk = str(tk).zfill(6)
+            if tk in reg_tks:
+                seen.setdefault(theme, set()).add(tk)
+    th_map = {k: sorted(v) for k, v in seen.items()}
+    return secs, th_map, ind
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _top_by_cap(market: str, industry_kr: str, n: int) -> list[str]:
+    """Top N mã theo vốn hóa (Naver xếp sẵn giảm dần), lọc theo ngành KRX nếu chọn.
+    Chỉ lấy cổ phiếu thường (stockEndType='stock'); bỏ ưu đãi/ETF/SPAC qua registry."""
+    import requests
+    H = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
+    markets = ["KOSPI", "KOSDAQ"] if market == "Cả hai sàn" else [market]
+    reg_tks = set(reg.df["ticker"])
+    want_ind = industry_kr != "— Toàn thị trường —"
+    out: list[str] = []
+    for mk in markets:
+        page, max_pages = 1, (10 if want_ind else 2)
+        while page <= max_pages and len(out) < n * (2 if market == "Cả hai sàn" else 1):
+            try:
+                j = requests.get(f"https://m.stock.naver.com/api/stocks/marketValue/{mk}",
+                                 params={"page": page, "pageSize": 100},
+                                 headers=H, timeout=10).json()
+            except Exception:
+                break
+            stocks = j.get("stocks") or []
+            if not stocks:
+                break
+            for s in stocks:
+                tk = str(s.get("itemCode") or "").zfill(6)
+                if s.get("stockEndType") != "stock" or tk not in reg_tks:
+                    continue
+                if want_ind and reg.industry_of(tk) != industry_kr:
+                    continue
+                if tk not in out:
+                    out.append(tk)
+            page += 1
+    # gộp 2 sàn thì xếp lại theo thứ tự đã lấy (mỗi sàn đã giảm dần) rồi cắt N
+    return out[:n]
+
+
+sectors, theme_map, ind_map = _build_maps()
+# chủ đề sắp theo số mã giảm dần
+themes = sorted(theme_map.keys(), key=lambda k: -len(theme_map[k]))
+# sắp ngành theo số mã giảm dần, đẩy "기타" (Khác) xuống cuối
+industries = sorted(ind_map.keys(), key=lambda k: (k == "기타", -len(ind_map[k])))
+
+st.subheader("🗂️ Danh mục cổ phiếu")
+st.caption(f"{len(reg.df)} mã toàn sàn · {len(sectors)} nhóm lớn · {len(themes)} chủ đề "
+           f"· {len(industries)} ngành KRX (업종). Chọn nhóm → nạp vào ô định giá.")
+tab_sec, tab_theme, tab_ind, tab_top = st.tabs(
+    ["📂 Nhóm lớn", "🏷️ Theo chủ đề", "🏭 Ngành KRX (toàn sàn)", "⚡ Top vốn hóa"])
+
+with tab_sec:
+    st.caption("Bluechip đã gắn ngành EN + định giá khuyến nghị tốt nhất.")
+    sec = st.selectbox("Nhóm ngành", sectors, key="browse_sector")
+    _group_picker(reg.df[reg.df["sector"] == sec]["ticker"].tolist(),
+                  f"ms_sector_{sec}", "Mã trong nhóm (bỏ chọn mã không cần)")
+
+with tab_theme:
+    st.caption("Chủ đề toàn sàn (테마 Naver) + chủ đề tuyển chọn (Value-up, Cổ tức cao…). "
+               "Gõ để tìm nhanh.")
+    th = st.selectbox("Chủ đề (sắp theo số mã)", themes, key="browse_theme",
+                      format_func=lambda k: f"{k} ({len(theme_map[k])})")
+    _group_picker(theme_map.get(th, []), f"ms_theme_{th}",
+                  "Mã trong chủ đề (bỏ chọn mã không cần)")
+
+with tab_ind:
+    st.caption("Toàn bộ cổ phiếu phân theo ngành KRX (업종) — giống tab 업종별 của Naver.")
+    ind = st.selectbox("Ngành KRX (sắp theo số mã)", industries,
+                       format_func=lambda k: f"{k} ({len(ind_map[k])})", key="browse_ind")
+    _group_picker(ind_map.get(ind, []), f"ms_ind_{ind}",
+                  "Mã trong ngành (bỏ chọn mã không cần)")
+
+with tab_top:
+    st.caption("Lấy nhanh các mã VỐN HÓA LỚN NHẤT (toàn thị trường hoặc trong 1 ngành KRX) "
+               "để soi cổ phiếu đầu ngành / tìm hàng rẻ. Nạp vào ô rồi bấm 🚀.")
+    t1, t2, t3 = st.columns([1, 2, 1])
+    top_mkt = t1.selectbox("Sàn", ["KOSPI", "KOSDAQ", "Cả hai sàn"], key="top_mkt")
+    top_ind = t2.selectbox("Ngành KRX", ["— Toàn thị trường —"] + industries,
+                           format_func=lambda k: k if k.startswith("—")
+                           else f"{k} ({len(ind_map[k])})", key="top_ind")
+    top_n = t3.select_slider("Số mã (N)", options=[5, 10, 15, 20, 30, 50], value=10,
+                             key="top_n")
+    if st.button("🔎 Lấy Top N theo vốn hóa", key="top_fetch"):
+        with st.spinner("Đang lấy bảng xếp hạng vốn hóa từ Naver..."):
+            st.session_state["top_result"] = _top_by_cap(top_mkt, top_ind, top_n)
+    tickers_top = st.session_state.get("top_result", [])
+    if tickers_top:
+        st.success(f"Tìm thấy {len(tickers_top)} mã vốn hóa lớn nhất.")
+        _group_picker(tickers_top, "ms_top", "Top mã (bỏ chọn mã không cần)")
+col1, col2 = st.columns([3, 1])
+with col1:
+    raw = st.text_area(
+        "Danh sách mã (mỗi dòng 1 mã — tên Hàn/Anh hoặc ticker đều được)",
+        height=160, key="raw_input",
+    )
+    # Bản sao KHÔNG gắn widget: Streamlit xóa state của ô nhập khi chuyển trang,
+    # các trang khác (🚀 Siêu cổ phiếu) đọc danh sách qua khóa này.
+    st.session_state["main_list"] = raw
+with col2:
+    st.write("")
+    st.write("")
+    run_btn = st.button("🚀 Cào & định giá", type="primary", width="stretch", on_click=_new_market_run)
+    st.button("🧹 Xóa ô", width="stretch", on_click=_clear)
+    st.caption("Mẹo: dán cả danh sách từ Excel cũng được.")
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fin_cached(ticker: str) -> dict:
+    return fetch_financials(ticker)
+
+
+def _fin(ticker: str) -> dict:
+    """BCTC Naver: ưu tiên bản đã nạp song song lúc bấm 🚀 (_prefetch), nếu không thì cache."""
+    f = (st.session_state.get("screen") or {}).get("fin", {}).get(ticker)
+    if f and (f.get("annual") or f.get("quarter")):
+        return f
+    return _fin_cached(ticker)
+
+
+PREFETCH_MAX = 80        # danh sách lớn hơn: BCTC/beta nạp dần khi cần (như trước)
+
+
+def _prefetch(tickers: list[str], on_prog=None) -> tuple[dict, dict]:
+    """Nạp SONG SONG (5 luồng) BCTC Naver + beta 52T cho cả danh sách ngay khi cào —
+    thay cho vòng lặp tuần tự từng mã ở bảng/định giá (40 mã: vài giây thay vì chục giây)."""
+    import concurrent.futures as _cf
+    from screener import fetch_weekly_closes, beta_vs_market
+    kospi = _kospi_weekly()
+
+    def _one(tk):
+        b = beta_vs_market(fetch_weekly_closes(tk), kospi) if kospi else None
+        return fetch_financials(tk), b
+
+    fins, betas = {}, {}
+    with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+        for i, (tk, (f, b)) in enumerate(zip(tickers, ex.map(_one, tickers))):
+            fins[tk], betas[tk] = f, b
+            if on_prog:
+                on_prog(i + 1, len(tickers))
+    return fins, betas
+
+
+def _dart_extras(ticker: str) -> dict:
+    """Số liệu DART cho EV/EBIT + FCFF. Cache thủ công CHỈ khi có data (tránh kẹt {}
+    rỗng từ lần lỗi trước — không như st.cache_data cache cả kết quả rỗng)."""
+    cache = st.session_state.setdefault("_dart_cache", {})
+    if ticker in cache:
+        return cache[ticker]
+    try:
+        import dart_api
+        e = dart_api.valuation_extras(ticker)
+    except Exception:
+        e = {}
+    if e:                       # chỉ lưu khi CÓ dữ liệu → lần sau lỗi sẽ tự thử lại
+        cache[ticker] = e
+    return e
+
+
+def _mktcap_eok(query: str):
+    """Vốn hóa (억) của 1 mã (cho SOTP — định giá phần niêm yết). None nếu không thấy. Giữ trong lần chạy hiện tại."""
+    def _get():
+        try:
+            from screener import fetch_one
+            tk = reg.resolve(query) or query
+            mc = fetch_one(tk, registry=reg, prefer="naver").to_dict().get("market_cap")
+            return round(mc / 1e8) if mc else None
+        except Exception:
+            return None
+    return _run_memo("mktcap", query, _get)
+
+
+def _period_label(c: dict) -> str:
+    p = c["period"]
+    base = f"{p[:4]}.{p[4:6]}" if len(p) >= 6 and p[:4].isdigit() else str(p)
+    if c.get("is_forecast"):
+        return base + " (Dự phóng)"
+    return base + (" (E)" if c.get("is_consensus") else "")
+
+
+def _cell_fmt(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "—"
+    if isinstance(v, (int, float)):
+        if abs(v) >= 1000:
+            return f"{v:,.0f}"
+        if float(v).is_integer():
+            return f"{int(v)}"
+        return f"{v:,.2f}"
+    return str(v)
+
+
+def _styled_display(num: pd.DataFrame, col_bg: dict):
+    """Bảng hiển thị an toàn cho Arrow: mọi ô là CHUỖI đã format (None→'—'), còn màu
+    tính từ bảng SỐ gốc (nền theo cột + chữ đỏ cho số âm, căn phải).
+    Tránh lỗi ArrowInvalid khi một cột lẫn số và '—'."""
+    disp = num.map(_cell_fmt)
+    css = pd.DataFrame("text-align:right", index=num.index, columns=num.columns)
+    for c, bg in col_bg.items():
+        if c in css.columns and bg:
+            css[c] = css[c] + f";background-color:{bg}"
+    neg = num.map(lambda v: isinstance(v, (int, float)) and not pd.isna(v) and v < 0)
+    css = css.where(~neg, css + ";color:#c0392b;font-weight:600")
+    return disp.style.apply(lambda _: css, axis=None)
+
+
+def _fin_table_combined(annual_cols: list[dict], quarter_cols: list[dict],
+                        fields: list[str]):
+    """GỘP năm + quý vào 1 bảng: cột năm trước (nhãn 'Năm YYYY'), rồi cột quý
+    ('Quý YY.MM'). Cột dự phóng nền xanh, số âm đỏ. Field nào quý không có → '—'."""
+    data, fc_cols, year_cols = {}, [], []
+
+    def _add(cols, kind):
+        for c in cols:
+            p = str(c.get("period", ""))
+            if kind == "Y":
+                lbl = ("Năm " + p[:4]) if p[:4].isdigit() else f"Năm {p}"
+            else:
+                lbl = "Quý " + (f"{p[2:4]}.{p[4:6]}" if len(p) >= 6 and p[:4].isdigit()
+                                else p)
+            if c.get("is_forecast"):
+                lbl += " (DP)"
+            elif c.get("is_consensus"):
+                lbl += " (E)"
+            while lbl in data:          # tránh trùng nhãn
+                lbl += " "
+            data[lbl] = [c.get(f) for f in fields]
+            if c.get("is_forecast"):
+                fc_cols.append(lbl)
+            if kind == "Y":
+                year_cols.append(lbl)
+
+    _add(annual_cols, "Y")
+    _add(quarter_cols, "Q")
+    df = pd.DataFrame(data, index=[LABELS_VI.get(f, f) for f in fields])
+    bg = {c: "#fafafa" for c in year_cols}          # cột năm: xám nhạt; quý: trắng
+    bg.update({c: "#eef2ff" for c in fc_cols})      # dự phóng: xanh
+    return _styled_display(df, bg)
+
+
+# ---- màu cho bảng chính ----
+def _c_upside(v):
+    """Nền theo upside: 🟢 hấp dẫn · 🟡 cao bất thường (nghi méo/chu kỳ) · 🔴 đắt."""
+    if v is None or pd.isna(v):
+        return ""
+    if v >= 60:
+        return "background-color:#fff3cd"          # vàng: quá cao → kiểm tra
+    if v >= 15:
+        return "background-color:#d7f5dd"          # xanh: hấp dẫn
+    if v <= -15:
+        return "background-color:#f8d7da"          # đỏ: đắt
+    return ""                                       # trung tính (±15%)
+
+
+def _c_conf(v):
+    if not isinstance(v, str):
+        return ""
+    if "High" in v or "Cao" in v:
+        return "background-color:#d7f5dd"
+    if "Medium" in v or "TB" in v or "Trung" in v:
+        return "background-color:#fff3cd"
+    if "Low" in v or "Thấp" in v:
+        return "background-color:#f8d7da"
+    return ""
+
+
+def _c_evebit(v):
+    """EV/EBIT thấp = rẻ (xanh), cao = đắt (đỏ). Chỉ gợi ý, tuỳ ngành."""
+    if v is None or pd.isna(v):
+        return ""
+    if v <= 12:
+        return "background-color:#d7f5dd"
+    if v >= 30:
+        return "background-color:#f8d7da"
+    return ""
+
+
+# nền cho TỪNG CỤM cột (dễ phân biệt bằng mắt)
+def _cluster_bg(col: str) -> str:
+    if col in ("Mã", "Tên", "Ngành"):
+        return ""
+    if col in ("Giá", "% so đỉnh", "Vốn hóa (억)"):
+        return "#eef4ff"                                   # giá: xanh dương nhạt
+    if col.startswith("Doanh thu '"):
+        return "#eafaf0"                                   # Doanh thu — NĂM: xanh lá nhạt
+    if col.startswith("Doanh thu Q"):
+        return "#cdebd8"                                   # Doanh thu — QUÝ: xanh lá đậm hơn
+    if col.startswith("LN thuần '"):
+        return "#fff6e8"                                   # LN thuần — NĂM: cam nhạt
+    if col.startswith("LN thuần Q"):
+        return "#ffe6c4"                                   # LN thuần — QUÝ: cam đậm hơn
+    if col.startswith("ROE % '") or col.startswith("ROE % Q"):
+        return "#f4eefb"                                   # ROE (chỉ năm): tím nhạt
+    if col in ("ROE %", "BPS", "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)"):
+        return "#f6f7f9"                                   # tài chính trailing: xám
+    if col in ("Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %"):
+        return "#fdeef0"                                   # cân đối: hồng nhạt
+    if col in ("EPS", "EPS dự tính", "EPS đồng thuận", "Lệch ĐT %"):
+        return "#eef9f3"
+    if col in ("P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %"):
+        return "#eef9fb"                                   # định giá: xanh cyan nhạt
+    return ""
+
+
+def _style_table(d):
+    """Trả DataFrame style cùng shape: nền theo cụm + tô màu tăng trưởng (xanh mạnh/đỏ)."""
+    styles = pd.DataFrame("", index=d.index, columns=d.columns)
+    # 1) nền theo cụm
+    for col in d.columns:
+        bg = _cluster_bg(col)
+        if bg:
+            styles[col] = f"background-color:{bg}"
+
+    def _seq(prefix):
+        ys = [c for c in d.columns if c.startswith(prefix + " '")]
+        qs = [c for c in d.columns if c.startswith(prefix + " Q")]
+        return ys, qs
+
+    # 2) tăng trưởng theo kỳ (Doanh thu, LN thuần): so với kỳ liền trước cùng loại
+    for prefix in ("Doanh thu", "LN thuần"):
+        for seq in _seq(prefix):
+            for j in range(len(seq)):
+                cur = seq[j]
+                prev = seq[j - 1] if j > 0 else None
+                for idx in d.index:
+                    v = d.at[idx, cur]
+                    if not isinstance(v, (int, float)):
+                        continue
+                    if v < 0:                              # lỗ / âm
+                        styles.at[idx, cur] += ";color:#c0392b;font-weight:700"
+                        continue
+                    if prev is not None:
+                        p = d.at[idx, prev]
+                        if isinstance(p, (int, float)) and p > 0:
+                            g = v / p - 1
+                            if g >= 0.20:                  # tăng mạnh
+                                styles.at[idx, cur] += ";color:#137333;font-weight:700"
+                            elif g <= -0.20:               # giảm mạnh
+                                styles.at[idx, cur] += ";color:#c0392b;font-weight:700"
+
+    # 3) màu ngữ nghĩa cho các cột tổng quan / định giá
+    for idx in d.index:
+        def _set_bg(col, css):
+            if col in d.columns:
+                styles.at[idx, col] = css
+        if "ROE %" in d.columns and isinstance(d.at[idx, "ROE %"], (int, float)):
+            v = d.at[idx, "ROE %"]
+            _set_bg("ROE %", "background-color:" + ("#b7e9c4" if v >= 15 else
+                    "#d7f5dd" if v >= 10 else "#f8d7da" if v < 0 else "#f6f7f9"))
+        if "Nợ/VCSH %" in d.columns and isinstance(d.at[idx, "Nợ/VCSH %"], (int, float)):
+            v = d.at[idx, "Nợ/VCSH %"]
+            _set_bg("Nợ/VCSH %", "background-color:" + ("#d7f5dd" if v < 100 else
+                    "#fff3cd" if v < 200 else "#f8d7da"))
+        if "Nợ/TS %" in d.columns and isinstance(d.at[idx, "Nợ/TS %"], (int, float)):
+            v = d.at[idx, "Nợ/TS %"]
+            _set_bg("Nợ/TS %", "background-color:" + ("#d7f5dd" if v < 50 else
+                    "#fff3cd" if v < 70 else "#f8d7da"))
+        for c in ("Đánh giá", "Định giá"):
+            if c in d.columns and isinstance(d.at[idx, c], str):
+                t = d.at[idx, c]
+                css = ("#d7f5dd" if ("Rẻ" in t or "🟢" in t or "An toàn" in t) else
+                       "#f8d7da" if ("Đắt" in t or "🔴" in t or "thận trọng" in t) else
+                       "#fff3cd" if ("Trung bình" in t or "🟡" in t) else "")
+                if css:
+                    _set_bg(c, "background-color:" + css)
+        # dự phóng công thức lệch đồng thuận >25% → vàng (soi lại giả định trước khi tin)
+        if "Lệch ĐT %" in d.columns and isinstance(d.at[idx, "Lệch ĐT %"], (int, float)) \
+                and not pd.isna(d.at[idx, "Lệch ĐT %"]) and abs(d.at[idx, "Lệch ĐT %"]) > 25:
+            _set_bg("Lệch ĐT %", "background-color:#fff3cd")
+        # cờ độ tin P/E: ⚠ chu kỳ → vàng nhạt (cảnh báo earnings-based không hợp)
+        if "PP P/E?" in d.columns and isinstance(d.at[idx, "PP P/E?"], str):
+            _set_bg("PP P/E?", "background-color:" +
+                    ("#fff3cd" if "⚠" in d.at[idx, "PP P/E?"] else "#eef7ee"))
+        # số âm: đỏ chữ
+        for c in ("LN HĐ (억)", "LN thuần (억)", "EPS", "Upside P/E %", "% so đỉnh"):
+            if c in d.columns and isinstance(d.at[idx, c], (int, float)) and d.at[idx, c] < 0:
+                styles.at[idx, c] += ";color:#c0392b;font-weight:600"
+    return styles
+
+
+# ---- Run: chỉ cào dữ liệu (network) rồi lưu vào session_state ----
+if run_btn:
+    queries = [x.strip() for x in raw.replace(",", "\n").splitlines() if x.strip()]
+    if not queries:
+        st.error("Chưa nhập mã nào.")
+        st.stop()
+    prog = st.progress(0.0, text="Đang resolve & cào dữ liệu (5 luồng song song)...")
+    from screener import fetch_many
+    n_q = len(queries)
+
+    def _on_prog(done, total):
+        prog.progress(done / total if total else 1.0,
+                      text=f"Đang cào song song: {done}/{total} mã")
+
+    resolutions: list = []
+    rows, unresolved = fetch_many(queries, registry=reg, prefer=prefer,
+                                  max_workers=5, retries=1, progress=_on_prog,
+                                  resolutions=resolutions)
+    if not rows:
+        prog.empty()
+        st.error("Không cào được mã nào. Kiểm tra tên/ticker hoặc kết nối mạng.")
+        st.stop()
+    fins, betas = {}, {}
+    if len(rows) <= PREFETCH_MAX:
+        def _on_fin(done, total):
+            prog.progress(done / total, text=f"Đang nạp BCTC + beta song song: {done}/{total} mã")
+        fins, betas = _prefetch([r["ticker"] for r in rows], _on_fin)
+    prog.empty()
+    st.session_state["screen"] = {
+        "records": rows, "unresolved": unresolved, "resolutions": resolutions,
+        "fin": fins, "beta": betas,
+        "fetched_at": _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).strftime(
+            "%H:%M %d/%m/%Y")}
+
+# ---- Render kết quả (tồn tại qua các lần rerun để panel chi tiết tương tác được) ----
+if "screen" in st.session_state:
+    rows = st.session_state["screen"]["records"]
+    unresolved = st.session_state["screen"]["unresolved"]
+    df = pd.DataFrame(rows)
+    df["pct_from_high"] = df.apply(
+        lambda r: round((r["price"] / r["high_52w"] - 1) * 100, 1)
+        if r.get("price") and r.get("high_52w") else None, axis=1)
+    agg = sector_aggregates(df)
+
+    # Median P/E ngành ROBUST: gom theo sector (hoặc industry_kr nếu trống) và
+    # LOẠI outlier (P/E ≤ 0 hoặc > 60) trước khi lấy median — nếu không, 1 mã LN teo
+    # (vd Doosan P/E 336) hay mã lỗ sẽ bóp méo "rẻ/đắt vs ngành" & "giá hợp lý".
+    PE_CAP = 60.0
+    _eff_sec = (df["sector"].where(df["sector"].notna(), df["industry_kr"])
+                if "industry_kr" in df.columns else df["sector"])
+    _per_clean = df["per"].where((df["per"] > 0) & (df["per"] <= PE_CAP))
+    med = _per_clean.groupby(_eff_sec).transform("median")
+    # CHỈ so sánh khi ngành có ≥3 mã hợp lệ trong danh sách — 1-2 mã thì median chính
+    # là bản thân mã → "Ngang ngành"/0% giả. Thiếu peer → để trống, không bịa.
+    MIN_PEERS = 3
+    _npeer = _per_clean.groupby(_eff_sec).transform("count")
+    med = med.where(_npeer >= MIN_PEERS)
+    def _tag(per, m):
+        if per is None or pd.isna(per):
+            return ""
+        if per <= 0:
+            return "· P/E âm (lỗ)"           # mã lỗ: P/E âm KHÔNG có nghĩa "rẻ"
+        if m is None or pd.isna(m):
+            return "· <3 mã cùng ngành"
+        if per < m * 0.85:
+            return "🟢 Rẻ vs ngành"
+        if per > m * 1.15:
+            return "🔴 Đắt vs ngành"
+        return "⚪ Ngang ngành"
+    df["valuation_tag"] = [_tag(p, m) for p, m in zip(df["per"], med)]
+
+    # EPS/ROE dự phóng (công thức) -> nuôi cả bảng & định giá forward. Bỏ qua nếu list quá lớn.
+    # Năm dự phóng đã có quý thực công bố → dự phóng = lũy kế quý thực + run-rate quý còn lại.
+    fwd_eps_col, fwd_roe_col, fwd_per_col = [], [], []
+    if len(df) <= PREFETCH_MAX:
+        for tk, mc, px, bps in zip(df["ticker"], df["market_cap"], df["price"], df["bps"]):
+            try:
+                _f = _fin(tk)
+                fc = project_forecast(
+                    [c for c in _f["annual"] if not c.get("is_consensus")], mc, px,
+                    quarters=_f["quarter"])
+            except Exception:
+                fc = None
+            fwd_eps_col.append(fc.get("eps") if fc else None)
+            fwd_roe_col.append((fc["eps"] / bps) if (fc and fc.get("eps") and bps) else None)
+            fwd_per_col.append(fc.get("period") if fc else None)
+    else:
+        fwd_eps_col = [None] * len(df)
+        fwd_roe_col = [None] * len(df)
+        fwd_per_col = [None] * len(df)
+    df["fwd_eps"] = fwd_eps_col
+    df["fwd_roe"] = fwd_roe_col
+    df["fwd_period"] = fwd_per_col
+
+    # Beta riêng từng mã (52T vs KOSPI) → vào CAPM/Ke. Tắt hoặc lỗi → None (dùng beta phẳng).
+    # Đã nạp song song lúc bấm 🚀; mã nào thiếu (phiên cũ) thì tính lại qua cache.
+    if beta_auto and len(df) <= PREFETCH_MAX:
+        _bmap = st.session_state["screen"].get("beta") or {}
+        bcol = []
+        for tk in df["ticker"]:
+            try:
+                bcol.append(_bmap[tk] if tk in _bmap else _beta(tk))
+            except Exception:
+                bcol.append(None)
+        df["beta"] = bcol
+    else:
+        df["beta"] = [None] * len(df)
+
+    if unresolved:
+        st.warning(f"Chưa resolve được: {', '.join(unresolved)}")
+    # Dòng nhập được ĐOÁN (khớp 1 phần / fuzzy), cổ phiếu ưu đãi, hoặc trùng → cho xem lại
+    _HOW = {"contains": "⚠️ gần đúng (tên chứa chuỗi gõ)", "fuzzy": "⚠️ đoán theo độ giống",
+            "preferred": "✓ cổ phiếu ưu đãi (đã xác minh tên)"}
+    _names_df = dict(zip(df["ticker"], df["name"]))
+    _chk = [x for x in st.session_state["screen"].get("resolutions") or []
+            if x.get("how") in _HOW or x.get("dup")]
+    if _chk:
+        _amb = any(x.get("how") == "fuzzy" or x.get("alts") for x in _chk)
+        with st.expander(f"🔍 Đối chiếu mã — {len(_chk)} dòng nhập được đoán/trùng, "
+                         "kiểm tra đúng mã chưa", expanded=_amb):
+            st.dataframe(pd.DataFrame([{
+                "Bạn nhập": x["query"], "→ Mã": x["ticker"],
+                "Tên": _names_df.get(x["ticker"], "—"),
+                "Kiểu khớp": "↩︎ trùng mã đã có — bỏ qua" if x.get("dup") else _HOW[x["how"]],
+                "Mã khác cũng khớp": ", ".join(x.get("alts") or []),
+            } for x in _chk]), width="stretch", hide_index=True)
+            st.caption("Sai mã? Gõ tên đầy đủ hoặc mã 6 ký tự (vd 005930) rồi bấm 🚀 lại.")
+    _at = st.session_state["screen"].get("fetched_at")
+    if _at:
+        st.caption(f"🕒 Giá realtime (Naver) lấy lúc **{_at}** giờ Hàn Quốc — bấm 🚀 lại để "
+                   "cập nhật giá mới.")
+
+    # ---- Bảng chính (có màu) ----
+    st.subheader("📋 Bảng dữ liệu")
+    enrich = st.checkbox(
+        "📑 Bổ sung số liệu tài chính (doanh thu, LN thuần, ROE, nợ, EPS dự tính, đánh giá "
+        f"— cào thêm ~0.5s/mã · {len(df)} mã)", value=len(df) <= 60)
+
+    def _ind(i):
+        s = df["sector"].iloc[i]
+        if isinstance(s, str) and s and s != "None":
+            return s
+        if "industry_kr" in df.columns:
+            k = df["industry_kr"].iloc[i]
+            if isinstance(k, str) and k:
+                return k
+        return "—"
+
+    disp = pd.DataFrame({
+        "Mã": df["ticker"].values, "Tên": df["name"].values,
+        "Ngành": [_ind(i) for i in range(len(df))],
+        "Giá": df["price"].values, "% so đỉnh": df["pct_from_high"].values,
+        "Vốn hóa (억)": [m / 1e8 if pd.notna(m) else None for m in df["market_cap"]],
+        "P/E": df["per"].values, "P/B": df["pbr"].values,
+        "EPS": df["eps"].values, "BPS": df["bps"].values,
+        "Tỷ suất CT %": df["div_yield"].values,
+    })
+
+    if enrich:
+        rev, opp, net, roe, debt = [], [], [], [], []
+        assets, liab, d2a, epsf, rating = [], [], [], [], []
+        epsc, epsdev = [], []
+        pbar = st.progress(0.0, text="Đang cào báo cáo tài chính & cân đối...")
+        for i, tk in enumerate(df["ticker"]):
+            f = _fin(tk)
+            la = latest_actual(f["annual"])
+            mc_i, px_i = df["market_cap"].iloc[i], df["price"].iloc[i]
+            bs_i = balance_sheet_of(la, mc_i, px_i,
+                                    la.get("bps") if la else None,
+                                    la.get("debt_ratio") if la else None)
+            rev.append(la.get("revenue") if la else None)
+            opp.append(la.get("op_profit") if la else None)
+            net.append(la.get("net_profit") if la else None)
+            roe.append(la.get("roe") if la else None)
+            debt.append(la.get("debt_ratio") if la else None)
+            assets.append(bs_i.get("assets"))
+            liab.append(bs_i.get("liabilities"))
+            d2a.append(bs_i.get("debt_to_assets"))
+            ef = (df["fwd_eps"].iloc[i] if df["fwd_eps"].iloc[i] is not None
+                  else forecast_eps(f["annual"], mc_i, px_i, quarters=f["quarter"]))
+            epsf.append(ef)
+            # Đối chiếu đồng thuận Naver CÙNG NĂM: lệch >25% = giả định công thức cần soi lại
+            _yr = (df["fwd_period"].iloc[i] or
+                   (str(int(la["period"][:4]) + 1) if la and str(la.get("period", ""))[:4].isdigit()
+                    else None))
+            ce = consensus_eps(f["annual"], _yr) if _yr else None
+            epsc.append(ce)
+            epsdev.append(round((ef / ce - 1) * 100, 1)
+                          if (ef is not None and ce and ce > 0 and ef > 0) else None)
+            rating.append(assess_financials(
+                f["annual"], df["sector"].iloc[i],
+                df["industry_kr"].iloc[i] if "industry_kr" in df.columns else None
+            )["rating"])
+            pbar.progress((i + 1) / len(df))
+        pbar.empty()
+        disp["Doanh thu (억)"] = rev
+        disp["LN HĐ (억)"] = opp
+        disp["LN thuần (억)"] = net
+        disp["ROE %"] = roe
+        disp["Tổng tài sản (억)"] = assets
+        disp["Nợ (억)"] = liab
+        disp["Nợ/VCSH %"] = debt
+        disp["Nợ/TS %"] = d2a
+        disp["EPS dự tính"] = epsf
+        disp["EPS đồng thuận"] = epsc
+        disp["Lệch ĐT %"] = epsdev
+        disp["Đánh giá"] = rating
+
+    # ---- Cột tài chính theo KỲ: 3 NĂM + 4 QUÝ — nguồn Naver (đã cache, KHÔNG gọi DART) ----
+    _ts_fmt: dict = {}
+    _PMETRICS = ["revenue", "net_profit", "roe"]   # cụm hiển thị theo kỳ
+    _Q_METRICS = {"revenue", "net_profit"}         # chỉ các chỉ tiêu này có cột QUÝ
+    #   → ROE chỉ hiện theo NĂM (3 năm + DP): ROE quý nhiễu/mùa vụ, không so sánh được.
+    _period_on = len(df) <= 40
+    if not _period_on:
+        _period_on = st.checkbox(
+            f"📅 Gộp cột tài chính theo kỳ (3 năm + 4 quý) — {len(df)} mã", value=False)
+    if _period_on:
+        # ymeta/qmeta: nhãn -> (sortkey theo kỳ, is_forecast). Các mã lệch lịch báo cáo
+        # nhau → ta CHỐT theo toàn cục: 3 năm + 4 quý thực GẦN NHẤT + 1 dự phóng,
+        # tránh sinh cột thừa (vd 1 mã có Q25.03 làm cả bảng mọc cột None).
+        ymeta, qmeta, cellmap = {}, {}, {}
+        for i, tk in enumerate(df["ticker"]):
+            f = _fin(tk)                                   # Naver, cached → nhanh
+            mc_i, px_i = df["market_cap"].iloc[i], df["price"].iloc[i]
+            a_real = [c for c in f["annual"] if not c.get("is_consensus")][-3:]   # 3 năm
+            a_fc = project_forecast(a_real, mc_i, px_i, quarters=f["quarter"])    # + dự phóng
+            a_seq = a_real + ([a_fc] if a_fc else [])
+            q_real = [c for c in f["quarter"] if not c.get("is_consensus")][-4:]   # 4 quý
+            q_fc = project_forecast_quarter(f["quarter"], mc_i, px_i)             # + dự phóng
+            q_seq = q_real + ([q_fc] if q_fc else [])
+            for kind, seq in (("Y", a_seq), ("Q", q_seq)):
+                for c in seq:
+                    p = str(c.get("period", ""))
+                    fc = bool(c.get("is_forecast"))
+                    e = "E" if fc else ""
+                    if kind == "Y":
+                        plabel = f"'{p[2:4]}{e}"
+                        ymeta[plabel] = (int(p[:4]) if p[:4].isdigit() else 0, fc)
+                    else:
+                        plabel = (f"Q{p[2:4]}.{p[4:6]}" if len(p) >= 6 else f"Q{p}") + e
+                        qmeta[plabel] = (int(p[:6]) if p[:6].isdigit() else 0, fc)
+                    for m in _PMETRICS:
+                        if kind == "Q" and m not in _Q_METRICS:
+                            continue            # bỏ ROE (và metric khác) ở cột quý
+                        cellmap.setdefault((m, plabel), {})[tk] = c.get(m)
+
+        def _pick(meta, n_actual):
+            act = sorted((l for l, (k, fc) in meta.items() if not fc),
+                         key=lambda l: meta[l][0])[-n_actual:]
+            fcl = sorted((l for l, (k, fc) in meta.items() if fc),
+                         key=lambda l: meta[l][0])[-1:]     # 1 cột dự phóng mới nhất
+            return act + fcl
+
+        labels = _pick(ymeta, 3) + _pick(qmeta, 4)         # 3 năm + DP, 4 quý + DP
+        for m in _PMETRICS:
+            for plabel in labels:
+                if (m, plabel) in cellmap:
+                    col = f"{LABELS_VI.get(m, m)} {plabel}"
+                    disp[col] = [cellmap[(m, plabel)].get(tk) for tk in df["ticker"]]
+                    _ts_fmt[col] = "{:.1f}" if m in ("roe", "net_margin", "debt_ratio") \
+                        else "{:,.0f}"
+
+    # ---- Định giá theo P/E DỰ KIẾN (forward): dùng EPS dự phóng ----
+    _fe = list(df["fwd_eps"])
+    _px = list(df["price"])
+    _mp = list(med)   # median P/E ngành (theo cross-section)
+    disp["P/E dự kiến"] = [round(px / fe, 2) if (fe and fe > 0 and px) else None
+                          for fe, px in zip(_fe, _px)]
+    # cùng số với "Forward P/E vs median ngành" → cùng cổng vùng tin cậy (0,4–2,5× giá) như bảng Định giá
+    _tp = [fe * mp if (fe and fe > 0 and mp and mp > 0) else None for fe, mp in zip(_fe, _mp)]
+    disp["Giá hợp lý (P/E)"] = [round(tp) if (tp and px and RELIABLE_BAND[0] <= tp / px <= RELIABLE_BAND[1])
+                               else None for tp, px in zip(_tp, _px)]
+    disp["Upside P/E %"] = [round((tp / px - 1) * 100, 1) if (tp and px) else None
+                           for tp, px in zip(disp["Giá hợp lý (P/E)"], _px)]
+    # Cờ độ tin: ngành chu kỳ/đặc thù (data_ok=False trong valuation: đóng tàu, bán dẫn,
+    # pin, dược, holdco…) thì định giá theo P/E earnings-based KHÔNG đáng tin → cảnh báo.
+    _ik = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
+    disp["PP P/E?"] = ["✓ hợp" if recommend_method(s, ik).get("data_ok", False)
+                       else "⚠ chu kỳ" for s, ik in zip(df["sector"], _ik)]
+
+    disp["Định giá"] = df["valuation_tag"].values
+    disp["Nguồn"] = df["source"].values
+
+    fmt = {"Giá": "{:,.0f}", "% so đỉnh": "{:+.1f}", "Vốn hóa (억)": "{:,.0f}",
+           "P/E": "{:.2f}", "P/B": "{:.2f}", "EPS": "{:,.0f}", "BPS": "{:,.0f}",
+           "Tỷ suất CT %": "{:.2f}", "Doanh thu (억)": "{:,.0f}", "LN HĐ (억)": "{:,.0f}",
+           "LN thuần (억)": "{:,.0f}", "ROE %": "{:.1f}", "Tổng tài sản (억)": "{:,.0f}",
+           "Nợ (억)": "{:,.0f}", "Nợ/VCSH %": "{:.0f}", "Nợ/TS %": "{:.0f}",
+           "EPS dự tính": "{:,.0f}", "EPS đồng thuận": "{:,.0f}", "Lệch ĐT %": "{:+.0f}",
+           "P/E dự kiến": "{:.2f}", "Giá hợp lý (P/E)": "{:,.0f}",
+           "Upside P/E %": "{:+.1f}"}
+    fmt.update(_ts_fmt)
+
+    # ---- Bỏ cột TRÙNG: khi đã có cột theo kỳ, bỏ bản trailing trùng lặp ----
+    if _period_on:
+        _dups = []
+        if "revenue" in _PMETRICS:
+            _dups.append("Doanh thu (억)")      # = Doanh thu năm gần nhất
+        if "net_profit" in _PMETRICS:
+            _dups.append("LN thuần (억)")       # = LN thuần năm gần nhất
+        if "roe" in _PMETRICS:
+            _dups.append("ROE %")              # = ROE kỳ gần nhất
+        disp = disp.drop(columns=[c for c in _dups if c in disp.columns], errors="ignore")
+
+    # ---- Sắp xếp lại: ĐỊNH DANH → cột theo KỲ (Năm/Quý) → ĐỊNH GIÁ & TỔNG QUAN → Nguồn ----
+    _HEAD = ["Mã", "Tên", "Ngành", "Giá", "% so đỉnh", "Vốn hóa (억)"]
+    _TAIL = [
+        # Sinh lời & giá trị sổ sách
+        "ROE %", "BPS",
+        # Tài chính trailing (kỳ gần nhất)
+        "Doanh thu (억)", "LN HĐ (억)", "LN thuần (억)",
+        # Cân đối & sức khỏe
+        "Tổng tài sản (억)", "Nợ (억)", "Nợ/VCSH %", "Nợ/TS %",
+        "Tỷ suất CT %",
+        # EPS
+        "EPS", "EPS dự tính", "EPS đồng thuận", "Lệch ĐT %",
+        # ĐỊNH GIÁ
+        "P/E", "P/E dự kiến", "P/B", "Giá hợp lý (P/E)", "Upside P/E %", "PP P/E?",
+        # Đánh giá tổng hợp
+        "Đánh giá", "Định giá",
+    ]
+    _known = set(_HEAD) | set(_TAIL) | {"Nguồn"}
+    _period = [c for c in disp.columns if c not in _known]   # cột theo kỳ (động) → ĐỨNG TRƯỚC
+    _final = [c for c in _HEAD if c in disp.columns] + _period \
+        + [c for c in _TAIL if c in disp.columns] \
+        + (["Nguồn"] if "Nguồn" in disp.columns else [])
+    disp = disp[_final]
+
+    sty = (disp.style
+           .format({k: v for k, v in fmt.items() if k in disp.columns}, na_rep="—")
+           .apply(_style_table, axis=None))
+    # ghim cột Mã + Tên để cuộn ngang vẫn theo dõi được
+    col_cfg = {"Mã": st.column_config.Column(pinned=True),
+               "Tên": st.column_config.Column(pinned=True, width="medium")}
+    st.dataframe(sty, width="stretch", hide_index=True, column_config=col_cfg)
+    st.caption("📌 Cột Mã + Tên được ghim (cuộn ngang vẫn thấy). 🟢 tốt/rẻ · 🟡 trung bình · "
+               "🔴 đắt/rủi ro. Vốn hóa, LN, Tài sản, Nợ đơn vị 억원 (×100 triệu KRW). "
+               "Cân đối lấy số gốc DART nếu có .env key, nếu không là ước tính.")
+    st.caption("⚠️ **Đọc kỹ:** *EPS dự tính* = năm tài chính hiện tại: nếu đã có quý thực công "
+               "bố thì = lũy kế quý thực + quý còn lại theo trung bình 2 quý gần nhất; chưa có "
+               "quý nào thì theo CAGR doanh thu × biên LN xu hướng. *Lệch ĐT %* = so với EPS "
+               "đồng thuận Naver cùng năm (🟡 lệch >25% → soi lại). "
+               "*Median P/E ngành* đã LOẠI P/E âm & >60 (outlier). "
+               "Cột **PP P/E?**: ⚠ chu kỳ = ngành định giá theo P/E earnings-based KHÔNG đáng "
+               "tin (đóng tàu/bán dẫn/pin/dược…) — *Giá hợp lý & Upside P/E* chỉ tham khảo "
+               "tương đối, nên xem backlog/DCF.")
+
+    # ---- Aggregate ngành ----
+    st.subheader("🏭 Chỉ số toàn ngành")
+    st.caption("agg_P/E = ΣVốn hóa / ΣLN ròng (chuẩn) — median để tham chiếu.")
+    st.dataframe(agg, width="stretch", hide_index=True)
+
+    # ---- Định giá ----
+    st.subheader("💰 Định giá")
+    st.caption("Intrinsic làm base, multiples chỉ cross-check (KCI Valuation Spec §2/§8). "
+               "Fair value = số quá khứ (ngành **chu kỳ** dùng ROE **mid-cycle** median nhiều năm, không dùng EPS đỉnh); **Fwd upside** = theo EPS/ROE dự phóng. So 'vs ngành' cần ≥3 mã cùng ngành. "
+               "Đổi giả định ở sidebar là cập nhật ngay.")
+    # Ngành CHU KỲ: nạp lịch sử năm (Naver, đã cache) → Fair value dùng mid-cycle ROE
+    # thay cho trailing 1 năm/DCF-earnings trên EPS đỉnh. (Chi tiết 1 mã: tới 6 năm DART.)
+    _ikv = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
+    _hist_map = {}
+    for _tk, _s, _ik in zip(df["ticker"], df["sector"], _ikv):
+        if effective_sector(_s if isinstance(_s, str) else None,
+                            _ik if isinstance(_ik, str) else None) in CYCLICAL_SECTORS:
+            try:
+                _hist_map[_tk] = [c for c in _fin(_tk)["annual"] if not c.get("is_consensus")]
+            except Exception:
+                pass
+    val_results, _med = value_batch(df, assume, histories=_hist_map)
+    vdf = pd.DataFrame([r.to_dict() for r in val_results])
+    VAL_KR = {
+        "ticker": "Mã", "name": "Tên", "sector": "Ngành", "price": "Giá",
+        "fair_value": "Fair value", "upside_%": "Upside %",
+        "fwd_upside_%": "Fwd upside %", "auto_method": "PP áp dụng",
+        "confidence": "Độ tin cậy", "status": "Trạng thái",
+    }
+    summary_cols = ["ticker", "name", "sector", "price", "fair_value", "upside_%",
+                    "fwd_upside_%", "auto_method", "confidence", "status"]
+    vsum = vdf[summary_cols].copy()
+    vsum.columns = [VAL_KR.get(c, c) for c in summary_cols]
+
+    # ---- Tùy chọn: EV/EBIT + FCFF qua DART (số gốc, chậm thêm ~1 gọi/mã) ----
+    adv_detail = {}          # ticker -> {fv_ev, fv_fcff, ev_ebit, net_debt, fcff0}
+    if not dart_unavailable:
+        adv = st.checkbox("🏗️ Thêm EV/EBIT + FCFF (số gốc DART — chậm thêm ~1 gọi/mã)",
+                          value=False, key="adv_dart")
+        if adv:
+            import statistics as _stt
+            from collections import defaultdict as _dd
+            kd = assume.rf + 0.015           # chi phí nợ ≈ Rf + 1.5%
+            ke_v, gt = assume.ke(), assume.g_term_capped()
+            _ikc = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
+            rec, pbar = [], st.progress(0.0, text="Đang lấy EV/EBIT + FCFF từ DART...")
+            for i, (tk, px, mc, sec, ik) in enumerate(
+                    zip(df["ticker"], df["price"], df["market_cap"], df["sector"], _ikc)):
+                e = _dart_extras(tk)
+                shares = (mc / px) if (mc and px and px > 0) else None
+                d = {"tk": tk, "sec": sec or ik, "px": px, "shares": shares}
+                if e and e.get("ebit") and shares and mc:
+                    d.update(e); d["mc_eok"] = mc / 1e8
+                    d["ev_ebit"] = ((mc / 1e8 + (e.get("net_debt") or 0)) / e["ebit"]
+                                    if e["ebit"] > 0 else None)
+                rec.append(d)
+                pbar.progress((i + 1) / len(df))
+            pbar.empty()
+            _got = sum(1 for x in rec if x.get("ebit"))
+            if _got == 0:
+                import dart_api as _Dx
+                _keyok = _Dx.available()
+                _ccok = bool(_Dx.corp_code_of("005930"))   # Samsung: map OK thì phải ra
+                if not _keyok:
+                    _why = ("❌ **Thiếu DART_API_KEY.** Local: thêm vào `.env`. "
+                            "Cloud: Settings → Secrets thêm `DART_API_KEY=...` rồi Reboot.")
+                elif not _ccok:
+                    _why = ("Key ✓ nhưng **corp-code map chưa tải** (cloud chặn tải corpCode.xml, "
+                            "hoặc bản deploy cũ thiếu `dart_corp.csv`). Đảm bảo repo có "
+                            "`dart_corp.csv` (commit `5138cdc+`) rồi Reboot.")
+                else:
+                    _why = ("Key ✓, map ✓ → có thể **DART chặn tạm (rate limit)** do gọi nhiều, "
+                            "hoặc các mã này chưa có BCTC. Đợi ít phút rồi thử lại.")
+                st.warning(f"📡 DART trả 0 mã. Chẩn đoán: Key **{'✓' if _keyok else '✗'}** · "
+                           f"corp-map(Samsung) **{'✓' if _ccok else '✗'}**. {_why}")
+            else:
+                st.caption(f"📡 DART: lấy được EV/EBIT cho **{_got}/{len(rec)}** mã "
+                           "(mã có mảng tài chính lớn — vd Hyundai Motor — net debt khổng lồ "
+                           "làm cầu nối EV→vốn chủ vỡ → để trống là đúng).")
+            byk = _dd(list)
+            for x in rec:
+                if x.get("ev_ebit") and 0 < x["ev_ebit"] <= 40:   # loại outlier
+                    byk[x["sec"]].append(x["ev_ebit"])
+            med_ev = {k: _stt.median(v) for k, v in byk.items() if len(v) >= MIN_PEERS}   # ≥3 peer
+            evb, ev_up, fc_up = [], [], []
+            for x in rec:
+                m = med_ev.get(x["sec"])
+                fv1 = ev_ebit_value(x.get("ebit"), x.get("net_debt"), x.get("shares"), m)
+                fv2 = (fcff_value(x.get("cfo"), x.get("capex"), x.get("debt"),
+                                  x.get("net_debt"), x.get("shares"), ke_v, kd,
+                                  x.get("tax_rate", 0.22), assume.g_high,
+                                  assume.years_high, gt, x.get("mc_eok"))
+                       if x.get("cfo") is not None else None)
+                pxv = x.get("px")
+                evb.append(round(x["ev_ebit"], 1) if x.get("ev_ebit") else None)
+                ev_up.append(round((fv1 / pxv - 1) * 100, 1) if (fv1 and pxv) else None)
+                fc_up.append(round((fv2 / pxv - 1) * 100, 1) if (fv2 and pxv) else None)
+                adv_detail[x["tk"]] = {
+                    "fv_ev": fv1, "fv_fcff": fv2,
+                    "ev_ebit": x.get("ev_ebit"), "net_debt": x.get("net_debt"),
+                    "ebit": x.get("ebit"), "cfo": x.get("cfo"), "capex": x.get("capex")}
+            vsum["EV/EBIT"] = evb
+            vsum["Upside EV/EBIT %"] = ev_up
+            vsum["Upside FCFF %"] = fc_up
+            st.caption("EV = Vốn hóa + Nợ ròng (DART). **EV/EBIT** so median ngành (loại outlier, cần ≥3 mã cùng ngành); "
+                       "**FCFF** = CFO + lãi×(1−thuế) − CapEx, chiết khấu WACC. Dùng EBIT (DART "
+                       "không tách khấu hao). Đóng tàu net-cash nên EV/EBIT thường thấp = rẻ.")
+
+    # Sắp xếp lại cho dễ đọc: ĐỊNH DANH → GIÁ → các KẾT QUẢ ĐỊNH GIÁ (cùng nhóm) →
+    # META (phương pháp & độ tin cậy) đẩy xuống CUỐI.
+    _vorder = ["Mã", "Tên", "Ngành", "Giá",
+               "Fair value", "Upside %", "Fwd upside %",      # nội tại + forward
+               "EV/EBIT", "Upside EV/EBIT %", "Upside FCFF %",  # EV/dòng tiền (khi bật)
+               "PP áp dụng", "Độ tin cậy", "Trạng thái"]       # chú thích → cuối
+    vsum = vsum[[c for c in _vorder if c in vsum.columns]]
+
+    _vfmt = {"Giá": "{:,.0f}", "Fair value": "{:,.0f}", "Upside %": "{:+.1f}",
+             "Fwd upside %": "{:+.1f}", "EV/EBIT": "{:.1f}",
+             "Upside EV/EBIT %": "{:+.1f}", "Upside FCFF %": "{:+.1f}"}
+    vsty = vsum.style.format({k: v for k, v in _vfmt.items() if k in vsum.columns},
+                             na_rep="—")
+    for c in ("Upside %", "Fwd upside %", "Upside EV/EBIT %", "Upside FCFF %"):
+        if c in vsum.columns:
+            vsty = vsty.map(_c_upside, subset=[c])
+    if "Độ tin cậy" in vsum.columns:
+        vsty = vsty.map(_c_conf, subset=["Độ tin cậy"])
+    if "EV/EBIT" in vsum.columns:
+        vsty = vsty.map(_c_evebit, subset=["EV/EBIT"])
+    st.dataframe(vsty, width="stretch", hide_index=True)
+    st.caption(
+        "🎨 **Chú thích màu** (các cột Upside): 🟢 xanh = **hấp dẫn** (định giá cao hơn "
+        "giá +15…60%) · 🟡 vàng = **upside >60%, cẩn trọng** (dễ do số liệu méo/chu kỳ) · "
+        "⚪ trắng = **hợp lý** (±15%) · 🔴 đỏ = **đắt/định giá thấp hơn giá** (≤ −15%). "
+        "Cột **Độ tin cậy**: 🟢 High · 🟡 Medium · 🔴 Low. "
+        "Cột **EV/EBIT**: 🟢 ≤12 (rẻ) · 🔴 ≥30 (đắt). "
+        "Màu chỉ GỢI Ý — luôn đọc kèm cảnh báo ngành chu kỳ (PP P/E?, ghi chú dưới). "
+        "Cột **Trạng thái**: ✓ = nội tại khớp phép neo peer · ○ = chưa đối chiếu được peer (ngành < 3 mã trong "
+        "danh sách) · △ = nội tại lệch peer 2–4× nên lấy 50/50 (tin cậy Thấp) · ⚪ = KCI không công bố: fair "
+        "ngoài 0,4–2,5× giá, nội tại và peer lệch >4×, hoặc thiếu giá (mô hình ROE/EPS quá khứ không giải thích "
+        "được giá: tăng trưởng, chu kỳ, tái cấu trúc). Số thô xem ở Chi tiết 1 mã.")
+
+    # ---- Chi tiết 1 mã: định giá + tài chính 4 năm/4 quý + cân đối ----
+    st.subheader("🔎 Chi tiết 1 mã")
+    names = {f"{r.ticker} · {r.name or '?'}": r for r in val_results}
+    pick = st.selectbox("Chọn mã để xem định giá + báo cáo tài chính", list(names.keys()))
+    r = names[pick]
+    drow = df[df["ticker"] == r.ticker].iloc[0].to_dict()
+
+    # Cyclical (bán dẫn/thép/đóng tàu/ô tô/pin): nạp lịch sử DART → định giá MID-CYCLE
+    # (median ROE qua chu kỳ, khử đỉnh/đáy) đáng tin hơn trailing 1 năm ở bảng nhanh.
+    try:
+        _hist = [c for c in build_annual_series(
+                    r.ticker, _fin(r.ticker)["annual"],
+                    drow.get("market_cap"), drow.get("price"), years=6)
+                 if not c.get("is_consensus")]
+        _m = _med.get(peer_key(drow), {}) if isinstance(_med, dict) else {}
+        if _hist:
+            r = value_stock(drow, assume, _m.get("pe"), _m.get("pb"), history=_hist)
+    except Exception:
+        pass
+
+    # Độ phủ dữ liệu (Naver+DART) → chặn trần confidence cho mã mới niêm yết/thiếu lịch sử
+    cov = None
+    if coverage is not None:
+        try:
+            cov = coverage.assess_coverage(r.ticker, r.sector)
+        except Exception:
+            cov = None
+    disp_conf = _cap_conf(r.confidence, cov.get("confidence_cap")) if cov else r.confidence
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Giá hiện tại", f"{r.price:,.0f}" if r.price else "—")
+    c2.metric(f"Fair value ({r.auto_method})",
+              f"{r.fair_value:,.0f}" if r.fair_value else "—",
+              f"{r.upside_pct:+.1f}%" if r.upside_pct is not None else None)
+    c3.metric("Fair value dự phóng (Fwd)",
+              f"{r.fwd_fair:,.0f}" if r.fwd_fair else "—",
+              f"{r.fwd_upside_pct:+.1f}%" if r.fwd_upside_pct is not None else None)
+    c4.metric("Độ tin cậy định giá", disp_conf,
+              "↓ chặn trần" if disp_conf != r.confidence else None)
+    if not getattr(r, "reliable", True):
+        st.warning(f"⚪ **KCI không công bố giá trị hợp lý cho mã này.** Số thô "
+                   f"{r.fair_raw:,.0f} KRW = {r.fair_raw / r.price:.2f}× giá, ngoài vùng tin cậy 0,4–2,5×: "
+                   "mô hình dựa trên ROE/EPS quá khứ không giải thích được giá hiện tại. Dùng báo cáo "
+                   "nghiên cứu (DCF có dự phóng theo mảng) thay vì con số này."
+                   if r.fair_raw and r.price else "⚪ KCI không công bố giá trị hợp lý cho mã này.")
+    elif getattr(r, "triangulated", False):
+        st.caption("△ Nội tại lệch trung vị phép neo peer quá 2× → giá trị hợp lý = 50% nội tại + 50% peer "
+                   "(tin cậy Thấp). Xem bảng phương pháp bên dưới.")
+    if cov:
+        st.caption("📊 Độ phủ dữ liệu: " + coverage.coverage_badge(cov))
+        if cov.get("is_new_listing"):
+            st.warning("🆕 Mã mới niêm yết — " + cov["note"])
+    st.markdown(f"**PP chuẩn cho ngành _{r.sector}_:** {r.primary} "
+                f"· _cross-check:_ {', '.join(r.cross)}")
+    _bv = drow.get("beta")
+    st.caption(f"📐 CAPM: **Ke = {r.ke*100:.2f}%** · Rf = {assume.rf*100:.2f}% (FRED) · "
+               f"ERP = {assume.erp*100:.2f}% · β = "
+               + (f"**{_bv:.2f}** (52T riêng mã, Blume → {0.67 * min(max(_bv, 0.5), 1.8) + 0.33:.2f})"
+                  if _bv else f"{assume.beta:.2f} (phẳng)"))
+    st.info(r.note)
+    if getattr(r, "implied_roe", None) is not None:
+        cur = f" · ROE hiện tại ~{r.roe*100:.0f}%" if r.roe else ""
+        st.caption(f"🔁 **Reverse check:** thị giá đang ngụ ý **ROE ~{r.implied_roe*100:.0f}%**{cur}. "
+                   "Chênh càng lớn = thị trường định giá tăng trưởng/siêu chu kỳ mà fair value proxy "
+                   "(P/B-ROE quá khứ) KHÔNG bắt được — đừng đọc upside âm như lệnh 'bán'.")
+    # gộp thêm EV/EBIT + FCFF (số gốc DART) nếu đã bật mục 🏗️
+    _all_methods = dict(r.methods)
+    _ad = adv_detail.get(r.ticker)
+    if _ad:
+        if _ad.get("fv_ev") is not None:
+            _all_methods["EV/EBIT (vs ngành) — DART"] = _ad["fv_ev"]
+        if _ad.get("fv_fcff") is not None:
+            _all_methods["FCFF-DCF — DART"] = _ad["fv_fcff"]
+    method_tbl = pd.DataFrame(
+        [{"Phương pháp": k, "Fair value": (round(v) if v else None),
+          "Upside %": (round((v / r.price - 1) * 100, 1) if (v and r.price) else None)}
+         for k, v in _all_methods.items()])
+    st.dataframe(method_tbl, width="stretch", hide_index=True)
+    if _ad:
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("EV/EBIT", f"{_ad['ev_ebit']:.1f}" if _ad.get("ev_ebit") else "—")
+        e2.metric("Nợ ròng (억)", f"{_ad['net_debt']:,.0f}" if _ad.get("net_debt") is not None else "—")
+        _fcff0 = ((_ad.get("cfo") or 0) - (_ad.get("capex") or 0)) if _ad.get("cfo") is not None else None
+        e3.metric("CFO − CapEx (억)", f"{_fcff0:,.0f}" if _fcff0 is not None else "—")
+        e4.metric("EBIT (억)", f"{_ad['ebit']:,.0f}" if _ad.get("ebit") else "—")
+        st.caption("EV/EBIT & FCFF từ số gốc DART. Nợ ròng âm = **net cash** (nhiều tiền hơn nợ vay). "
+                   "FCFF-DCF nhạy giả định (g/WACC) → dùng cross-check, không phải số chính.")
+    elif not dart_unavailable:
+        st.caption("💡 Bật **🏗️ Thêm EV/EBIT + FCFF** ở mục Định giá phía trên để xem thêm "
+                   "EV/EBIT & FCFF (số gốc DART) cho mã này.")
+    if r.flags:
+        st.warning("⚠️ " + " · ".join(r.flags))
+
+    # --- SOTP (định giá tổng từng phần) — bán tự động cho holdco/tập đoàn ---
+    with st.expander("🧩 SOTP — định giá tổng từng phần (cho holdco/tập đoàn)"):
+        st.caption("Nhập từng mảng: **mã niêm yết + % sở hữu** → tự lấy vốn hóa × %; "
+                   "mảng CHƯA niêm yết thì để trống mã và **nhập Giá trị (억)** tay. "
+                   "Tool cộng lại − nợ ròng holdco − chiết khấu holdco → NAV/cp.")
+        _sotp_key = "sotp_" + r.ticker
+        if _sotp_key not in st.session_state:
+            st.session_state[_sotp_key] = pd.DataFrame(
+                [{"Mảng/Công ty con": "", "Mã niêm yết": "", "% sở hữu": 100.0,
+                  "Giá trị (억) — nếu chưa niêm yết": None}])
+        edited = st.data_editor(st.session_state[_sotp_key], num_rows="dynamic",
+                                width="stretch", key=_sotp_key + "_ed",
+                                column_config={
+                                    "% sở hữu": st.column_config.NumberColumn(
+                                        format="%.1f", min_value=0.0, max_value=100.0)})
+        disc = st.slider("Chiết khấu holdco (%)", 0, 70, 40, 5,
+                         help="Korea discount điển hình 30–60%.") / 100
+
+        parts, warns = [], []
+        for _, prow in edited.iterrows():
+            nm = str(prow.get("Mảng/Công ty con") or "").strip()
+            sub = str(prow.get("Mã niêm yết") or "").strip()
+            stake = prow.get("% sở hữu")
+            manual = prow.get("Giá trị (억) — nếu chưa niêm yết")
+            if not (nm or sub or (manual and not pd.isna(manual))):
+                continue
+            if sub and stake and not pd.isna(stake):
+                mc = _mktcap_eok(sub)
+                val = round(mc * stake / 100) if mc else None
+                if mc is None:
+                    warns.append(f"không lấy được vốn hóa của '{sub}'")
+            else:
+                val = None if (manual is None or pd.isna(manual)) else float(manual)
+            parts.append({"Mảng": nm or sub, "Mã": sub,
+                          "% sở hữu": stake, "Giá trị (억)": val})
+
+        if any(p["Giá trị (억)"] for p in parts):
+            gav = sum(p["Giá trị (억)"] for p in parts if p["Giá trị (억)"])
+            ndebt = (_dart_extras(r.ticker) or {}).get("net_debt")
+            mc_h = drow.get("market_cap")
+            px_h = drow.get("price")
+            shares = (mc_h / px_h) if (mc_h and px_h) else None
+            nav = gav - (ndebt or 0)
+            sotp_eq = nav * (1 - disc)
+            fair_ps = sotp_eq * 1e8 / shares if (shares and sotp_eq > 0) else None
+            st.dataframe(pd.DataFrame(parts), width="stretch", hide_index=True)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Tổng giá trị mảng (억)", f"{round(gav):,}")
+            m2.metric("Nợ ròng holdco (억)",
+                      f"{ndebt:,}" if ndebt is not None else "— (nhập tay?)")
+            m3.metric(f"NAV sau chiết khấu {disc*100:.0f}% (억)", f"{round(sotp_eq):,}")
+            m4.metric("NAV/cp", f"{fair_ps:,.0f}" if fair_ps else "—",
+                      f"{(fair_ps/px_h-1)*100:+.1f}%" if (fair_ps and px_h) else None)
+            if ndebt is None:
+                st.caption("⚠️ Chưa có nợ ròng từ DART (cần DART_API_KEY) → đang coi = 0. "
+                           "Thêm 1 dòng 'Nợ ròng' giá trị ÂM để trừ tay nếu muốn.")
+            if warns:
+                st.warning("⚠️ " + " · ".join(warns))
+            st.caption("Lưu ý: TRÁNH đếm trùng (đừng vừa tính lợi nhuận hợp nhất của sub vừa "
+                       "cộng vốn hóa của nó). Holdco discount là giả định — chỉnh slider để soi độ nhạy.")
+        else:
+            st.info("Thêm ít nhất 1 mảng có giá trị (mã niêm yết + % sở hữu, hoặc nhập Giá trị tay).")
+
+    # --- Báo cáo tài chính ---
+    st.markdown("#### 🧾 Báo cáo tài chính & Cân đối")
+    fin = _fin(r.ticker)
+    if not fin["annual"] and not fin["quarter"]:
+        st.warning("Không lấy được báo cáo tài chính cho mã này.")
+    else:
+        mc, px = drow.get("market_cap"), drow.get("price")
+        # chuỗi 5 năm thực (DART nếu có) + 1 cột dự phóng bằng công thức
+        annual_series = build_annual_series(r.ticker, fin["annual"], mc, px, years=5,
+                                            quarters=fin["quarter"])
+        reals = [c for c in annual_series if not c.get("is_consensus")]
+        la = reals[-1] if reals else None
+        fcast = next((c for c in annual_series if c.get("is_forecast")), None)
+        feps = fcast.get("eps") if fcast else forward_eps(fin["annual"], fin["quarter"])
+        bs = balance_sheet_of(la, mc, px,
+                              la.get("bps") if la else None,
+                              la.get("debt_ratio") if la else None)
+        mc_eok = round(mc / 1e8) if mc else None
+        b1, b2, b3, b4, b5 = st.columns(5)
+        b1.metric("Tổng vốn hóa (억)", f"{mc_eok:,}" if mc_eok else "—")
+        b2.metric("Tổng tài sản (억)", f"{bs['assets']:,}" if bs["assets"] else "—")
+        b3.metric("Nợ (억)", f"{bs['liabilities']:,}" if bs["liabilities"] else "—")
+        b4.metric("Nợ/Tài sản %", f"{bs['debt_to_assets']}" if bs["debt_to_assets"] is not None else "—")
+        b5.metric("EPS dự tính", f"{feps:,.0f}" if feps else "—")
+        src = bs.get("source", "Ước tính")
+        basis = (f" · Dự phóng năm {str(fcast['period'])[:4]}: {fcast.get('_basis')}"
+                 if fcast else "")
+        _ce = consensus_eps(fin["annual"], fcast["period"]) if fcast else None
+        if _ce and feps and _ce > 0 and feps > 0:
+            basis += f" · EPS đồng thuận Naver {_ce:,.0f} (lệch {(feps / _ce - 1) * 100:+.0f}%)"
+        st.caption(f"Đơn vị 억원 = ×100 triệu KRW. Cân đối: **{src}** "
+                   f"({'số gốc DART' if src == 'DART' else 'suy từ 부채비율×VCSH — ước tính'})."
+                   f"{basis}")
+        if dart_unavailable:
+            st.caption("ℹ️ Chưa có `DART_API_KEY` trong .env → lịch sử dùng Naver (≤3 năm thực). "
+                       "Thêm key OpenDART để có đủ 5 năm thực + cân đối gốc.")
+
+        fields = ["revenue", "op_profit", "net_profit", "roe", "net_margin",
+                  "debt_ratio", "assets", "liabilities", "eps", "bps", "per", "pbr"]
+        st.markdown("**Tài chính tổng hợp — 5 năm + 4 quý gần nhất + dự phóng** "
+                    "(cột _Năm_ nền xám, cột _Quý_ nền trắng, cột _dự phóng_ nền xanh; "
+                    "quý không có Tổng tài sản/Nợ → hiển thị —)")
+        st.dataframe(
+            _fin_table_combined(annual_series,
+                                build_quarter_series(fin["quarter"], mc, px, 4),
+                                fields),
+            width="stretch")
+
+        # --- Đánh giá cân đối theo tiêu chuẩn đầu tư ---
+        asmt = assess_financials(fin["annual"], drow.get("sector"),
+                                 drow.get("industry_kr"))
+        st.markdown(f"**Đánh giá cân đối tài chính: {asmt['rating']}** — {asmt['summary']}")
+        chk = pd.DataFrame([{"Tiêu chí": c["name"], "Giá trị": c["value"],
+                             "": c["verdict"], "Ghi chú": c["note"]}
+                            for c in asmt["checks"]])
+        st.dataframe(chk, width="stretch", hide_index=True)
+
+    # ---- Download Excel (kèm sheet "Bảng" đúng như màn hình) ----
+    # Ghi vào bộ nhớ (không ra file chung trên đĩa): trên cloud nhiều người dùng cùng lúc
+    # sẽ không tải nhầm file của nhau.
+    _xbuf = io.BytesIO()
+    export_excel(df.reindex(columns=[c for c in df.columns if c in COLUMN_KR]
+                            + ["valuation_tag"]), agg, _xbuf, val=vdf, table_df=disp)
+    st.download_button("⬇️ Tải Excel", _xbuf.getvalue(), file_name="kci_screen_output.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.success(f"Xong: {len(df)} mã · {df['per'].notna().sum()} mã có P/E")
+
+
+# ============================================================================
+# 🔬 Backtest — kiểm định độ tin cậy thực nghiệm (top-level, luôn hiển thị)
+# ============================================================================
+st.divider()
+_BT_DEFAULT = ("005930\n000660\n035420\n105560\n055550\n005380\n000270\n"
+               "005490\n051910\n207940\n068270\n012450\n015760\n017670")
+
+
+def _pct(x, d=1):
+    return None if x is None else round(x * 100, d)
+
+
+def _render_bt_dart(bdf: pd.DataFrame, bres: dict):
+    """Kết quả backtest DART (lưu trong session_state → còn nguyên khi bấm chỗ khác)."""
+    import backtest_dart as _bd
+    a_, m_ = bres["auto"], bres["meta"]
+    if not m_["kospi_ok"]:
+        st.error("Không tải được chỉ số KOSPI từ Naver → không tính được lợi suất vượt thị "
+                 "trường. Thử chạy lại sau ít phút.")
+    if not m_["points_with_return"]:
+        st.warning("Không có điểm nào đủ dữ liệu (BCTC DART + giá trước và sau mốc). Kiểm tra "
+                   "danh sách mã hoặc chọn các năm cũ hơn.")
+        return
+    q = {r["q"]: r for r in a_["quintiles"]}
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Điểm có lợi suất", m_["points_with_return"],
+              f"{m_['tickers']} mã · {m_['years'][0]}–{m_['years'][1]}", delta_color="off")
+    k2.metric("IC trung bình theo năm",
+              "—" if a_["mean_ic"] is None else f"{a_['mean_ic']:.3f}",
+              None if a_.get("t_stat") is None else f"t = {a_['t_stat']:.2f}",
+              delta_color="off")
+    k3.metric("IC gộp mọi năm", "—" if a_["ic_pooled"] is None else f"{a_['ic_pooled']:.3f}")
+    k4.metric("Q1 − Q5 (vượt KOSPI, trung vị)",
+              f"{(q[1]['median_excess'] - q[5]['median_excess']) * 100:+.1f} điểm %"
+              if (1 in q and 5 in q) else "—")
+    st.markdown(_bd.report_markdown(bres))
+    if m_["no_points"]:
+        st.warning("Không tạo được điểm nào cho: " + ", ".join(m_["no_points"]) +
+                   ". Thường do DART chưa có BCTC dạng cấu trúc (tập đoàn tài chính trước năm "
+                   "tài chính 2023), mã mới niêm yết, hoặc số cổ phiếu đổi mạnh không rõ "
+                   "nguyên nhân (sáp nhập).")
+    mrows = []
+    for k, e in sorted(bres["methods"].items(), key=lambda kv: -(kv[1]["mean_ic"] or -9)):
+        if e["n"] < 10:
+            continue
+        qq = {r["q"]: r for r in e["quintiles"]}
+        mrows.append({"Phương pháp": k, "n": e["n"],
+                      "IC TB": None if e["mean_ic"] is None else round(e["mean_ic"], 3),
+                      "IC gộp": None if e["ic_pooled"] is None else round(e["ic_pooled"], 3),
+                      "Q1 vượt KOSPI %": _pct(qq.get(1, {}).get("median_excess")),
+                      "Q5 vượt KOSPI %": _pct(qq.get(5, {}).get("median_excess")),
+                      "Q1 mất >30%": _pct(qq.get(1, {}).get("loss30"), 0),
+                      "Q5 mất >30%": _pct(qq.get(5, {}).get("loss30"), 0)})
+    if mrows:
+        st.markdown("**Từng phương pháp** (Q1 = 20% mã rẻ nhất theo phương pháp đó mỗi năm; "
+                    "cột %, trung vị)")
+        st.dataframe(pd.DataFrame(mrows), width="stretch", hide_index=True)
+    crow = []
+    for c, e in bres["by_confidence"].items():
+        sub = bdf[(bdf["confidence"] == c) & bdf["excess"].notna()]
+        crow.append({"Độ tin cậy": c, "n": e["n"],
+                     "IC gộp": None if e["ic_pooled"] is None else round(e["ic_pooled"], 3),
+                     "Vượt KOSPI trung vị %": _pct(sub["excess"].median()) if len(sub) else None,
+                     "Sai lệch |fair−giá| trung vị %":
+                         _pct(sub["abs_err"].median()) if sub["abs_err"].notna().any() else None})
+    if crow:
+        st.markdown("**Theo độ tin cậy của KCI**")
+        st.dataframe(pd.DataFrame(crow), width="stretch", hide_index=True)
+    ft = bres["forecast"]["table"]
+    if ft:
+        _MV = {"revenue": "Doanh thu", "op_profit": "LN hoạt động", "net_profit": "LN thuần"}
+        st.markdown("**Dự phóng 1 năm: công thức KCI so với naive (năm sau = năm trước)**, "
+                    "so với số DART thực")
+        st.dataframe(pd.DataFrame([{
+            "Chỉ tiêu": _MV.get(r["metric"], r["metric"]),
+            "Nguồn": "KCI" if r["source"] == "kci" else "Naive", "n": r["n"],
+            "Sai số tuyệt đối trung vị %": _pct(r["median_ape"]),
+            "Thiên lệch trung vị %": _pct(r["bias_median"]),
+            "Trong ±10%": _pct(r["within_10pct"], 0)} for r in ft]),
+            width="stretch", hide_index=True)
+    with st.expander(f"Chi tiết {len(bdf)} điểm định giá"):
+        st.dataframe(bdf, width="stretch", hide_index=True)
+    st.download_button("⬇️ Tải CSV backtest", bdf.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="backtest_dart.csv", mime="text/csv", key="bt_dart_csv")
+
+
+with st.expander("🔬 Backtest — kiểm chứng định giá trên dữ liệu quá khứ (point-in-time)"):
+    st.caption("Định giá lại tại mốc 15/4 mỗi năm CHỈ bằng thông tin có lúc đó (BCTC DART năm "
+               "trước, giá, beta 78 tuần, Rf tháng trước) rồi so với lợi suất vượt KOSPI sau N "
+               "tháng. Đo: IC (upside có dự báo được lợi suất không) · ngũ phân vị · tỷ lệ mất "
+               ">30% · độ chính xác dự phóng so với naive. Đây là bằng chứng độ tin cậy.")
+    bt_src = st.radio("Nguồn dữ liệu", ["DART — số gốc point-in-time (khuyến nghị)",
+                                        "KRX qua pykrx (cần tài khoản KRX)"],
+                      horizontal=True, key="bt_src")
+    cba, cbb = st.columns(2)
+    bt_universe = cba.text_area("Mã backtest (mỗi dòng 1 mã — ticker hoặc tên)",
+                                value=_BT_DEFAULT, height=160, key="bt_universe")
+    bt_queries = [x.strip() for x in bt_universe.replace(",", "\n").splitlines() if x.strip()]
+    if bt_src.startswith("DART"):
+        _today = _dt.date.today()
+        _ylast = _today.year if _today >= _dt.date(_today.year, 4, 15) else _today.year - 1
+        bt_years = cbb.slider("Các năm làm mốc (15/4)", 2017, _ylast,
+                              (max(2017, _ylast - 5), _ylast - 1), key="bt_years")
+        bt_hd = cbb.slider("Giữ (tháng)", 3, 24, 12, 3, key="bt_h_dart")
+        cbb.caption("Lần đầu ~30–60 giây cho 15 mã × 5 năm (gọi DART), các lần sau đọc cache "
+                    "`.cache/`. ERP, g, hệ số w theo sidebar; Rf và beta lấy theo từng mốc. "
+                    "Mốc chưa đủ N tháng thì chưa có lợi suất.")
+        if dart_unavailable:
+            st.error("❌ Cần `DART_API_KEY` (miễn phí tại opendart.fss.or.kr) trong `.env` — "
+                     "cloud: Settings → Secrets.")
+        elif st.button("🚀 Chạy backtest", type="primary", key="bt_run_dart"):
+            import backtest_dart as _bd
+            bt_tks = [reg.resolve(q) for q in bt_queries]
+            _bad = [q for q, t in zip(bt_queries, bt_tks) if not t]
+            if _bad:
+                st.warning(f"Bỏ qua (không nhận ra mã): {', '.join(_bad)}")
+            _bp = st.progress(0.0, text="Đang chuẩn bị...")
+            try:
+                st.session_state["bt_dart"] = _bd.run_backtest_dart(
+                    [t for t in bt_tks if t], years=bt_years, horizon_months=bt_hd, a=assume,
+                    registry=reg, progress=lambda s, x: _bp.progress(min(max(x, 0.0), 1.0), text=s))
+            except Exception as e:
+                st.error(f"Lỗi backtest: {e}")
+            _bp.empty()
+        if st.session_state.get("bt_dart"):
+            _render_bt_dart(*st.session_state["bt_dart"])
+    else:
+        try:
+            import backtest as _bt
+        except Exception as _e:
+            _bt = None
+            st.error(f"Không nạp được backtest.py: {_e}")
+        if _bt is not None:
+            bt_asof = cbb.text_input("Mốc as-of (YYYY-MM-DD, cách nhau dấu phẩy)",
+                                     value="2023-06-30, 2023-12-29, 2024-06-28", key="bt_asof")
+            bt_h = cbb.slider("Horizon (tháng)", 3, 24, 12, 3, key="bt_h_krx")
+            cbb.caption("⚠️ Chạy mất vài phút. Cần mạng KRX (pykrx fundamental) và tài khoản "
+                        "KRX: `KRX_ID` / `KRX_PW` trong .env (cloud: Secrets).")
+            if st.button("🚀 Chạy backtest", type="primary", key="bt_run_krx"):
+                tickers = [x.zfill(6) for x in bt_queries]
+                asofs = [x.strip() for x in bt_asof.split(",") if x.strip()]
+                bdf, bm = None, None
+                # Kiểm tra nguồn trước: KRX hiện bắt đăng nhập mới trả P/E–EPS–BPS lịch sử;
+                # thiếu tài khoản thì mọi điểm đều rỗng → báo ngay thay vì chạy vài phút ra 0 điểm.
+                with st.spinner("Kiểm tra nguồn dữ liệu KRX..."):
+                    try:
+                        _probe = _bt._asof_fundamental(tickers[0], asofs[0]) \
+                            if (tickers and asofs) else None
+                    except Exception:
+                        _probe = None
+                if _probe is None:
+                    st.error("❌ KRX không trả số liệu P/E–EPS–BPS lịch sử (pykrx báo cần đăng "
+                             "nhập). Cách sửa: tạo tài khoản miễn phí tại data.krx.co.kr rồi thêm "
+                             "`KRX_ID=...` và `KRX_PW=...` vào `.env` (cloud: Settings → "
+                             "Secrets), khởi động lại app. Hoặc chọn nguồn **DART** ở trên.")
+                else:
+                    with st.spinner(f"Đang chạy {len(tickers)}×{len(asofs)} điểm..."):
+                        try:
+                            bdf, bm = _bt.run_backtest(tickers, asofs, horizon_months=bt_h,
+                                                       a=assume, verbose=False)
+                        except Exception as e:
+                            st.error(f"Lỗi backtest: {e}")
+                if bm and bm.get("n"):
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("Số điểm", bm["n"])
+                    k2.metric("Sai số (median)", f"{bm.get('median_abs_error')}")
+                    k3.metric("IC (Spearman)", f"{bm.get('IC_spearman')}")
+                    k4.metric("Spread rẻ−đắt",
+                              f"{bm.get('spread_rẻ_trừ_đắt', '—')}")
+                    st.markdown(_bt.report_markdown(bdf, bm, bt_h))
+                    st.dataframe(bdf, width="stretch", hide_index=True)
+                    st.download_button(
+                        "⬇️ Tải CSV backtest",
+                        bdf.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="backtest_results.csv", mime="text/csv")
+                elif bm is not None:
+                    st.warning("Không thu được điểm dữ liệu nào — kiểm tra mạng KRX, "
+                               "danh sách mã, hoặc mốc as-of.")

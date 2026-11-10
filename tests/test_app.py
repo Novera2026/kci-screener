@@ -12,10 +12,12 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP = os.path.join(ROOT, "app.py")
+APP = os.path.join(ROOT, "app.py")                    # bộ điều hướng st.navigation
+VIEW = os.path.join(ROOT, "views", "tong_hop.py")     # trang "Định giá tổng hợp" (trước 11/11/2026 nằm ở app.py)
 # toàn bộ module + các trang (pages/) — trang phụ cũng chạy trên cloud
 MODULES = sorted(os.path.relpath(p, ROOT) for p in
-                 glob.glob(os.path.join(ROOT, "*.py")) + glob.glob(os.path.join(ROOT, "pages", "*.py")))
+                 glob.glob(os.path.join(ROOT, "*.py")) + glob.glob(os.path.join(ROOT, "pages", "*.py"))
+                 + glob.glob(os.path.join(ROOT, "views", "*.py")))
 PAGES = sorted(glob.glob(os.path.join(ROOT, "pages", "*.py")))
 
 
@@ -57,7 +59,7 @@ def test_hot_news_page_boots():
 @pytest.mark.skipif(os.environ.get("KCI_E2E") != "1",
                     reason="E2E cần mạng (Naver/DART/FRED): chạy  KCI_E2E=1 pytest")
 def test_full_screen_run():
-    at = AppTest.from_file(APP, default_timeout=300).run()
+    at = AppTest.from_file(VIEW, default_timeout=300).run()
     at.text_area(key="raw_input").set_value("005930\n000660\n105560")
     at = next(b for b in at.button if "Cào" in b.label).click().run()
     assert not at.exception, at.exception
@@ -79,7 +81,7 @@ def test_full_screen_run():
 @pytest.mark.skipif(os.environ.get("KCI_E2E") != "1",
                     reason="Backtest gọi DART/Naver/FRED thật: chạy  KCI_E2E=1 pytest")
 def test_backtest_dart_runs_in_app():
-    at = AppTest.from_file(APP, default_timeout=300).run()
+    at = AppTest.from_file(VIEW, default_timeout=300).run()
     at.text_area(key="bt_universe").set_value("005930\nSK Hynix\n005380")
     at.slider(key="bt_years").set_value((2023, 2024))
     at = at.button(key="bt_run_dart").click().run()
@@ -93,4 +95,23 @@ def test_screening_page_boots():
     """Trang 🔍 chỉ gọi mạng khi bấm Lọc rẻ."""
     page = next(p for p in PAGES if "Sang_loc" in p)
     at = AppTest.from_file(page, default_timeout=120).run()
+    assert not at.exception, at.exception
+
+
+def test_navigation_names_and_order():
+    """Thanh bên: tên tiếng Việt, Sàng lọc đứng trước Định giá, URL /Dinh_gia giữ nguyên."""
+    import ast
+    tree = ast.parse(open(APP, encoding="utf-8").read())
+    pages = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "Page"]
+    titles = [next(k.value.value for k in p.keywords if k.arg == "title") for p in pages]
+    assert titles == ["Định giá tổng hợp", "Siêu cổ phiếu", "Tin nóng", "Sàng lọc", "Định giá"]
+    urls = {next(k.value.value for k in p.keywords if k.arg == "title"):
+            next((k.value.value for k in p.keywords if k.arg == "url_path"), "") for p in pages}
+    assert urls["Định giá"] == "Dinh_gia" and urls["Sàng lọc"] == "Sang_loc"
+    for p in pages:                                     # mọi trang khai báo đều tồn tại
+        assert os.path.exists(os.path.join(ROOT, p.args[0].value))
+
+
+def test_tong_hop_view_boots():
+    at = AppTest.from_file(VIEW, default_timeout=120).run()
     assert not at.exception, at.exception
