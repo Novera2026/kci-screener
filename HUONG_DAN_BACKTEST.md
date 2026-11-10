@@ -109,3 +109,45 @@ python backtest_pipeline.py 005930 000660 ...
 
 Giới hạn: 78 mã đang niêm yết và được chọn theo quy mô **hiện tại** (thiên lệch sống sót + chọn vũ trụ nhìn trước),
 lợi suất chỉ tính giá, chỉ 5 năm, không có BCTC quý point-in-time.
+
+---
+
+## Backtest các bộ tiêu chuẩn sàng lọc — `backtest_presets.py` (10/11/2026)
+
+```bash
+python backtest_presets.py 200      # top 200 vốn hóa hiện tại, mốc 15/4/2021–2025
+```
+
+Mỗi mốc: tầng 1 trên lát cắt thị trường PIT, tầng 2 trên BCTC DART đầy đủ năm Y−1. Danh mục gồm các mã qua lọc, chia
+đều tỷ trọng, giữ 12 tháng. Kết quả được so với **trung bình chính vũ trụ** cùng năm: vũ trụ là các mã lớn *hiện tại*,
+nên so với KOSPI sẽ bị thổi phồng bởi thiên lệch sống sót.
+
+| Bộ (tầng 1+2) | Vượt vũ trụ/năm | t | Năm thắng | Vượt KOSPI/năm | Mã/năm |
+|---|---:|---:|---:|---:|---:|
+| KCI | −4,2% | −0,80 | 1/5 | +11,4% | 20 |
+| Graham phòng thủ | −11,6% | −1,31 | 1/5 | +4,1% | 19 |
+| Số Graham | −6,7% | −1,04 | 2/5 | +8,9% | 61 |
+| **Value-up (P/B thấp, ROE cao)** | **+2,7%** | 0,55 | 3/5 | +18,3% | 13 |
+| Cổ tức cao | −1,9% | −0,12 | 2/5 | +13,7% | 13 |
+| Magic Formula | −0,7% | −0,11 | 2/5 | +14,9% | 29 |
+| Piotroski | −23,9% | −1,06 | 2/4 | −9,8% | 4 |
+
+**Kết luận:** chưa bộ nào thắng vũ trụ có ý nghĩa thống kê (|t| < 2). Tầng 2 (BCTC) cải thiện đa số bộ so với chỉ tầng 1
+(Graham −14,7% → −11,6%; Value-up −2,0% → +2,7%; cổ tức −7,1% → −1,9%). Năm 2025 mọi bộ "rẻ" thua mạnh vì loại các mã
+tăng trưởng đắt (bán dẫn, quốc phòng).
+
+**Giới hạn:**
+- Vũ trụ chọn theo quy mô hiện tại, nên phần nào thiên vị các mã đã tăng mạnh.
+- Lợi suất chỉ tính giá, bất lợi cho bộ cổ tức.
+- 5 năm là mẫu nhỏ.
+
+Muốn kiểm chặt hơn cần vũ trụ point-in-time (top 200 *tại từng mốc*).
+
+## FCFF-DCF không vào kết luận (10/11/2026)
+
+Thử đưa FCFF-DCF (sales-to-capital, `dcf.py`) làm mô hình chính:
+- IC của kết luận công bố tụt từ **+0,106 (t 3,21) xuống +0,033 (t 0,49)**.
+- FCFF riêng có IC **−0,058**.
+
+Vì vậy FCFF-DCF và EV/EBIT 4 quý chỉ là mô hình **đối chiếu**. Bảng tính chi tiết vẫn hiện trên trang 🧮. Sau khi
+chuyển FCFF về đối chiếu, IC trở lại +0,106.

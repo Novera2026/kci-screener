@@ -115,7 +115,89 @@ def foreign_profile(code: str) -> Optional[dict]:
             # ROE ≈ P/B ÷ P/E (cùng giá, LN và vốn chủ gần nhất)
             "ROE %": (pb / pe * 100) if (pe and pb and pe > 0) else None,
             "Tỷ suất cổ tức %": _f(info.get("dividendYieldRatio")),
-            "Năm BCTC": cols[-1][:4] if cols else ""}
+            "Năm BCTC": cols[-1][:4] if cols else "",
+            "_quarter": quarter_profile_foreign(code, b.get("stockName"), mc, _world_quarter(code))}
+
+
+# ---------------------------------------------------------------------------- QUÝ gần nhất
+Q_METRICS = ["DT YoY %", "LN HĐ YoY %", "Biên LN HĐ quý %", "Biên LN ròng quý %"]
+
+
+def _yoy(a, b):
+    return (a / b - 1) * 100 if (a is not None and b is not None and b > 0) else None
+
+
+def quarter_profile_domestic(row: dict, quarters: list[dict]) -> Optional[dict]:
+    """Quý THỰC gần nhất (Naver) + cùng quý năm trước + 4 quý gần nhất (TTM). Đơn vị 억원."""
+    q = [c for c in (quarters or []) if not c.get("is_consensus") and str(c.get("period", ""))[:6].isdigit()]
+    if not q:
+        return None
+    last = q[-1]
+    p = str(last["period"])
+    prev = next((c for c in q if str(c["period"])[:6] == f"{int(p[:4]) - 1}{p[4:6]}"), None)
+    ttm = q[-4:] if len(q) >= 4 else None
+    ni_ttm = sum((c.get("ctrl_net") if c.get("ctrl_net") is not None else (c.get("net_profit") or 0)) for c in ttm) \
+        if ttm else None
+    mc = V._num(row.get("market_cap"))
+    rev, op, ni = last.get("revenue"), last.get("op_profit"), last.get("net_profit")
+    return {"Mã": row.get("ticker"), "Tên": row.get("name"), "Thị trường": "🇰🇷 Hàn Quốc",
+            "Quý": f"{p[:4]}.{p[4:6]}", "DT quý (억)": rev, "DT YoY %": _yoy(rev, (prev or {}).get("revenue")),
+            "LN HĐ quý (억)": op, "LN HĐ YoY %": _yoy(op, (prev or {}).get("op_profit")),
+            "Biên LN HĐ quý %": op / rev * 100 if (op is not None and rev) else None,
+            "Biên LN ròng quý %": ni / rev * 100 if (ni is not None and rev) else None,
+            "DT 4 quý (억)": sum(c.get("revenue") or 0 for c in ttm) if ttm else None,
+            "P/E 4 quý": (mc / (ni_ttm * 1e8)) if (mc and ni_ttm and ni_ttm > 0) else None}
+
+
+def _world_quarter(code: str) -> Optional[dict]:
+    try:
+        a = requests.get(f"{_WORLD}/{code}/finance/quarter", headers=_H, timeout=_TIMEOUT).json()
+    except Exception:
+        return None
+    cols = [t["key"] for t in a.get("trTitleList", []) if t.get("isConsensus") == "N"]
+    rows = {r["title"]: r["columns"] for r in a.get("rowList", [])}
+
+    def val(title, k):
+        return _f(((rows.get(title) or {}).get(k) or {}).get("krw"))
+    return {"cols": cols, "rev": {k: val("매출액", k) for k in cols}, "ebit": {k: val("EBIT", k) for k in cols},
+            "ni": {k: val("당기순이익", k) for k in cols}}
+
+
+def quarter_profile_foreign(code: str, name: str, mc_krw: Optional[float], wq: Optional[dict]) -> Optional[dict]:
+    """Quý gần nhất của mã nước ngoài (kỳ kế toán có thể lệch lịch: Micron kết thúc quý vào tháng 8/11/2/5)."""
+    if not wq or not wq["cols"]:
+        return None
+    import datetime as dt
+    cols = wq["cols"]
+    k = cols[-1]
+
+    def d(x):
+        try:
+            return dt.date(int(x[:4]), int(x[5:7]), int(x[8:10]))
+        except Exception:
+            return None
+    kd = d(k)
+    prev = next((c for c in cols[:-1] if kd and d(c) and 320 <= (kd - d(c)).days <= 410), None)
+    rev, op, ni = wq["rev"].get(k), wq["ebit"].get(k), wq["ni"].get(k)
+    ttm = cols[-4:] if len(cols) >= 4 else None
+    ni_ttm = sum(wq["ni"].get(c) or 0 for c in ttm) if ttm else None
+    return {"Mã": code, "Tên": name, "Thị trường": "🌐 nước ngoài", "Quý": k[:7],
+            "DT quý (억)": rev, "DT YoY %": _yoy(rev, wq["rev"].get(prev) if prev else None),
+            "LN HĐ quý (억)": op, "LN HĐ YoY %": _yoy(op, wq["ebit"].get(prev) if prev else None),
+            "Biên LN HĐ quý %": op / rev * 100 if (op is not None and rev) else None,
+            "Biên LN ròng quý %": ni / rev * 100 if (ni is not None and rev) else None,
+            "DT 4 quý (억)": sum(wq["rev"].get(c) or 0 for c in ttm) if ttm else None,
+            "P/E 4 quý": (mc_krw / (ni_ttm * 1e8)) if (mc_krw and ni_ttm and ni_ttm > 0) else None}
+
+
+def quarter_medians(profiles: list[dict]) -> dict:
+    out = {}
+    for m in Q_METRICS + ["P/E 4 quý"]:
+        vals = [p.get(m) for p in profiles if p.get(m) is not None]
+        if m == "P/E 4 quý":
+            vals = [v for v in vals if 0 < v <= PE_MAX]
+        out[m] = _median(vals) if len(vals) >= 2 else None
+    return out
 
 
 # ---------------------------------------------------------------------------- danh sách đối thủ
@@ -200,7 +282,8 @@ def domestic_candidates(ticker: str, industry_kr: Optional[str], registry, n: in
 
 def build_peer_set(row: dict, annual: list[dict], bucket: Optional[str], dom_rows: list[dict],
                    dom_fins: dict, foreign_codes: Optional[list[str]] = None,
-                   foreign_profiles: Optional[list[dict]] = None) -> dict:
+                   foreign_profiles: Optional[list[dict]] = None,
+                   self_quarters: Optional[list[dict]] = None) -> dict:
     """Ghép đủ bước 1: hồ sơ mã + đối thủ trong nước (dom_rows/dom_fins đã tải) + nước ngoài (truyền sẵn
     foreign_profiles, hoặc tải theo foreign_codes / danh sách mặc định của nhóm ngành). Trả dict thuần JSON."""
     self_p = domestic_profile(row, annual)
@@ -211,9 +294,16 @@ def build_peer_set(row: dict, annual: list[dict], bucket: Optional[str], dom_row
     else:
         fr = fetch_foreign(foreign_codes if foreign_codes is not None else FOREIGN_PEERS.get(bucket or "", []))
     fr_ok = [p for p in fr if _plausible(p)]
+    self_q = quarter_profile_domestic(row, self_quarters or [])
+    dom_q = [x for x in (quarter_profile_domestic(r, (dom_fins.get(r["ticker"]) or {}).get("quarter", []))
+                         for r in dom_rows if r.get("ticker") != row.get("ticker")) if x]
+    for_q = [p["_quarter"] for p in fr if p.get("_quarter")]
+    fr = [{k: v for k, v in p.items() if k != "_quarter"} for p in fr]
     med_dom, med_for = peer_medians(dom), peer_medians(fr_ok)
     return {"asof": _dt.datetime.now().isoformat(timespec="seconds"), "bucket": bucket, "self": self_p,
             "domestic": dom, "foreign": fr, "foreign_excluded": [p["Mã"] for p in fr if not _plausible(p)],
             "median_domestic": med_dom, "median_foreign": med_for,
             "position": position(self_p, dom, med_dom, med_for),
-            "foreign_discount": foreign_discount(self_p, med_for)}
+            "foreign_discount": foreign_discount(self_p, med_for),
+            "quarter": {"self": self_q, "domestic": dom_q, "foreign": for_q,
+                        "median_domestic": quarter_medians(dom_q), "median_foreign": quarter_medians(for_q)}}

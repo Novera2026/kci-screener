@@ -262,6 +262,7 @@ def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int 
     # Năm 2+ là GIẢ ĐỊNH, không phải số công bố: trượt từ g năm 1 đã kẹp [-20%; +30%] về g dài hạn — đợt
     # tăng vọt của năm 1 (bằng chứng quý thực) không được ngoại suy sang các năm sau.
     g_from = min(max(g1, -0.20), 0.30)
+    conv = conversion_ratio(reals)
     out = []
     for t in range(1, years + 1):
         k = (t - 1) / (years - 1) if years > 1 else 1.0
@@ -272,7 +273,11 @@ def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int 
             m = (m1_rest + (m_mid - m1_rest) * k) if fade_margin else m1_rest
             if not financial:
                 m = min(m, FC_MARGIN_MAX)
+        # biên LN HĐ (cho EBIT/FCFF): năm 1 theo dự phóng công thức nếu có; còn lại = biên ròng ÷ tỷ lệ LN thuần/LN HĐ
+        # của chính mã (cùng tỷ lệ dùng để nhận diện lãi một lần)
+        opm = (fc1["op_profit"] / fc1["revenue"]) if (t == 1 and fc1.get("op_profit") is not None) else m / conv
         out.append({"Năm": str(y0 + t), "Tăng trưởng DT %": round(g * 100, 1),
+                    "Biên LN HĐ %": round(opm * 100, 2),
                     "Biên LN ròng %": round(m * 100, 2), "Tỷ lệ cổ tức %": round(payout * 100, 1)})
     if out:
         out[0]["_basis"] = fc1.get("_basis", "")
@@ -290,19 +295,22 @@ def run_forecast(series: list[dict], row: dict, drivers: list[dict]) -> list[dic
     bps = _num(row.get("bps")) or _num(reals[-1].get("bps"))
     if not shares or not rev or bps is None:
         return []
+    conv = conversion_ratio(reals)
     out = []
     for d in drivers:
         g = (_num(d.get("Tăng trưởng DT %")) or 0.0) / 100
         m = (_num(d.get("Biên LN ròng %")) or 0.0) / 100
         po = min(max((_num(d.get("Tỷ lệ cổ tức %")) or 0.0) / 100, 0.0), 1.0)
+        opm = _num(d.get("Biên LN HĐ %"))
+        opm = opm / 100 if opm is not None else m / conv
         bps_open = bps
         rev = rev * (1 + g)
         np_ = rev * m
         eps = np_ * 1e8 / shares
         dps = max(eps * po, 0.0)
         bps = bps + eps - dps
-        out.append({"Năm": d.get("Năm"), "Doanh thu (억)": rev, "LN ròng (억)": np_,
-                    "Tăng trưởng DT %": g * 100, "Biên LN ròng %": m * 100,
+        out.append({"Năm": d.get("Năm"), "Doanh thu (억)": rev, "LN HĐ (억)": rev * opm, "LN ròng (억)": np_,
+                    "Tăng trưởng DT %": g * 100, "Biên LN HĐ %": opm * 100, "Biên LN ròng %": m * 100,
                     "EPS": eps, "DPS": dps, "BPS đầu kỳ": bps_open, "BPS cuối kỳ": bps,
                     "ROE %": eps / bps_open * 100 if bps_open and bps_open > 0 else None})
     return out
@@ -376,27 +384,39 @@ def rim_explicit(bps0: Optional[float], fc: list[dict], ke: float, w: float = 0.
     Trả {value, tv_share} hoặc None (B0 ≤ 0 / không có dự phóng / giá trị ≤ 0)."""
     if not fc or not bps0 or bps0 <= 0:
         return None
-    pv, ri = 0.0, 0.0
+    pv, ri, rows = 0.0, 0.0, []
     for t, f in enumerate(fc, 1):
         ri = f["EPS"] - ke * f["BPS đầu kỳ"]
-        pv += ri / (1 + ke) ** t
+        df = 1 / (1 + ke) ** t
+        pv += ri * df
+        rows.append({"Năm": f.get("Năm", t), "BPS đầu kỳ": f["BPS đầu kỳ"], "EPS": f["EPS"], "ROE %": f.get("ROE %"),
+                     "Ke × BPS": ke * f["BPS đầu kỳ"], "Lợi nhuận thặng dư (RI)": ri, "Hệ số chiết khấu": df,
+                     "PV RI": ri * df})
     n = len(fc)
     tv = ri * w / (1 + ke - w) / (1 + ke) ** n
     v = bps0 + pv + tv
     if not math.isfinite(v) or v <= 0:
         return None
-    return {"value": v, "tv_share": abs(tv) / v}
+    return {"value": v, "tv_share": abs(tv) / v, "rows": rows,
+            "bridge": [{"Khoản mục": "BPS hiện tại", "KRW/cp": bps0}, {"Khoản mục": "+ Σ PV RI", "KRW/cp": pv},
+                       {"Khoản mục": f"+ PV RI cuối kỳ (w = {w})", "KRW/cp": tv},
+                       {"Khoản mục": "= Giá trị/cp", "KRW/cp": v}]}
 
 
 def ddm_explicit(fc: list[dict], ke: float, g: float) -> Optional[dict]:
     """DDM tường minh: Σ DPS_t/(1+Ke)^t + DPS_N(1+g)/(Ke−g)/(1+Ke)^N. Cần cổ tức > 0 năm cuối."""
     if not fc or ke <= g or fc[-1]["DPS"] <= 0:
         return None
-    pv = sum(f["DPS"] / (1 + ke) ** t for t, f in enumerate(fc, 1))
+    rows = [{"Năm": f.get("Năm", t), "DPS": f["DPS"], "Hệ số chiết khấu": 1 / (1 + ke) ** t,
+             "PV DPS": f["DPS"] / (1 + ke) ** t} for t, f in enumerate(fc, 1)]
+    pv = sum(r["PV DPS"] for r in rows)
     n = len(fc)
     tv = fc[-1]["DPS"] * (1 + g) / (ke - g) / (1 + ke) ** n
     v = pv + tv
-    return {"value": v, "tv_share": tv / v} if v > 0 else None
+    return ({"value": v, "tv_share": tv / v, "rows": rows,
+             "bridge": [{"Khoản mục": "Σ PV cổ tức", "KRW/cp": pv},
+                        {"Khoản mục": f"+ PV cổ tức cuối kỳ (g = {g * 100:.1f}%)", "KRW/cp": tv},
+                        {"Khoản mục": "= Giá trị/cp", "KRW/cp": v}]} if v > 0 else None)
 
 
 # ============================================================================ peer
@@ -675,7 +695,23 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
         {"name": "P/E × trung vị peer", "value": base.methods.get("P/E vs median ngành"), "role": "cross"},
         {"name": "P/B × trung vị peer", "value": base.methods.get("P/B vs median ngành"), "role": "cross"},
     ]
-    if extras.get("cfo") is not None and mc and price:
+    fs = D.get("fs_full")
+    shares = _shares_estimate(reals, mc, price) if reals else None
+    fcff_m = evm = None
+    if fs and not idn["financial"] and fc and shares and mc:
+        import dcf as _dcf
+        fcff_m = _dcf.fcff_dcf(fc, fs, ke, a.rf, coc["g_term"], mc, shares)
+        evm = _dcf.ev_ebit_ttm(_dcf.ttm_ebit(D.get("quarters")), fs, D.get("peer_ev") or [], shares)
+        if fcff_m:
+            # ĐỐI CHIẾU, không vào trung vị kết luận: backtest point-in-time 2021–25 (78 mã) — đưa FCFF-DCF làm mô
+            # hình chính kéo IC kết luận từ +0,106 (t 3,2) xuống +0,033 (t 0,5); FCFF riêng IC −0,058. Bảng tính vẫn
+            # hiện đầy đủ để đọc cấu trúc dòng tiền.
+            cands.append({"name": f"FCFF-DCF ({len(fc)} năm dự phóng)", "value": fcff_m["value"],
+                          "role": "cross", "blocked": fc_block})
+        if evm:
+            cands.append({"name": f"EV/EBIT 4 quý × trung vị {evm['n']} đối thủ", "value": evm["value"],
+                          "role": "cross"})
+    if not fcff_m and extras.get("cfo") is not None and mc and price:
         fcff = V.fcff_value(extras.get("cfo"), extras.get("capex"), extras.get("debt"), extras.get("net_debt"),
                             mc / price, ke, coc["kd"], coc["tax"], a.g_high, a.years_high, coc["g_term"],
                             mc / 1e8)
@@ -689,6 +725,7 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
     rec = reconcile(price, cands, anchor, caps)
     fc_model = ddm if idn["dividend_model"] else rim
     return {"fc": fc, "fg": fg, "base": base, "anchor": anchor, "rim": rim, "ddm": ddm, "rec": rec,
+            "fcff": fcff_m, "ev_ebit": evm, "shares": shares,
             "coc": coc, "pm": pm, "fc_model": fc_model["value"] if fc_model else None,
             "fc_model_name": "DDM tường minh" if idn["dividend_model"] else "RIM tường minh"}
 

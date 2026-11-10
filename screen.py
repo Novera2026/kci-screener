@@ -383,3 +383,17 @@ def stage2_check(res: dict, key: str, overrides: Optional[dict] = None) -> tuple
     if crit.get("no_loss_years") and res.get("Có năm lỗ"):
         why.append("có năm lỗ trong dữ liệu")
     return (not why, "; ".join(why))
+
+
+# Kết quả backtest_presets.py (10/11/2026): top 200 vốn hóa hiện tại, mốc 15/4/2021–2025, giữ 12 tháng, tầng 1+2,
+# danh mục chia đều. vs_univ = vượt trung bình vũ trụ cùng năm (TB/năm); t = t-thống kê theo năm; |t| < 2 = chưa có
+# ý nghĩa thống kê. Hiện cạnh mỗi bộ trên trang 🔍 để người dùng thấy bằng chứng trước khi chọn.
+BACKTEST_2021_2025 = {
+    "kci": {"vs_univ": -0.0421, "t": -0.8, "years_beat": "1/5", "vs_kospi": 0.1141, "avg_n": 20.4, "loss30": 0.095},
+    "graham": {"vs_univ": -0.1157, "t": -1.31, "years_beat": "1/5", "vs_kospi": 0.0406, "avg_n": 19.4, "loss30": 0.007},
+    "graham_number": {"vs_univ": -0.0674, "t": -1.04, "years_beat": "2/5", "vs_kospi": 0.0889, "avg_n": 61.4, "loss30": 0.054},
+    "valueup": {"vs_univ": 0.0267, "t": 0.55, "years_beat": "3/5", "vs_kospi": 0.1829, "avg_n": 12.6, "loss30": 0.027},
+    "dividend": {"vs_univ": -0.0188, "t": -0.12, "years_beat": "2/5", "vs_kospi": 0.1375, "avg_n": 12.8, "loss30": 0.008},
+    "magic": {"vs_univ": -0.0069, "t": -0.11, "years_beat": "2/5", "vs_kospi": 0.1494, "avg_n": 28.8, "loss30": 0.097},
+    "piotroski": {"vs_univ": -0.2386, "t": -1.06, "years_beat": "2/4", "vs_kospi": -0.0985, "avg_n": 3.6, "loss30": 0.0},
+}

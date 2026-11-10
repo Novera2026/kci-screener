@@ -23,6 +23,7 @@ except Exception:
     pass
 
 import analysis as AN                                 # noqa: E402
+import dcf as DCF                                      # noqa: E402
 import dossier as DS                                   # noqa: E402
 import peers as PR                                     # noqa: E402
 import pipeline as P                                   # noqa: E402
@@ -84,8 +85,26 @@ def _load(tk: str, n_peers: int) -> dict:
         fs_full = AN.fetch_full(tk)
     except Exception:
         fs_full = None
+    # EV/EBIT đối thủ trong nước: EV = vốn hóa + nợ ròng + thiểu số (DART), EBIT = LN HĐ năm gần nhất (Naver)
+    peer_ev = []
+    if peers:
+        def _ev(r):
+            try:
+                pfs = AN.fetch_full(r["ticker"])
+            except Exception:
+                pfs = None
+            ann = [c for c in (peer_fins.get(r["ticker"]) or {}).get("annual", []) if not c.get("is_consensus")]
+            # EBIT 4 quý gần nhất (cùng cơ sở với mã đang định giá); thiếu quý → EBIT năm gần nhất
+            ebit = DCF.ttm_ebit((peer_fins.get(r["ticker"]) or {}).get("quarter", []))
+            if ebit is None:
+                ebit = ann[-1].get("op_profit") if ann else None
+            return {"Mã": r["ticker"], "Tên": r.get("name"), "EBIT 4 quý (억)": ebit,
+                    "EV/EBIT": DCF.ev_ebit_of(r.get("market_cap"), ebit, pfs)}
+        with _cf.ThreadPoolExecutor(max_workers=4) as ex:
+            peer_ev = list(ex.map(_ev, peers))
     return {"row": row, "annual": fin.get("annual", []), "quarters": fin.get("quarter", []), "series": series,
-            "beta": beta, "extras": extras, "peers": peers, "peer_fins": peer_fins, "fs_full": fs_full}
+            "beta": beta, "extras": extras, "peers": peers, "peer_fins": peer_fins, "fs_full": fs_full,
+            "peer_ev": peer_ev}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -150,7 +169,7 @@ foreign_codes = tuple(c.strip() for c in _fcodes.split(",") if c.strip())
 with st.spinner("Đang lấy đối thủ nước ngoài…"):
     foreign = _foreign(foreign_codes) if foreign_codes else []
 peer_set = PR.build_peer_set(row, D.get("annual", []), idn["bucket"], peer_rows, D.get("peer_fins", {}),
-                             foreign_profiles=foreign)
+                             foreign_profiles=foreign, self_quarters=quarters)
 decomp = AN.decompose(fs_full) if fs_full else None
 quality = AN.quality(fs_full, (mc / 1e8) if mc else None, idn["bucket"]) if fs_full else None
 from financials import assess_financials  # noqa: E402
@@ -180,7 +199,7 @@ evidence = P.reported_evidence(series, quarters)
 
 D_extra: list = []       # mô hình chuyên ngành thêm vào ⑥ (tab 🏭 điền)
 D_eval = {"row": row, "series": series, "quarters": quarters, "extras": extras, "peers": peer_rows, "ticker": tk,
-          "extra": D_extra}
+          "extra": D_extra, "fs_full": fs_full, "peer_ev": D.get("peer_ev") or []}
 LOG_PATH = os.path.join(_ROOT, "valuation_log.csv")
 
 
@@ -347,7 +366,8 @@ with T["4"]:
         ed = st.data_editor(pd.DataFrame(drv_default), key=drv_key, hide_index=True, width="stretch",
                             disabled=["Năm"],
                             column_config={c: st.column_config.NumberColumn(c, format="%.2f")
-                                           for c in ("Tăng trưởng DT %", "Biên LN ròng %", "Tỷ lệ cổ tức %")})
+                                           for c in ("Tăng trưởng DT %", "Biên LN HĐ %", "Biên LN ròng %",
+                                                     "Tỷ lệ cổ tức %")})
         drivers = ed.to_dict("records")
 
 EV = P.evaluate(D_eval, A, drivers, idn, dq, evidence)
@@ -355,12 +375,38 @@ fc, fg, base, anchor, rim, ddm, rec = (EV[k] for k in ("fc", "fg", "base", "anch
 
 with T["4"]:
     if fc:
+        st.markdown("**Dự phóng năm**")
         fdf = pd.DataFrame(fc)
-        st.dataframe(fdf.style.format({c: "{:,.0f}" for c in ("Doanh thu (억)", "LN ròng (억)", "EPS", "DPS",
-                                                              "BPS đầu kỳ", "BPS cuối kỳ")}
+        st.dataframe(fdf.style.format({c: "{:,.0f}" for c in ("Doanh thu (억)", "LN HĐ (억)", "LN ròng (억)", "EPS",
+                                                              "DPS", "BPS đầu kỳ", "BPS cuối kỳ")}
                                       | {c: "{:+.1f}" for c in ("Tăng trưởng DT %",)}
-                                      | {c: "{:.1f}" for c in ("Biên LN ròng %", "ROE %")}, na_rep="—"),
+                                      | {c: "{:.1f}" for c in ("Biên LN HĐ %", "Biên LN ròng %", "ROE %")}, na_rep="—"),
                      hide_index=True, width="stretch")
+        st.markdown("**Dự phóng quý** (2 năm đầu)")
+        qfc = DCF.quarter_forecast(quarters, fc, EV.get("shares"))
+        if qfc:
+            # đồng thuận Naver (cột isConsensus) chỉ để đối chiếu, KHÔNG dùng trong mô hình
+            _cns = {f"{str(c['period'])[:4]}.{str(c['period'])[4:6]}": c.get("eps") for c in quarters
+                    if c.get("is_consensus") and str(c.get("period", ""))[:6].isdigit()}
+            for r_ in qfc:
+                r_["EPS đồng thuận (Naver)"] = _cns.get(r_["Quý"])
+            _qdf = pd.DataFrame(qfc)
+
+            def _qs(r_):
+                return ["background-color:#eef6ff" if r_["Loại"] == "Dự phóng" else ""] * len(r_)
+            st.dataframe(_qdf.style.apply(_qs, axis=1).format(
+                {"DT (억)": "{:,.0f}", "LN HĐ (억)": "{:,.0f}", "LN ròng (억)": "{:,.0f}", "EPS": "{:,.0f}",
+                 "EPS đồng thuận (Naver)": "{:,.0f}"}, na_rep="—"), hide_index=True, width="stretch")
+            _w = DCF.seasonal_weights(quarters)
+            st.caption("Quý dự phóng = (dự phóng năm − lũy kế quý thực) chia cho các quý còn lại → tổng các quý khớp "
+                       "đúng dự phóng năm. "
+                       + ("**Chia đều**: doanh thu 4 quý gần nhất lệch nhau > 1,3× — đó là xu hướng tăng/giảm, không "
+                          "phải mùa vụ." if _w["_even"] else
+                          f"Theo **mùa vụ** 4 quý thực gần nhất (Q1 {_w['03']:.0%} · Q2 {_w['06']:.0%} · Q3 "
+                          f"{_w['09']:.0%} · Q4 {_w['12']:.0%} doanh thu).")
+                       + " Cột đồng thuận Naver chỉ để đối chiếu.")
+        else:
+            st.caption("Chưa đủ dữ liệu quý để chia dự phóng.")
         st.markdown("**Cổng dự phóng (bằng số):** " + ("✅ mọi giả định trong dải" if fg["ok"] else
                     f"❌ {fg['n_fail']} vi phạm → RIM/DDM tường minh **bị loại** khỏi kết luận cho tới khi sửa"))
         if not fg["ok"]:
@@ -390,6 +436,9 @@ with T["1"]:
     _tbl = pd.DataFrame([{**peer_set["self"], "Tên": f"▶ {peer_set['self']['Tên']}"}] + peer_set["domestic"]
                         + peer_set["foreign"])
     _tbl = _tbl[[c for c in _cols if c in _tbl.columns]]
+    for _c in _tbl.columns:                        # None trong cột số → NaN để hiện "—" (Styler không coi None là NaN)
+        if _c not in ("Mã", "Tên", "Thị trường", "Năm BCTC"):
+            _tbl[_c] = pd.to_numeric(_tbl[_c], errors="coerce")
 
     def _hl(r):
         return ["background-color:#fff3cd; font-weight:600" if str(r["Tên"]).startswith("▶") else ""] * len(r)
@@ -405,6 +454,30 @@ with T["1"]:
     st.dataframe(pd.DataFrame(peer_set["position"]).style.format(
         {"Mã": "{:,.2f}", "Trung vị trong nước": "{:,.2f}", "Trung vị nước ngoài": "{:,.2f}",
          "Hạng trong nước (%)": "{:.0f}"}, na_rep="—"), hide_index=True, width="stretch")
+    st.markdown("#### So sánh quý gần nhất")
+    _q = peer_set.get("quarter") or {}
+    _qrows = ([{**_q["self"], "Tên": f"▶ {_q['self']['Tên']}"}] if _q.get("self") else []) + \
+        (_q.get("domestic") or []) + (_q.get("foreign") or [])
+    if _qrows:
+        _qt = pd.DataFrame(_qrows)
+        for _c in _qt.columns:
+            if _c not in ("Mã", "Tên", "Thị trường", "Quý"):
+                _qt[_c] = pd.to_numeric(_qt[_c], errors="coerce")
+        st.dataframe(_qt.style.apply(_hl, axis=1).format(
+            {"DT quý (억)": "{:,.0f}", "LN HĐ quý (억)": "{:,.0f}", "DT 4 quý (억)": "{:,.0f}", "DT YoY %": "{:+.1f}",
+             "LN HĐ YoY %": "{:+.1f}", "Biên LN HĐ quý %": "{:.1f}", "Biên LN ròng quý %": "{:.1f}",
+             "P/E 4 quý": "{:.1f}"}, na_rep="—"), hide_index=True, width="stretch")
+        _qs, _qmd, _qmf = _q.get("self") or {}, _q.get("median_domestic") or {}, _q.get("median_foreign") or {}
+        _qcmp = [{"Chỉ số": m, "Mã": _qs.get(m), "Trung vị trong nước": _qmd.get(m), "Trung vị nước ngoài": _qmf.get(m)}
+                 for m in PR.Q_METRICS + ["P/E 4 quý"]]
+        st.dataframe(pd.DataFrame(_qcmp).style.format({"Mã": "{:,.1f}", "Trung vị trong nước": "{:,.1f}",
+                                                       "Trung vị nước ngoài": "{:,.1f}"}, na_rep="—"),
+                     hide_index=True, width="stretch")
+        st.caption("YoY = so với **cùng quý năm trước** (khử mùa vụ). P/E 4 quý = vốn hóa ÷ LN ròng 4 quý gần nhất "
+                   "(TTM) — phản ánh kết quả mới hơn P/E theo năm. Kỳ kế toán nước ngoài có thể lệch lịch (Micron "
+                   "kết thúc quý tháng 2/5/8/11) — cột Quý ghi tháng kết thúc thực tế.")
+    else:
+        st.info("Chưa có dữ liệu quý.")
     _fd = peer_set["foreign_discount"]
     if _fd.get("P/E") is not None or _fd.get("P/B") is not None:
         st.info("🌐 **So với đối thủ nước ngoài:** "
@@ -521,6 +594,77 @@ with T["6"]:
         st.caption(f"RIM tường minh: giá trị cuối kỳ chiếm **{rim['tv_share'] * 100:.0f}%**"
                    + (" ⚠️ > 75% — kết quả phụ thuộc mạnh vào giả định dài hạn" if rim["tv_share"] > P.TV_SHARE_WARN
                       else "") + f" · w = {w}.")
+    st.markdown("#### Bảng tính chi tiết từng mô hình")
+    _fm = EV.get("fcff")
+    with st.expander("💵 FCFF-DCF — dòng tiền tự do cho doanh nghiệp" + (f" → {_fm['value']:,.0f} KRW/cp" if _fm and _fm.get("value") else ""),
+                     expanded=bool(_fm)):
+        if not _fm:
+            st.caption("Không tính được: cần BCTC DART đầy đủ, dự phóng có biên LN HĐ; không áp dụng cho ngành tài chính.")
+        elif _fm.get("note"):
+            st.warning(_fm["note"])
+            st.dataframe(pd.DataFrame(_fm["rows"]).style.format(
+                {c: "{:,.0f}" for c in ("Doanh thu (억)", "EBIT (억)", "NOPAT (억)", "Tái đầu tư (억)", "FCFF (억)",
+                                        "PV FCFF (억)")} | {"Thuế %": "{:.1f}", "ROIC %": "{:.1f}",
+                                                            "Hệ số chiết khấu": "{:.3f}"}, na_rep="—"),
+                hide_index=True, width="stretch")
+        else:
+            st.dataframe(pd.DataFrame([{"Giả định": k, "Giá trị": v} for k, v in _fm["assumptions"].items()])
+                         .style.format({"Giá trị": "{:,.2f}"}), hide_index=True, width="stretch")
+            st.dataframe(pd.DataFrame(_fm["rows"]).style.format(
+                {c: "{:,.0f}" for c in ("Doanh thu (억)", "EBIT (억)", "NOPAT (억)", "Tái đầu tư (억)", "FCFF (억)",
+                                        "PV FCFF (억)")} | {"Thuế %": "{:.1f}", "ROIC %": "{:.1f}",
+                                                            "Hệ số chiết khấu": "{:.3f}"}, na_rep="—"),
+                hide_index=True, width="stretch")
+            st.dataframe(pd.DataFrame(_fm["bridge"]).style.format({"억원": "{:,.0f}"}), hide_index=True, width="stretch")
+            st.caption(f"Số cp {EV['shares']:,.0f} · giá trị cuối kỳ chiếm **{(_fm['tv_share'] or 0) * 100:.0f}%** EV"
+                       + (" ⚠️ > 75%" if (_fm["tv_share"] or 0) > P.TV_SHARE_WARN else "")
+                       + ". FCFF = EBIT·(1−thuế) − ΔDoanh thu ÷ (Doanh thu/Vốn đầu tư) — cách Damodaran, không cần "
+                         "khấu hao (DART tóm tắt và Naver không tách khấu hao cho DN Hàn). Cuối kỳ: tái đầu tư = g ÷ "
+                         "RONIC; RONIC = ROIC năm cuối kẹp [WACC; 30%].")
+    _em = EV.get("ev_ebit")
+    with st.expander("🏭 EV/EBIT 4 quý × trung vị đối thủ trong nước" + (f" → {_em['value']:,.0f} KRW/cp" if _em and _em.get("value") else "")):
+        _pe = D.get("peer_ev") or []
+        if _pe:
+            st.dataframe(pd.DataFrame(_pe).style.format({"EBIT 4 quý (억)": "{:,.0f}", "EV/EBIT": "{:.1f}"}, na_rep="—"),
+                         hide_index=True, width="stretch")
+        if _em:
+            st.dataframe(pd.DataFrame(_em["rows"]).style.format({"Giá trị": "{:,.1f}"}), hide_index=True, width="stretch")
+        st.caption("EV = vốn hóa + nợ ròng + lợi ích thiểu số (DART); EBIT = LN HĐ **4 quý gần nhất** cho cả mã và đối "
+                   "thủ (cùng cơ sở). Bội số ngoài (0; 40] "
+                   f"bị loại; cần ≥ {V.MIN_PEERS} đối thủ hợp lệ. Dùng **EV/EBIT thay EV/EBITDA** vì nguồn dữ liệu "
+                   "không tách khấu hao của DN Hàn — EBIT so EBIT nhất quán, không phải đoán khấu hao.")
+    with st.expander("📘 RIM tường minh (thu nhập thặng dư)" + (f" → {rim['value']:,.0f} KRW/cp" if rim else "")):
+        if rim:
+            st.dataframe(pd.DataFrame(rim["rows"]).style.format(
+                {c: "{:,.0f}" for c in ("BPS đầu kỳ", "EPS", "Ke × BPS", "Lợi nhuận thặng dư (RI)", "PV RI")}
+                | {"ROE %": "{:.1f}", "Hệ số chiết khấu": "{:.3f}"}, na_rep="—"), hide_index=True, width="stretch")
+            st.dataframe(pd.DataFrame(rim["bridge"]).style.format({"KRW/cp": "{:,.0f}"}), hide_index=True,
+                         width="stretch")
+            st.caption(f"RI = EPS − Ke × BPS đầu kỳ, Ke = {ke * 100:.2f}%. Cuối kỳ: RI năm cuối × w/(1+Ke−w).")
+        else:
+            st.caption("Không tính được (BPS ≤ 0 hoặc thiếu dự phóng).")
+    with st.expander("💰 DDM tường minh (cổ tức)" + (f" → {ddm['value']:,.0f} KRW/cp" if ddm else "")):
+        if ddm:
+            st.dataframe(pd.DataFrame(ddm["rows"]).style.format({"DPS": "{:,.0f}", "PV DPS": "{:,.0f}",
+                                                                 "Hệ số chiết khấu": "{:.3f}"}),
+                         hide_index=True, width="stretch")
+            st.dataframe(pd.DataFrame(ddm["bridge"]).style.format({"KRW/cp": "{:,.0f}"}), hide_index=True,
+                         width="stretch")
+        else:
+            st.caption("Không tính được (không trả cổ tức ở năm cuối dự phóng).")
+    with st.expander("📐 Lõi KCI và bội số — đầu vào công thức"):
+        _bps, _eps = V._num(row.get("bps")), V._num(row.get("eps"))
+        _nm = V.normalized_metrics(reals) if reals else {}
+        _inp = [("Giá", price), ("EPS (trailing)", _eps), ("BPS", _bps),
+                ("ROE trailing %", (_eps / _bps * 100) if (_eps and _bps) else None),
+                ("ROE trung vị nhiều năm (mid-cycle) %", (_nm.get("median_roe") or 0) * 100 if _nm.get("median_roe") is not None else None),
+                ("EPS dự phóng năm 1", fc[0]["EPS"] if fc else None), ("Ke %", ke * 100), ("g dài hạn %", coc["g_term"] * 100),
+                ("w (S-RIM)", w), ("P/E trung vị đối thủ", pm["pe"]), ("P/B trung vị đối thủ", pm["pb"])]
+        st.dataframe(pd.DataFrame([{"Đầu vào": k, "Giá trị": v} for k, v in _inp])
+                     .style.format({"Giá trị": "{:,.2f}"}, na_rep="—"), hide_index=True, width="stretch")
+        st.markdown("- **S-RIM** = BPS + (ROE − Ke)·BPS·w/(1+Ke−w)\n- **P/B–ROE** = BPS·(ROE − g)/(Ke − g) "
+                    "(ROE < Ke → g = 0)\n- **P/E × trung vị** = EPS × P/E trung vị đối thủ · **Forward P/E** = EPS dự "
+                    "phóng năm 1 × P/E trung vị\n- **P/B × trung vị** = BPS × P/B trung vị đối thủ")
     with st.expander("Tất cả phương pháp của lõi KCI (số thô)"):
         st.dataframe(pd.DataFrame([{"Phương pháp": k, "Giá trị/cp": v,
                                     "× giá": (v / price) if (v and price) else None}
@@ -672,6 +816,18 @@ with T["end"]:
         pd.DataFrame([peer_set["self"]] + peer_set["domestic"] + peer_set["foreign"]).to_excel(
             xw, sheet_name="Đối thủ", index=False)
         pd.DataFrame(peer_set["position"]).to_excel(xw, sheet_name="Vị thế", index=False)
+        _qq = peer_set.get("quarter") or {}
+        _qr = ([_qq["self"]] if _qq.get("self") else []) + (_qq.get("domestic") or []) + (_qq.get("foreign") or [])
+        if _qr:
+            pd.DataFrame(_qr).to_excel(xw, sheet_name="Quý gần nhất", index=False)
+        _qf = DCF.quarter_forecast(quarters, fc, EV.get("shares"))
+        if _qf:
+            pd.DataFrame(_qf).to_excel(xw, sheet_name="Dự phóng quý", index=False)
+        if EV.get("fcff"):
+            pd.DataFrame(EV["fcff"]["rows"]).to_excel(xw, sheet_name="FCFF-DCF", index=False)
+            pd.DataFrame(EV["fcff"]["bridge"]).to_excel(xw, sheet_name="FCFF cầu nối", index=False)
+        if rim:
+            pd.DataFrame(rim["rows"]).to_excel(xw, sheet_name="RIM", index=False)
         if decomp:
             pd.DataFrame(decomp["structure"]).to_excel(xw, sheet_name="Cơ cấu LN", index=False)
         if quality:

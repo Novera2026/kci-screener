@@ -19,6 +19,7 @@ import datetime as _dt
 import statistics as _st
 from typing import Optional
 
+import analysis as AN
 import backtest_dart as B
 import pipeline as P
 import valuation as V
@@ -33,7 +34,8 @@ def _raw_signal(rec: dict) -> Optional[float]:
     return V._median(vals) if vals else None
 
 
-def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years_fc: int = 5) -> list[dict]:
+def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years_fc: int = 5,
+                    with_fs: bool = True) -> list[dict]:
     """Chạy pipeline.evaluate cho từng điểm của backtest_dart.build_point."""
     a = a or V.Assumptions()
     by_year: dict = {}
@@ -50,6 +52,11 @@ def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years
             ap = dataclasses.replace(a, rf=p["rf"]) if p["rf"] is not None else a
             D = {"row": row, "series": hist, "quarters": [], "extras": {}, "peers": peers,
                  "ticker": row["ticker"]}
+            if with_fs:                               # BCTC đầy đủ năm Y−1 (point-in-time) → FCFF-DCF được chấm
+                try:
+                    D["fs_full"] = AN.fetch_full(row["ticker"], year - 1)
+                except Exception:
+                    D["fs_full"] = None
             try:
                 idn = P.identify(row)
                 t_day = _dt.date(int(p["date"][:4]), int(p["date"][4:6]), int(p["date"][6:8]))
@@ -75,6 +82,9 @@ def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years
                 "raw_ratio": (raw / price) if (raw and price) else None,
                 "raw_upside": (raw / price - 1) if (raw and price) else None,
                 "fc_ok": ev["fg"]["ok"], "n_primary_pass": len(prim), "agree": agree,
+                "fcff_upside": ((ev["fcff"]["value"] / price - 1) if (ev.get("fcff") and ev["fcff"].get("value")
+                                                                       and price) else None),
+                "fcff_pass": any(r["name"].startswith("FCFF-DCF") and r["pass"] for r in rec["rows"]),
                 "dq_cap": dq["cap"], "ret": p["ret"], "kospi_ret": p["kospi_ret"], "excess": excess})
     return out
 

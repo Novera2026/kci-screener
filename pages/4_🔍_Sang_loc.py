@@ -67,6 +67,26 @@ keys = list(SC.PRESETS)
 key = st.selectbox("Bộ tiêu chuẩn", keys, format_func=lambda k: SC.PRESETS[k]["name"])
 pr = SC.PRESETS[key]
 st.info(f"**{pr['name']}** — {pr['desc']}\n\n📚 {pr['source']}" + (f"\n\n⚙️ Điều chỉnh: {pr['adapt']}" if pr.get("adapt") else ""))
+_bt = SC.BACKTEST_2021_2025.get(key)
+if _bt:
+    _sig = _bt["t"] is not None and abs(_bt["t"]) >= 2
+    (st.success if (_bt["vs_univ"] > 0 and _sig) else st.warning)(
+        f"📊 **Backtest 2021–25** (top 200, giữ 12 tháng từ 15/4, đủ 2 tầng): vượt **trung bình vũ trụ** "
+        f"{_bt['vs_univ'] * 100:+.1f}%/năm (t = {_bt['t']:.2f}, thắng {_bt['years_beat']} năm) · vượt KOSPI "
+        f"{_bt['vs_kospi'] * 100:+.1f}%/năm · {_bt['avg_n']:.0f} mã/năm · mất > 30%: {_bt['loss30']:.0%}. "
+        + ("Có ý nghĩa thống kê." if _sig else "**Chưa có ý nghĩa thống kê (|t| < 2)** — chưa chứng minh được bộ "
+           "này chọn mã tốt hơn mua đều cả vũ trụ. Vượt KOSPI phần lớn do vũ trụ là các mã lớn *hiện tại* (thiên lệch "
+           "sống sót)."))
+with st.expander("📊 So sánh backtest tất cả bộ tiêu chuẩn"):
+    st.dataframe(pd.DataFrame([{"Bộ": SC.PRESETS[k]["name"], "Vượt vũ trụ %/năm": v["vs_univ"] * 100, "t": v["t"],
+                                "Năm thắng vũ trụ": v["years_beat"], "Vượt KOSPI %/năm": v["vs_kospi"] * 100,
+                                "Mã/năm": v["avg_n"], "Mất > 30%": (v["loss30"] or 0) * 100}
+                               for k, v in SC.BACKTEST_2021_2025.items()])
+                 .style.format({"Vượt vũ trụ %/năm": "{:+.1f}", "t": "{:.2f}", "Vượt KOSPI %/năm": "{:+.1f}",
+                                "Mã/năm": "{:.0f}", "Mất > 30%": "{:.0f}%"}), hide_index=True, width="stretch")
+    st.caption("Lợi suất chỉ tính giá (bất lợi cho bộ cổ tức). 5 năm là mẫu nhỏ. Năm 2025 (bùng nổ bán dẫn/quốc phòng) "
+               "các bộ 'rẻ' đều thua mạnh vì loại các mã tăng trưởng đắt. Chạy lại: `python backtest_presets.py 200` "
+               "(xem HUONG_DAN_BACKTEST.md).")
 
 with st.expander("Vũ trụ (mặc định: top 200 vốn hóa cả hai sàn)"):
     kind = st.radio("Lấy danh sách từ", ["Top vốn hóa", "Ngành KRX", "Chủ đề", "Nhập tay"], horizontal=True)
