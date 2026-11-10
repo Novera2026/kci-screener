@@ -34,7 +34,7 @@ def _indices():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _details(nos: tuple):
-    return H.parallel(H.theme_detail, list(nos))
+    return H.parallel(lambda no: H.theme_detail(no, 100), list(nos))     # đủ thành viên (chủ đề lớn > 40 mã)
 
 
 def _refresh():
@@ -92,27 +92,36 @@ tdf = pd.DataFrame([{
     "Chủ đề con mạnh nhất": f"{r['best']} ({r['best_chg']:+.2f}%)" if r["best"] and r["best_chg"] is not None else "—",
     "Gồm": r["desc"],
 } for r in tt])
-st.dataframe(tdf.style.format({"% hôm nay": "{:+.2f}", "Lan tỏa %": "{:.0f}"}, na_rep="—")
-             .map(_color, subset=["% hôm nay"])
-             .bar(subset=["Lan tỏa %"], color="#cdebd8", vmin=0, vmax=100),
-             hide_index=True, width="stretch", height=35 * (len(tdf) + 1) + 3)   # hiện đủ, không cuộn trong bảng
-
-_tmap = {f"{r['icon']} {r['name']}": r["key"] for r in tt}
-sel = st.selectbox("Xem mã dẫn dắt của xu hướng", list(_tmap))
-_key = _tmap[sel]
+st.caption("👆 **Bấm vào một dòng** để xem toàn bộ cổ phiếu trong nhóm xu hướng đó.")
+_ev = st.dataframe(tdf.style.format({"% hôm nay": "{:+.2f}", "Lan tỏa %": "{:.0f}"}, na_rep="—")
+                   .map(_color, subset=["% hôm nay"])
+                   .bar(subset=["Lan tỏa %"], color="#cdebd8", vmin=0, vmax=100),
+                   hide_index=True, width="stretch", height=35 * (len(tdf) + 1) + 3,   # hiện đủ, không cuộn trong bảng
+                   on_select="rerun", selection_mode="single-row", key="mt_table")
+_rows = (_ev.selection.rows if _ev is not None and hasattr(_ev, "selection") else []) or []
+_r = tt[_rows[0]] if _rows else tt[0]                  # chưa chọn → xu hướng mạnh nhất hôm nay
+_key = _r["key"]
 _m = next(x for x in MT.MEGATRENDS if x["key"] == _key)
+st.markdown(f"#### {_r['icon']} {_r['name']} — cổ phiếu trong nhóm" + ("" if _rows else " _(mạnh nhất hôm nay)_"))
+st.caption(_m["desc"])
 with st.spinner("Đang lấy thành viên các chủ đề..."):
     _det = _details(tuple(_m["themes"]))
-leaders = MT.trend_leaders(_key, _det, top=12)
-if leaders:
+_tnames = {t["no"]: t["name"] for t in themes}
+members = MT.trend_leaders(_key, _det, top=None, theme_names=_tnames)
+if members:
+    _up = sum(1 for s in members if (s.get("chg") or 0) > 0)
+    _dn = sum(1 for s in members if (s.get("chg") or 0) < 0)
+    st.caption(f"{len(members)} mã · {_up} tăng · {_dn} giảm · xếp theo % hôm nay. Một mã có thể thuộc nhiều chủ đề con.")
     ldf = pd.DataFrame([{"Mã": s["ticker"], "Tên": s["name"], "Giá": s["price"], "% hôm nay": s["chg"],
                          "GTGD (억)": s["tv_eok"], "Vốn hóa (억)": s["cap_eok"],
-                         "Lý do thuộc chủ đề": s["reason"]} for s in leaders])
+                         "Chủ đề con": ", ".join(s.get("themes") or []),
+                         "Lý do thuộc chủ đề": s["reason"]} for s in members])
     st.dataframe(ldf.style.format({"Giá": "{:,.0f}", "% hôm nay": "{:+.2f}", "GTGD (억)": "{:,.0f}",
                                    "Vốn hóa (억)": "{:,.0f}"}, na_rep="—").map(_color, subset=["% hôm nay"]),
-                 hide_index=True, width="stretch")
+                 hide_index=True, width="stretch", height=min(35 * (len(ldf) + 1) + 3, 520))
     c1, c2 = st.columns([3, 1])
-    pick = c1.selectbox("Định giá một mã", [f"{s['ticker']} · {s['name']}" for s in leaders], key="home_pick_mt")
+    pick = c1.selectbox("Định giá một mã", [f"{s['ticker']} · {s['name']}" for s in members],
+                        key=f"home_pick_mt_{_key}")
     if c2.button("Mở trong 🧮", key="home_open_mt", width="stretch"):
         _open_valuation(pick.split(" · ")[0])
 else:
@@ -251,7 +260,7 @@ if bot:
         _at = _dt.datetime.fromisoformat(bot["at"]).strftime("%H:%M %d/%m/%Y")
     except (KeyError, ValueError):
         _at = "—"
-    with st.expander(f"📨 Lần chạy tự động gần nhất (Telegram) · {_at} KST · {len(bot['picks'])} mã"):
+    with st.expander(f"📨 Lần chạy tự động gần nhất · {_at} KST · {len(bot['picks'])} mã"):
         st.dataframe(pd.DataFrame([{"Mã": tk, "Tên": p.get("name"), "Sàn": _mkt_of.get(tk, "—"),
                                     "Kết luận": p.get("verdict") or "—", "Số bộ đạt": len(p.get("presets") or [])}
                                    for tk, p in bot["picks"].items()]), hide_index=True, width="stretch")

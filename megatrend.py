@@ -75,15 +75,20 @@ def trend_table(themes: list[dict]) -> list[dict]:
     return out
 
 
-def trend_leaders(key: str, details: dict, top: int = 10) -> list[dict]:
-    """details = {no chủ đề: hotnews.theme_detail(no)}. → mã của mega trend, bỏ trùng, xếp % hôm nay ↓."""
+def trend_leaders(key: str, details: dict, top: Optional[int] = 10,
+                  theme_names: Optional[dict] = None) -> list[dict]:
+    """details = {no chủ đề: hotnews.theme_detail(no)}. → mã của mega trend, bỏ trùng, xếp % hôm nay ↓.
+    Mỗi mã kèm "themes" = các chủ đề con chứa nó (theme_names: {no: tên}); top=None → lấy hết."""
     m = next(x for x in MEGATRENDS if x["key"] == key)
     seen: dict = {}
     for no in m["themes"]:
+        tname = (theme_names or {}).get(no) or str(no)
         for s in (details.get(no) or {}).get("stocks", []):
-            seen.setdefault(s["ticker"], s)
+            row = seen.setdefault(s["ticker"], {**s, "themes": []})
+            if tname not in row["themes"]:
+                row["themes"].append(tname)
     rows = sorted(seen.values(), key=lambda s: -(s["chg"] if s.get("chg") is not None else -999))
-    return rows[:top]
+    return rows if top is None else rows[:top]
 
 
 def market_indices(codes=("KOSPI", "KOSDAQ")) -> list[dict]:

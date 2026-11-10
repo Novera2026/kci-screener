@@ -45,3 +45,14 @@ def test_load_bot_state(tmp_path):
     assert MT.load_bot_state(str(p)) is None
     p.write_text(json.dumps({"at": "2026-11-10T08:00", "picks": {"005930": {"name": "삼성전자"}}}), encoding="utf-8")
     assert MT.load_bot_state(str(p))["picks"]["005930"]["name"] == "삼성전자"
+
+
+def test_trend_leaders_all_members_with_theme_names():
+    ship = next(m for m in MT.MEGATRENDS if m["key"] == "ship")
+    a, b = ship["themes"][:2]
+    s = lambda tk, chg: {"ticker": tk, "name": tk, "chg": chg}
+    det = {a: {"stocks": [s(f"{i:06d}", float(i)) for i in range(15)]}, b: {"stocks": [s("000003", 3.0)]}}
+    out = MT.trend_leaders("ship", det, top=None, theme_names={a: "조선", b: "조선기자재"})
+    assert len(out) == 15                                  # top=None → đủ, không cắt ở 10
+    three = next(x for x in out if x["ticker"] == "000003")
+    assert three["themes"] == ["조선", "조선기자재"]
