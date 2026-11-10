@@ -142,7 +142,7 @@ if c_btn.button("▶️ Bắt đầu", type="primary", width="stretch") and q.st
 
 tk = st.session_state.get("vp_ticker")
 if not tk:
-    st.info("Nhập một mã rồi bấm **Bắt đầu**. Trang sẽ đi lần lượt 8 bước và ra một báo cáo tóm tắt.")
+    st.info("Nhập một mã rồi bấm **Bắt đầu**. Trang sẽ đi lần lượt 5 bước (đối thủ → bóc tách → chất lượng tài sản → định giá → kết luận) và ra một báo cáo tóm tắt.")
     st.stop()
 
 with st.spinner(f"Đang lấy dữ liệu {tk} (giá, BCTC Naver/DART, beta, peer cùng ngành)…"):
