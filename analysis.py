@@ -204,6 +204,204 @@ def decompose(fs: dict) -> dict:
             "cash": cash, "working_capital": wc, "balance": balance}
 
 
+# ============================================================================ Bước 2b — bóc tách theo QUÝ
+# DART báo cáo quý (fnlttSinglAcntAll): KQKD (IS/CIS) thstrm_amount = số RIÊNG quý đó, thstrm_add_amount = lũy kế
+# từ đầu năm, frmtrm_q_amount = cùng quý năm trước; LCTT (CF) thstrm_amount = LŨY KẾ từ đầu năm; CĐKT (BS) = số
+# cuối kỳ. Báo cáo năm: IS/CF = cả năm → Q4 = cả năm − lũy kế 9 tháng (Q3). Kiểm tra trên 005930 (10/11/2026).
+Q_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "dart_q")
+_RC_Q = (("11013", 1), ("11012", 2), ("11014", 3), ("11011", 4))      # mã báo cáo → quý cuối kỳ
+_FLOW_IS = {"IS", "CIS"}
+
+
+def parse_report(items: list[dict]) -> dict:
+    """1 báo cáo DART → {"pt": số theo kỳ (IS quý / BS cuối kỳ / CF lũy kế), "ytd": IS lũy kế, "yoy": IS cùng kỳ
+    năm trước, "sj": loại báo cáo của từng trường}. Đơn vị 억원."""
+    pt, ytd, yoy, sj = {}, {}, {}, {}
+    for field, sjs, ids in ACCOUNTS:
+        add = field.startswith("+")
+        name = field.lstrip("+")
+        for aid in ids:
+            hits = [it for it in items if it.get("sj_div") in sjs and it.get("account_id") == aid]
+            if not hits:
+                continue
+            it = hits[0]
+            vals = (_n(it.get("thstrm_amount")), _n(it.get("thstrm_add_amount")),
+                    _n(it.get("frmtrm_q_amount")) if it.get("frmtrm_q_amount") not in (None, "") else _n(it.get("frmtrm_amount")))
+            sj[name] = "IS" if it.get("sj_div") in _FLOW_IS else it.get("sj_div")
+            for d, v in zip((pt, ytd, yoy), vals):
+                if v is None:
+                    continue
+                d[name] = d.get(name, 0.0) + abs(v) if add else v
+            if not add:
+                break
+    for d in (pt, ytd, yoy):
+        alt = d.pop("borrowings_alt", None)
+        if not d.get("borrowings") and alt:
+            d["borrowings"] = alt
+    sj.pop("borrowings_alt", None)
+    return {"pt": pt, "ytd": ytd, "yoy": yoy, "sj": sj}
+
+
+def _fetch_report(cc: str, year: int, rc: str, fs_div_pref: Optional[str], cache_dir: str) -> Optional[dict]:
+    fp = os.path.join(cache_dir, f"{cc}_{year}_{rc}.json")
+    if os.path.exists(fp):
+        try:
+            return json.load(open(fp, encoding="utf-8"))
+        except Exception:
+            pass
+    for fs_div in ([fs_div_pref] if fs_div_pref else []) + [d for d in ("CFS", "OFS") if d != fs_div_pref]:
+        try:
+            j = requests.get(f"{dart_api._BASE}/fnlttSinglAcntAll.json",
+                             params={"crtfc_key": dart_api.api_key(), "corp_code": cc, "bsns_year": str(year),
+                                     "reprt_code": rc, "fs_div": fs_div}, timeout=20).json()
+        except Exception:
+            continue
+        if j.get("status") != "000":
+            continue
+        rep = parse_report(j.get("list", []))
+        if not rep["pt"].get("assets"):
+            continue
+        out = {"year": year, "rc": rc, "fs_div": fs_div, **rep}
+        json.dump(out, open(fp, "w", encoding="utf-8"), ensure_ascii=False)    # báo cáo đã nộp không đổi
+        return out
+    return None
+
+
+def fetch_quarter_reports(ticker: str, years: int = 2, cache_dir: str = Q_CACHE) -> list[dict]:
+    """Báo cáo quý + năm của `years` năm gần nhất (+ năm trước đó để tính Q4/so cùng kỳ), cũ → mới.
+    Cùng loại hợp nhất/riêng với báo cáo đầu tiên lấy được. Không key DART → []."""
+    if not dart_api.available():
+        return []
+    cc = dart_api.corp_code_of(ticker)
+    if not cc:
+        return []
+    os.makedirs(cache_dir, exist_ok=True)
+    today = _dt.date.today()
+    out, fs_div = [], None
+    for y in range(today.year - years, today.year + 1):
+        for rc, _q in _RC_Q:
+            rep = _fetch_report(cc, y, rc, fs_div, cache_dir)
+            if rep:
+                fs_div = fs_div or rep["fs_div"]
+                out.append(rep)
+    return out
+
+
+def _sub(a, b):
+    return a - b if (a is not None and b is not None) else None
+
+
+def quarter_series(reports: list[dict]) -> list[dict]:
+    """Báo cáo DART → từng QUÝ riêng: {label, year, q, flow (IS quý), cf (CF quý), bs (cuối quý), yoy (IS cùng quý
+    năm trước)}. Q4 = năm − 9 tháng; CF quý = lũy kế kỳ này − lũy kế kỳ trước cùng năm."""
+    by = {(r["year"], dict(_RC_Q)[r["rc"]]): r for r in reports}
+    out = []
+    for (y, q) in sorted(by):
+        r = by[(y, q)]
+        sj = r.get("sj", {})
+        flow, cf, yoy = {}, {}, {}
+        prev = by.get((y, q - 1)) if q > 1 else None
+        for k, v in r["pt"].items():
+            kind = sj.get(k)
+            if kind == "IS":
+                if q < 4:
+                    flow[k] = v
+                    if k in r.get("yoy", {}):
+                        yoy[k] = r["yoy"][k]
+                else:   # năm − lũy kế 9 tháng; cùng kỳ năm trước = năm trước − 9 tháng năm trước
+                    p3 = by.get((y, 3))
+                    flow[k] = _sub(v, (p3 or {}).get("ytd", {}).get(k))
+                    pfy, p3y = by.get((y - 1, 4)), by.get((y - 1, 3))
+                    yoy[k] = _sub((pfy or {}).get("pt", {}).get(k), (p3y or {}).get("ytd", {}).get(k))
+            elif kind == "CF":
+                cf[k] = v if q == 1 else _sub(v, (prev or {}).get("pt", {}).get(k))
+        flow = {k: v for k, v in flow.items() if v is not None}
+        out.append({"label": f"Q{q}.{str(y)[2:]}", "year": y, "q": q, "fs_div": r["fs_div"],
+                    "flow": flow, "cf": {k: v for k, v in cf.items() if v is not None},
+                    "bs": {k: v for k, v in r["pt"].items() if sj.get(k) == "BS"},
+                    "yoy": {k: v for k, v in yoy.items() if v is not None}})
+    return out
+
+
+def _pct(a, b):
+    return a / b * 100 if (a is not None and b not in (None, 0)) else None
+
+
+def _growth_pct(cur, prev):
+    """Tăng trưởng %; kỳ trước ≤ 0 (lỗ) → không có nghĩa → None."""
+    return (cur / prev - 1) * 100 if (cur is not None and prev is not None and prev > 0) else None
+
+
+def decompose_quarters(qs: list[dict], n: int = 6) -> list[dict]:
+    """Bóc tách từng quý (n quý gần nhất): tăng trưởng, biên, DuPont năm hóa, cơ cấu LN trước thuế, dòng tiền,
+    vốn lưu động, nợ ròng. Bình quân TS/VCSH = (cuối quý này + cuối quý trước)/2."""
+    rows = []
+    for i, qd in enumerate(qs):
+        f, cf, bs, yoy = qd["flow"], qd["cf"], qd["bs"], qd["yoy"]
+        pb = qs[i - 1]["bs"] if i > 0 else {}
+        prev_q = qs[i - 1]["flow"] if i > 0 else {}
+        rev, op, pre = f.get("revenue"), f.get("op"), f.get("pretax")
+        ni = f.get("ni_parent") if f.get("ni_parent") is not None else f.get("ni")
+        eq_c, eq_p = bs.get("equity_parent") or bs.get("equity"), pb.get("equity_parent") or pb.get("equity")
+        avg_a, avg_e = _avg(bs.get("assets"), pb.get("assets")), _avg(eq_c, eq_p)
+        margin, turn, lev = _div(ni, rev), _div(rev * 4 if rev is not None else None, avg_a), _div(avg_a, avg_e)
+        fin_net = ((f.get("fin_income") or 0.0) - (f.get("fin_cost") or 0.0)
+                   if (f.get("fin_income") is not None or f.get("fin_cost") is not None) else None)
+        eqi = f.get("equity_income")
+        other = (pre - (op or 0) - (fin_net or 0) - (eqi or 0)) if pre is not None else None
+        capex, cfo = cf.get("capex"), cf.get("cfo")
+        fcf = _sub(cfo, capex)
+        liquid = (bs.get("cash") or 0.0) + (bs.get("st_deposits") or 0.0)
+        rows.append({
+            "Quý": qd["label"],
+            "Doanh thu (억)": rev, "DT YoY %": _growth_pct(rev, yoy.get("revenue")),
+            "DT QoQ %": _growth_pct(rev, prev_q.get("revenue")),
+            "LN HĐ (억)": op, "LN HĐ YoY %": _growth_pct(op, yoy.get("op")),
+            "LN ròng CĐ mẹ (억)": ni,
+            "Biên gộp %": _pct(f.get("gross"), rev), "Biên LN HĐ %": _pct(op, rev), "Biên LN ròng %": _pct(ni, rev),
+            "ROE năm hóa %": margin * turn * lev * 100 if None not in (margin, turn, lev) else None,
+            "Vòng quay TS (năm hóa)": turn, "Đòn bẩy (TS/VCSH)": lev,
+            "LN HĐ / LNTT %": _pct(op, pre), "Tài chính ròng / LNTT %": _pct(fin_net, pre),
+            "Liên kết / LNTT %": _pct(eqi, pre), "Khác / LNTT %": _pct(other, pre),
+            "CFO (억)": cfo, "CFO / LN ròng": _div(cfo, f.get("ni")) if (f.get("ni") or 0) > 0 else None,
+            "Capex (억)": capex, "FCF (억)": fcf, "Biên FCF %": _pct(fcf, rev),
+            "Ngày phải thu": _div(bs.get("receivables"), rev) * 91 if _div(bs.get("receivables"), rev) is not None else None,
+            "Ngày tồn kho": _div(bs.get("inventory"), f.get("cogs")) * 91 if _div(bs.get("inventory"), f.get("cogs")) is not None else None,
+            "Nợ ròng (억)": (bs.get("borrowings") or 0.0) - liquid if bs else None,
+        })
+    return rows[-n:]
+
+
+def quarter_flags(rows: list[dict]) -> list[str]:
+    """Tín hiệu số từ quý gần nhất (so quý trước & cùng kỳ) — chỉ nêu, không chấm điểm."""
+    if not rows:
+        return []
+    L, c = [], rows[-1]
+    p = rows[-2] if len(rows) > 1 else {}
+    q = c["Quý"]
+    if c.get("DT YoY %") is not None:
+        L.append(f"{'📈' if c['DT YoY %'] >= 0 else '📉'} {q}: doanh thu {c['DT YoY %']:+.1f}% so cùng kỳ")
+    if c.get("LN HĐ YoY %") is not None:
+        L.append(f"{'📈' if c['LN HĐ YoY %'] >= 0 else '📉'} {q}: LN hoạt động {c['LN HĐ YoY %']:+.1f}% so cùng kỳ")
+    if c.get("LN HĐ (억)") is not None and c["LN HĐ (억)"] < 0:
+        L.append(f"❌ {q}: lỗ hoạt động {c['LN HĐ (억)']:,.0f}억")
+    if c.get("Biên LN HĐ %") is not None and p.get("Biên LN HĐ %") is not None:
+        d = c["Biên LN HĐ %"] - p["Biên LN HĐ %"]
+        if abs(d) >= 2:
+            L.append(f"{'✅' if d > 0 else '⚠️'} Biên LN HĐ {p['Biên LN HĐ %']:.1f}% → {c['Biên LN HĐ %']:.1f}% ({d:+.1f} điểm %)")
+    if c.get("Khác / LNTT %") is not None and abs(c["Khác / LNTT %"]) >= 30:
+        L.append(f"⚠️ {q}: khoản khác/một lần chiếm {c['Khác / LNTT %']:.0f}% LN trước thuế — LN quý khó lặp lại")
+    if c.get("CFO (억)") is not None and c["CFO (억)"] < 0:
+        L.append(f"⚠️ {q}: dòng tiền hoạt động âm {c['CFO (억)']:,.0f}억")
+    neg = [r for r in rows[-4:] if r.get("FCF (억)") is not None and r["FCF (억)"] < 0]
+    if len(neg) >= 3:
+        L.append(f"⚠️ FCF âm {len(neg)}/4 quý gần nhất")
+    if c.get("Ngày tồn kho") is not None and p.get("Ngày tồn kho"):
+        if c["Ngày tồn kho"] > p["Ngày tồn kho"] * 1.2:
+            L.append(f"⚠️ Ngày tồn kho {p['Ngày tồn kho']:.0f} → {c['Ngày tồn kho']:.0f} ngày (+>20%)")
+    return L
+
+
 # ============================================================================ Bước 3 — chất lượng tài sản
 def _chk(name, value, status, rule, note=""):
     return {"Chỉ tiêu": name, "Giá trị": value, "Kết quả": status, "Ngưỡng": rule, "Ghi chú": note}

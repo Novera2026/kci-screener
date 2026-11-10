@@ -76,6 +76,10 @@ def _load_static(tk: str, industry_kr: str, n_peers: int) -> dict:
         fs_full = AN.fetch_full(tk)
     except Exception:
         fs_full = None
+    try:
+        fs_q = AN.quarter_series(AN.fetch_quarter_reports(tk))       # BCTC quý DART (đã nộp → cache)
+    except Exception:
+        fs_q = []
     ptk = PR.domestic_candidates(tk, industry_kr, reg, n=n_peers)
 
     def _pfs(t):
@@ -89,7 +93,7 @@ def _load_static(tk: str, industry_kr: str, n_peers: int) -> dict:
             peer_fins = dict(zip(ptk, ex.map(fetch_financials, ptk)))
             peer_fs = dict(zip(ptk, ex.map(_pfs, ptk)))
     return {"annual": fin.get("annual", []), "quarters": fin.get("quarter", []), "extras": extras,
-            "fs_full": fs_full, "ptk": ptk, "peer_fins": peer_fins, "peer_fs": peer_fs}
+            "fs_full": fs_full, "fs_q": fs_q, "ptk": ptk, "peer_fins": peer_fins, "peer_fs": peer_fs}
 
 
 def _load_market(tk: str, ptk: tuple, fcodes: tuple) -> dict:
@@ -278,6 +282,8 @@ ratios = P.ratio_table(series)
 peer_set = PR.build_peer_set(row, D.get("annual", []), idn["bucket"], peer_rows, D.get("peer_fins", {}),
                              foreign_profiles=foreign, self_quarters=quarters)
 decomp = AN.decompose(fs_full) if fs_full else None
+decomp_q = AN.decompose_quarters(S0.get("fs_q") or [], n=6)
+qflags = AN.quarter_flags(decomp_q)
 quality = AN.quality(fs_full, (mc / 1e8) if mc else None, idn["bucket"]) if fs_full else None
 from financials import assess_financials  # noqa: E402
 fin_health = assess_financials(D.get("annual", []), row.get("sector"), row.get("industry_kr"))
@@ -287,7 +293,8 @@ _meta = {"name": name, "industry_kr": row.get("industry_kr"),
 try:
     DS.save_section(tk, "peers", peer_set, meta=_meta)
     if decomp:
-        DS.save_section(tk, "financials", {"decomp": decomp, "ratios": ratios, "data_quality": dq["checks"]})
+        DS.save_section(tk, "financials", {"decomp": decomp, "decomp_q": decomp_q, "ratios": ratios,
+                                           "data_quality": dq["checks"]})
     if quality:
         DS.save_section(tk, "quality", quality)
 except Exception:
@@ -661,6 +668,40 @@ with T["3"]:
         st.caption("'Khác (gồm một lần)' = LN trước thuế − LN hoạt động − tài chính ròng − công ty liên kết. Tỷ trọng "
                    "lớn ở dòng này là lợi nhuận khó lặp lại.")
 
+    st.markdown("#### Bóc tách theo quý" + (f" — {decomp_q[0]['Quý']} → {decomp_q[-1]['Quý']} (DART)" if decomp_q else ""))
+    if not decomp_q:
+        st.info("Chưa có BCTC quý từ DART (cần DART_API_KEY, hoặc DN chưa nộp báo cáo quý).")
+    else:
+        for _f in qflags:
+            st.markdown(f"- {_f}")
+        _QGROUPS = [
+            ("Tăng trưởng & quy mô", ["Doanh thu (억)", "DT YoY %", "DT QoQ %", "LN HĐ (억)", "LN HĐ YoY %",
+                                      "LN ròng CĐ mẹ (억)"]),
+            ("Biên & DuPont (năm hóa)", ["Biên gộp %", "Biên LN HĐ %", "Biên LN ròng %", "Vòng quay TS (năm hóa)",
+                                         "Đòn bẩy (TS/VCSH)", "ROE năm hóa %"]),
+            ("Cơ cấu LN trước thuế", ["LN HĐ / LNTT %", "Tài chính ròng / LNTT %", "Liên kết / LNTT %",
+                                      "Khác / LNTT %"]),
+            ("Dòng tiền", ["CFO (억)", "CFO / LN ròng", "Capex (억)", "FCF (억)", "Biên FCF %"]),
+            ("Vốn lưu động & nợ", ["Ngày phải thu", "Ngày tồn kho", "Nợ ròng (억)"]),
+        ]
+        _qdf = pd.DataFrame(decomp_q).set_index("Quý").T
+        _tabs = st.tabs([g for g, _ in _QGROUPS])
+        for _tab, (_g, _rows) in zip(_tabs, _QGROUPS):
+            with _tab:
+                _sub = _qdf.loc[[r for r in _rows if r in _qdf.index]].astype(float)
+                _sty = _sub.style
+                for _r in _sub.index:
+                    _fmt = ("{:+.1f}%" if ("YoY" in _r or "QoQ" in _r) else "{:.1f}%" if _r.endswith("%")
+                            else "{:,.0f}" if ("억" in _r or "Ngày" in _r) else "{:.2f}")
+                    _sty = _sty.format(_fmt, subset=pd.IndexSlice[[_r], :], na_rep="—")
+                _sty = _sty.map(lambda v: ("color:#D70015;font-weight:600" if isinstance(v, float) and v < 0 else ""),
+                                subset=pd.IndexSlice[[r for r in _sub.index if "YoY" in r or "QoQ" in r
+                                                      or r in ("LN HĐ (억)", "LN ròng CĐ mẹ (억)", "CFO (억)", "FCF (억)")], :])
+                st.dataframe(_sty, width="stretch")
+        st.caption("Số riêng từng quý: KQKD lấy số quý DART; Q4 = cả năm − lũy kế 9 tháng; dòng tiền quý = lũy kế kỳ "
+                   "này − kỳ trước. ROE/vòng quay **năm hóa** (×4) nên nhạy với mùa vụ — so cùng kỳ (YoY) đáng tin hơn "
+                   "so quý trước (QoQ). Ngày phải thu/tồn kho tính trên 91 ngày.")
+
 with T["q"]:
     st.markdown("#### Kết quả" + (f" — hạng **{quality['grade']}** ({quality['score']:.0f}/100)"
                                               if quality and quality.get("score") is not None else ""))
@@ -879,7 +920,7 @@ ctx = {"ticker": tk, "name": name, "date": _dt.date.today().isoformat(), "price"
        "dq": dq, "forecast": fc, "fgates": fg, "coc": EV["coc"], "conclusion": rec, "peers": EV["pm"],
        "anchor": anchor, "scen": scen, "sens": sens, "special": special}
 overall = P.overall_assessment(rec, fin_health, quality, peer_set)
-ctx.update(peer_set=peer_set, decomp=decomp, quality=quality, overall=overall)
+ctx.update(peer_set=peer_set, decomp=decomp, decomp_q=decomp_q, qflags=qflags, quality=quality, overall=overall)
 md = P.report_markdown(ctx)
 try:
     DS.save_section(tk, "valuation", {"fair": rec["fair"], "low": rec["low"], "high": rec["high"],
@@ -938,6 +979,8 @@ with T["end"]:
             pd.DataFrame(rim["rows"]).to_excel(xw, sheet_name="RIM", index=False)
         if decomp:
             pd.DataFrame(decomp["structure"]).to_excel(xw, sheet_name="Cơ cấu LN", index=False)
+        if decomp_q:
+            pd.DataFrame(decomp_q).set_index("Quý").T.to_excel(xw, sheet_name="Bóc tách quý")
         if quality:
             pd.DataFrame(quality["checks"]).astype({"Giá trị": str}).to_excel(xw, sheet_name="Chất lượng TS",
                                                                                 index=False)

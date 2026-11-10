@@ -577,6 +577,19 @@ def report_markdown(ctx: dict) -> str:
                   f"{r['Thành phần']} {f1(r['% LN trước thuế'], '%')}" for r in dc["structure"][:-1]),
               f"- CFO/LN ròng {f1(dc['cash']['CFO / LN ròng'])}× · biên FCF {f1(dc['cash']['Biên FCF %'], '%')} · "
               f"nợ ròng {f1(dc['balance']['Nợ ròng (억)'])}억", ""]
+    dq_rows = ctx.get("decomp_q") or []
+    if dq_rows:
+        def fq(x, fmt):
+            return "—" if x is None else fmt.format(x)
+        L += [f"## Bóc tách theo quý ({dq_rows[0]['Quý']} → {dq_rows[-1]['Quý']})",
+              "| Chỉ tiêu | " + " | ".join(r["Quý"] for r in dq_rows) + " |",
+              "|---|" + "---:|" * len(dq_rows)]
+        for k, fmt in (("Doanh thu (억)", "{:,.0f}"), ("DT YoY %", "{:+.1f}%"), ("LN HĐ (억)", "{:,.0f}"),
+                       ("LN HĐ YoY %", "{:+.1f}%"), ("Biên LN HĐ %", "{:.1f}%"), ("Biên LN ròng %", "{:.1f}%"),
+                       ("ROE năm hóa %", "{:.1f}%"), ("Khác / LNTT %", "{:.0f}%"), ("CFO / LN ròng", "{:.2f}×"),
+                       ("FCF (억)", "{:,.0f}"), ("Nợ ròng (억)", "{:,.0f}")):
+            L.append(f"| {k} | " + " | ".join(fq(r.get(k), fmt) for r in dq_rows) + " |")
+        L += [""] + [f"- {x}" for x in (ctx.get("qflags") or [])] + [""]
     qu = ctx.get("quality")
     if qu:
         sc_q = "—" if qu["score"] is None else f"{qu['score']:.0f}"
