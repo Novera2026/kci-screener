@@ -197,3 +197,14 @@ Chọn bộ tiêu chuẩn → **▶️ Chạy sàng lọc**. Vũ trụ mặc đ�
 
 Ngưỡng chỉnh được trong "⚙️ Chỉnh ngưỡng", nhưng không bắt buộc. Các bộ là quy tắc kinh điển, **chưa được backtest
 riêng trên thị trường Hàn** trong App. Chỉ phần định giá của quy trình đã kiểm chứng (IC +0,106).
+
+### Điều hướng trên thanh bên (11/11/2026)
+
+5 bước (và 6 phần con của bước ④) nằm ở **🧭 Quy trình** trên thanh bên. Ngay dưới là giá, giá trị hợp lý và kết luận
+của mã, luôn hiện. Cuối mỗi phần có nút **← trước / tiếp →** để đi tuần tự qua 10 phần.
+
+Mọi bước vẫn được tính đầy đủ, chỉ phần đang chọn được hiện ra, nên ô đã sửa không mất khi đổi bước.
+
+**Giả định** gom vào mục thu gọn "⚙️ Giả định chi phí vốn & dự phóng". Dòng tóm tắt cho biết đang dùng mặc định KCI
+hay đã chỉnh mấy mục, kèm Ke thực tế; có nút ↺ về mặc định. Danh sách đối thủ (số mã trong nước, mã nước ngoài) nằm
+trong bước ①.

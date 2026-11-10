@@ -114,18 +114,38 @@ def _foreign(codes: tuple) -> list:
 
 reg = _reg()
 
-# ---------------------------------------------------------------------------- sidebar: giả định
+# ---------------------------------------------------------------------------- thanh bên: điều hướng + giả định
+STEPS = ["① Đối thủ trong & ngoài nước", "② Phân tích & bóc tách tài chính", "③ Chất lượng tài sản",
+         "④ Định giá theo ngành", "⑤ Kết luận & đánh giá tổng quan"]
+SUB4 = ["🏭 Chuyên ngành", "Dự phóng", "Chi phí vốn", "Các mô hình", "Kịch bản & độ nhạy",
+        "Football field & nhật ký"]
+_POS = [(x, None) for x in STEPS[:3]] + [(STEPS[3], x) for x in SUB4] + [(STEPS[4], None)]
+NAV = st.sidebar.container()          # điều hướng 5 bước — trên cùng thanh bên
+SUMMARY = st.sidebar.container()      # giá trị hợp lý + kết luận — luôn hiện, điền ở cuối trang
+
+_rf = _rf_live()
+DEF = {"as_rf": round((_rf or 0.032) * 100, 2), "as_erp": 4.87, "as_g": 2.0, "as_w": 0.9, "as_years": 5}
+
+
+def _reset_assump():
+    for k, v in DEF.items():
+        st.session_state[k] = v
+
+
+for _k, _v in DEF.items():               # khởi tạo một lần → widget đọc từ session_state, không cảnh báo
+    st.session_state.setdefault(_k, _v)
 with st.sidebar:
-    st.header("⚙️ Giả định")
-    _rf = _rf_live()
-    rf = st.number_input("Rf — TPCP Hàn 10 năm (%)", 0.0, 10.0,
-                         round((_rf or 0.032) * 100, 2), 0.05,
-                         help="Mặc định lấy live từ FRED" if _rf else "FRED lỗi → 3,2%") / 100
-    erp = st.number_input("ERP (%)", 2.0, 10.0, 4.87, 0.05, help="Damodaran, Hàn Quốc 01/2026") / 100
-    g_term = st.number_input("g dài hạn (%)", 0.0, 2.5, 2.0, 0.1, help="Trần 2,5% và ≤ Rf") / 100
-    w = st.select_slider("w — độ bền siêu lợi nhuận (RIM)", [0.8, 0.85, 0.9, 0.95, 1.0], 0.9)
-    years = st.slider("Số năm dự phóng", 3, 5, 5)
-    n_peers = st.slider("Số đối thủ trong nước", 5, 20, 12)
+    st.markdown("---")
+    _changed = [k for k, v in DEF.items() if st.session_state.get(k) != v]
+    ASSUMP_HDR = st.empty()
+    with st.expander("⚙️ Giả định chi phí vốn & dự phóng", expanded=bool(_changed)):
+        rf = st.number_input("Rf — TPCP Hàn 10 năm (%)", 0.0, 10.0, step=0.05, key="as_rf",
+                             help="Mặc định lấy live từ FRED" if _rf else "FRED lỗi → 3,2%") / 100
+        erp = st.number_input("ERP (%)", 2.0, 10.0, step=0.05, key="as_erp", help="Damodaran, Hàn Quốc 01/2026") / 100
+        g_term = st.number_input("g dài hạn (%)", 0.0, 2.5, step=0.1, key="as_g", help="Trần 2,5% và ≤ Rf") / 100
+        w = st.select_slider("w — độ bền siêu lợi nhuận (RIM)", [0.8, 0.85, 0.9, 0.95, 1.0], key="as_w")
+        years = st.slider("Số năm dự phóng", 3, 5, key="as_years")
+        st.button("↺ Về mặc định KCI", on_click=_reset_assump, disabled=not _changed, width="stretch")
 
 A = V.Assumptions(rf=rf, erp=erp, g_terminal=g_term, persistence=w, years_high=years)
 
@@ -145,7 +165,49 @@ if not tk:
     st.info("Nhập một mã rồi bấm **Bắt đầu**. Trang sẽ đi lần lượt 5 bước (đối thủ → bóc tách → chất lượng tài sản → định giá → kết luận) và ra một báo cáo tóm tắt.")
     st.stop()
 
-with st.spinner(f"Đang lấy dữ liệu {tk} (giá, BCTC Naver/DART, beta, peer cùng ngành)…"):
+# ---------------------------------------------------------------------------- điều hướng (thanh bên)
+st.session_state.setdefault("vp_step", STEPS[0])
+st.session_state.setdefault("vp_sub", SUB4[0])
+
+
+def _go(delta: int):
+    cur = (st.session_state["vp_step"], st.session_state["vp_sub"] if st.session_state["vp_step"] == STEPS[3] else None)
+    i = max(0, min(len(_POS) - 1, _POS.index(cur) + delta))
+    st.session_state["vp_step"], sub_ = _POS[i]
+    if sub_:
+        st.session_state["vp_sub"] = sub_
+
+
+with NAV:
+    st.markdown("### 🧭 Quy trình")
+    step = st.radio("Bước", STEPS, key="vp_step", label_visibility="collapsed")
+    with st.container(key="vpnavsub"):
+        sub = st.radio("Phần định giá", SUB4, key="vp_sub")
+_si = STEPS.index(step)
+_ji = SUB4.index(sub)
+# Mọi bước vẫn được dựng (giữ nguyên ô anh đã sửa khi đổi bước); chỉ bước đang chọn hiện ra
+_css = "".join(f".st-key-vpstep{i}{{display:none}}" for i in range(len(STEPS)) if i != _si)
+_css += "".join(f".st-key-vpsub{j}{{display:none}}" for j in range(len(SUB4)) if j != _ji)
+if _si != 3:
+    _css += ".st-key-vpnavsub{display:none}"
+st.markdown(f"<style>{_css}</style>", unsafe_allow_html=True)
+
+HDR = st.container()
+_C = [st.container(key=f"vpstep{i}") for i in range(len(STEPS))]
+for _i, _c in enumerate(_C):
+    if _i != 3:
+        _c.markdown(f"### {STEPS[_i]}")
+with _C[3]:
+    _S = [st.container(key=f"vpsub{j}") for j in range(len(SUB4))]
+    for _j, _c in enumerate(_S):
+        _c.markdown(f"### ④ Định giá theo ngành — {SUB4[_j]}")
+T = {"1": _C[0], "2": _C[1], "3": _C[1], "q": _C[2], "sec": _S[0], "4": _S[1], "5": _S[2], "6": _S[3],
+     "7": _S[4], "8": _S[5], "end": _C[4]}
+PEER_CFG = _C[0].expander("⚙️ Danh sách đối thủ (không bắt buộc)")
+with PEER_CFG:
+    n_peers = st.slider("Số đối thủ trong nước", 5, 20, 12, key="vp_npeers")
+
+with st.spinner(f"Đang lấy dữ liệu {tk} (giá, BCTC Naver/DART, beta, đối thủ cùng ngành)…"):
     D = _load(tk, n_peers)
 row, series, quarters = dict(D["row"]), D["series"], D["quarters"]
 beta, extras, peer_rows = D["beta"], D["extras"], D["peers"]
@@ -160,10 +222,9 @@ idn = P.identify(row)
 dq = P.data_quality(row, series, quarters, beta)
 ratios = P.ratio_table(series)
 # ① đối thủ nước ngoài: mặc định theo nhóm ngành, người dùng sửa được (mã Reuters của Naver)
-with st.sidebar:
-    st.markdown("---")
+with PEER_CFG:
     _fdef = ", ".join(PR.FOREIGN_PEERS.get(idn["bucket"], []))
-    _fcodes = st.text_input("Đối thủ nước ngoài (mã Reuters)", _fdef, key=f"fx_{tk}",
+    _fcodes = st.text_input("Đối thủ nước ngoài (mã Reuters của Naver)", _fdef, key=f"fx_{tk}",
                             help="vd TSM, MU.O, 7203.T, 0700.HK — để trống = không so nước ngoài")
 foreign_codes = tuple(c.strip() for c in _fcodes.split(",") if c.strip())
 with st.spinner("Đang lấy đối thủ nước ngoài…"):
@@ -204,17 +265,10 @@ LOG_PATH = os.path.join(_ROOT, "valuation_log.csv")
 
 
 # ---------------------------------------------------------------------------- tiêu đề + bảng giả định
-st.subheader(f"{name} · {tk}")
-st.caption(f"{row.get('industry_kr') or '—'} · nguồn giá {row.get('source') or '—'} · "
-           f"vốn hóa {mc / 1e12:,.1f} nghìn tỷ KRW" if mc else "")
-
-_OUTER = st.tabs(["① Đối thủ trong & ngoài nước", "② Phân tích & bóc tách tài chính", "③ Chất lượng tài sản",
-                  "④ Định giá theo ngành", "⑤ Kết luận & đánh giá tổng quan"])
-with _OUTER[3]:
-    _INNER = st.tabs(["🏭 Chuyên ngành", "Dự phóng", "Chi phí vốn", "Các mô hình", "Kịch bản & độ nhạy",
-                      "Football field & nhật ký"])
-T = {"1": _OUTER[0], "2": _OUTER[1], "3": _OUTER[1], "q": _OUTER[2], "sec": _INNER[0], "4": _INNER[1],
-     "5": _INNER[2], "6": _INNER[3], "7": _INNER[4], "8": _INNER[5], "end": _OUTER[4]}
+with HDR:
+    st.subheader(f"{name} · {tk}")
+    st.caption(f"{row.get('industry_kr') or '—'} · nguồn giá {row.get('source') or '—'} · "
+               f"vốn hóa {mc / 1e12:,.1f} nghìn tỷ KRW" if mc else "")
 
 # 🏭 chuyên ngành trước ④: backlog / công suất sinh giả định cho ④; rNPV / EV-GWh thành mô hình ở ⑥
 SPEC_MODES = {"none": "Không dùng", "backlog": "Backlog — đóng tàu, quốc phòng",
@@ -554,7 +608,7 @@ with T["3"]:
                    "lớn ở dòng này là lợi nhuận khó lặp lại.")
 
 with T["q"]:
-    st.markdown("#### ③ Chất lượng tài sản" + (f" — hạng **{quality['grade']}** ({quality['score']:.0f}/100)"
+    st.markdown("#### Kết quả" + (f" — hạng **{quality['grade']}** ({quality['score']:.0f}/100)"
                                               if quality and quality.get("score") is not None else ""))
     if not quality:
         st.info("Cần DART_API_KEY (BCTC đầy đủ) để chấm chất lượng tài sản.")
@@ -855,8 +909,28 @@ with T["end"]:
         st.toast("Đã lưu vào nhật ký định giá")
         st.rerun()
 
-# tóm tắt luôn hiện ở đầu trang (dưới tiêu đề) — kết quả thay đổi ngay khi sửa giả định
-st.sidebar.markdown("---")
-st.sidebar.metric("Giá trị hợp lý", f"{rec['fair']:,.0f}" if rec["fair"] else "—",
-                  f"{rec['upside']:+.1f}%" if rec["upside"] is not None else None)
-st.sidebar.caption(f"Độ tin cậy {rec['confidence']} · {rec['status']}")
+# ---------------------------------------------------------------------------- thanh bên: kết quả luôn hiện
+with SUMMARY:
+    st.markdown("---")
+    st.markdown(f"**{name}** · {tk}")
+    c1, c2 = st.columns(2)
+    c1.metric("Giá", f"{price:,.0f}" if price else "—")
+    c2.metric("Giá trị hợp lý", f"{rec['fair']:,.0f}" if rec["fair"] else "—",
+              f"{rec['upside']:+.1f}%" if rec["upside"] is not None else None)
+    st.caption(f"{overall['verdict']}  \nĐộ tin cậy {rec['confidence']} · tổng quan "
+               + (f"{overall['total']:.0f}/100" if overall["total"] is not None else "—"))
+ASSUMP_HDR.caption(
+    ("✏️ Đã chỉnh " + str(len(_changed)) + " giả định" if _changed else "✅ Đang dùng giả định mặc định KCI")
+    + f" · Ke {ke * 100:.2f}% · Rf {rf * 100:.2f}% · ERP {erp * 100:.2f}% · g {g_term * 100:.1f}% · w {w} · "
+      f"{years} năm")
+
+# ---------------------------------------------------------------------------- bước trước / bước tiếp
+_cur = (step, sub if _si == 3 else None)
+_pi = _POS.index(_cur)
+st.markdown("---")
+_b1, _b2, _b3 = st.columns([1, 2, 1])
+_b1.button("← " + (_POS[_pi - 1][1] or _POS[_pi - 1][0]) if _pi > 0 else "← Bước trước", on_click=_go, args=(-1,),
+           disabled=_pi == 0, width="stretch")
+_b2.caption(f"<div style='text-align:center'>Phần {_pi + 1}/{len(_POS)}</div>", unsafe_allow_html=True)
+_b3.button((_POS[_pi + 1][1] or _POS[_pi + 1][0]) + " →" if _pi < len(_POS) - 1 else "Bước tiếp →",
+           on_click=_go, args=(1,), disabled=_pi == len(_POS) - 1, type="primary", width="stretch")
