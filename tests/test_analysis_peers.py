@@ -128,3 +128,65 @@ def test_rank_orders_by_verdict_then_upside():
            {"Mã": "c", "Kết luận": "🟢 Rẻ hơn …", "Chênh %": 40},
            {"Mã": "d", "Kết luận": "⚪ Chưa đủ cơ sở định giá", "Chênh %": None}]
     assert [r["Mã"] for r in SC.rank(res)] == ["c", "b", "a", "d"]
+
+
+# ---------------------------------------------------------------- bộ tiêu chuẩn rẻ
+def _r(tk, pe, pb, div=2.0, mcap=2e12, ik="식품", price=10000):
+    eps = price / pe if pe and pe > 0 else -100
+    bps = price / pb
+    return {"ticker": tk, "name": tk, "industry_kr": ik, "price": price, "per": pe if pe and pe > 0 else None,
+            "pbr": pb, "eps": eps, "bps": bps, "div_yield": div, "market_cap": mcap}
+
+
+def test_every_preset_runs_and_documents_source():
+    import screen as SC
+    rows = [_r(f"{i:06d}", pe, pb) for i, (pe, pb) in enumerate([(5, .5), (8, .9), (12, 1.2), (20, 3), (-1, 1)])]
+    for k, p in SC.PRESETS.items():
+        assert p["source"] and p["desc"] and "stage1" in p and "stage2" in p
+        out = SC.apply_preset(rows, k)
+        assert len(out) == len(rows)
+        assert all(("Qua lọc" in x and "Lý do loại" in x) for x in out)
+
+
+def test_graham_defensive_rules():
+    import screen as SC
+    rows = [_r("a", 10, 1.0), _r("b", 14, 1.8), _r("c", 12, 1.4, div=0.0), _r("d", 9, 1.2, mcap=5e11)]
+    ok = {x["Mã"]: x["Qua lọc"] for x in SC.apply_preset(rows, "graham")}
+    assert ok == {"a": True, "b": False, "c": False, "d": False}     # P/B 1,8 · không cổ tức · vốn hóa nhỏ
+
+
+def test_graham_number_margin_sorted():
+    import screen as SC
+    out = SC.apply_preset([_r("a", 10, 1.0), _r("b", 6, 0.8), _r("c", 20, 2.0)], "graham_number")
+    assert [x["Mã"] for x in out if x["Qua lọc"]] == ["b", "a"]       # c: 40 > 22,5
+    assert out[0]["Biên an toàn Graham %"] > out[1]["Biên an toàn Graham %"]
+
+
+def test_magic_formula_ranks_and_excludes_financials():
+    import screen as SC
+    rows = [_r(f"{i:06d}", pe, pb) for i, (pe, pb) in enumerate([(5, 1.5), (6, .6), (9, 2.0), (15, 1.0)])]
+    rows.append(_r("bank01", 4, 0.4, ik="은행"))
+    out = SC.apply_preset(rows, "magic", {"magic_top": 2})
+    kept = [x["Mã"] for x in out if x["Qua lọc"]]
+    assert len(kept) == 2 and "bank01" not in kept
+    assert "000000" in kept                                            # E/P cao nhất và ROE cao nhất (5×… ROE 30%)
+
+
+def test_piotroski_bottom_pb_and_stage2():
+    import screen as SC
+    rows = [_r(f"{i:06d}", 10, pb) for i, pb in enumerate([0.3, 0.6, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4, 2.7, 3.0])]
+    passed = [x["Mã"] for x in SC.apply_preset(rows, "piotroski") if x["Qua lọc"]]
+    assert passed == ["000000", "000001"]                              # 20% P/B thấp nhất
+    assert SC.stage2_check({"F-score": 7}, "piotroski")[0]
+    assert not SC.stage2_check({"F-score": 5}, "piotroski")[0]
+    assert not SC.stage2_check({"F-score": None}, "piotroski")[0]
+
+
+def test_stage2_graham_and_valueup():
+    import screen as SC
+    good = {"Thanh toán hiện hành": 1.8, "Có năm lỗ": False, "Ngành": "식품"}
+    assert SC.stage2_check(good, "graham")[0]
+    assert not SC.stage2_check({**good, "Có năm lỗ": True}, "graham")[0]
+    assert SC.stage2_check({"Thanh toán hiện hành": None, "Có năm lỗ": False, "Ngành": "은행"}, "graham")[0]
+    assert not SC.stage2_check({"Chất lượng TS": "B", "Nợ/VCSH": 3.0, "Ngành": "식품"}, "valueup")[0]
+    assert SC.stage2_check({"Chất lượng TS": "B", "Nợ/VCSH": 3.0, "Ngành": "은행"}, "valueup")[0]

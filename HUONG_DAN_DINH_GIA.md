@@ -176,3 +176,24 @@ thiếu thì so cả danh sách), P/E tối đa, cổ tức tối thiểu, bắt
 trình 🧮** (giả định mặc định, không đối thủ nước ngoài cho nhanh), lưu hồ sơ → ④ xếp hạng: kết luận → chênh lệch →
 chất lượng; mở mã bất kỳ trong 🧮 để đi đủ 5 bước. Backtest mới kiểm chứng phần **định giá**; lọc P/E thấp và điểm
 tổng hợp chưa được kiểm chứng riêng.
+
+### Bộ tiêu chuẩn sàng lọc có sẵn (10/11/2026) — trang 🔍 chạy bằng 1 nút
+
+Chọn bộ tiêu chuẩn → **▶️ Chạy sàng lọc**. Vũ trụ mặc định: top 200 vốn hóa cả hai sàn. App làm hết phần còn lại:
+- **Tầng 1** — dữ liệu thị trường trên cả vũ trụ.
+- **Định giá sâu** — tối đa 20 mã qua lọc, bằng đúng quy trình 🧮.
+- **Tầng 2** — kiểm bằng BCTC DART.
+- **Xếp hạng** — mã đạt tầng 2 lên trước.
+
+| Bộ | Tầng 1 | Tầng 2 | Nguồn |
+|---|---|---|---|
+| **KCI (mặc định)** | có lãi, ROE ≥ 8%, P/E & P/B ÷ ngành ≤ 0,8 | chất lượng TS ≥ C, có giá trị qua cổng | quy tắc nhà, phần định giá đã backtest |
+| **Graham phòng thủ** | P/E ≤ 15, P/B ≤ 1,5, P/E×P/B ≤ 22,5, có cổ tức, vốn hóa ≥ 1.000 tỷ | thanh toán hiện hành ≥ 1,5, không năm lỗ | Graham, *The Intelligent Investor* ch.14 |
+| **Số Graham** | giá ≤ √(22,5·EPS·BPS), xếp theo biên an toàn | chất lượng TS ≥ C | Graham |
+| **Value-up Hàn Quốc** | P/B ≤ 1, ROE ≥ 10% | chất lượng TS ≥ C, nợ/VCSH ≤ 200% (trừ tài chính) | Corporate Value-up (FSC/KRX 2024) |
+| **Cổ tức cao bền vững** | cổ tức ≥ 4%, P/E ≤ 15, tỷ lệ chi trả ≤ 70%, ROE ≥ 6% | không năm lỗ, chất lượng TS ≥ C | phổ biến |
+| **Magic Formula** | bỏ tài chính & tiện ích, vốn hóa ≥ 500 tỷ, top 30 theo hạng E/P + hạng ROE | chất lượng TS ≥ C | Greenblatt (2005) — biến thể E/P, ROE thay EBIT/EV, ROIC |
+| **Piotroski** | 20% P/B thấp nhất | F-score ≥ 7/8 | Piotroski (2000) — 8/9 tiêu chí |
+
+Ngưỡng chỉnh được trong "⚙️ Chỉnh ngưỡng", nhưng không bắt buộc. Các bộ là quy tắc kinh điển, **chưa được backtest
+riêng trên thị trường Hàn** trong App. Chỉ phần định giá của quy trình đã kiểm chứng (IC +0,106).

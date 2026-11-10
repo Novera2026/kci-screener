@@ -329,4 +329,6 @@ def quality(fs: dict, market_cap_eok: Optional[float] = None, bucket: Optional[s
     if fin and grade == "A":
         grade = "B"
     return {"year": fs["year"], "checks": checks, "score": score, "grade": grade, "n_fail": n_fail,
-            "fin_limited": fin}
+            "fin_limited": fin, "fscore": fs_, "fscore_n": n,
+            "current_ratio": _div(c.get("current_assets"), c.get("current_liab")),
+            "debt_equity": _div(c.get("liabilities"), c.get("equity"))}
