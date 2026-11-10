@@ -225,3 +225,28 @@ Kết quả định giá **không lưu để dùng lại**. App tách hai loại
 - Hồ sơ `dossiers/` và nhật ký chỉ là bản ghi, không bao giờ được đọc lại để định giá.
 - Trang chính (`app.py`): Rf, KOSPI, beta từng mã, vốn hóa công ty con (SOTP) chỉ giữ trong **một lần bấm 🚀 Cào &
   định giá**. Bộ nhớ nằm trong phiên của từng người dùng (trước đây cache chung tới 24 giờ) và bị xóa mỗi lần chạy mới.
+
+## Rà soát trang "Định giá tổng hợp" (11/11/2026)
+
+**Giả định — đối chiếu nguồn gốc:**
+
+| Giả định | Trước | Chuẩn thị trường hiện tại | Sau |
+|---|---|---|---|
+| Rf | FRED, trung bình **tháng 9** = 4,454% | Lợi suất 국고채 10년 **hằng ngày** = 3,87% (10/11/2026) | **Naver thời gian thực** (`KR10YT=RR`), dự phòng FRED; ghi nguồn và giờ |
+| ERP | 4,87% | Damodaran: Hàn Quốc Aa2, ERP 4,87% (4,23% + rủi ro quốc gia 0,64%), cập nhật 05/01/2026, chưa có bản mới | Giữ 4,87% |
+| Beta | 52 tuần vs KOSPI, Blume | Như 52주베타 của WISEreport | Giữ |
+| g dài hạn | 2,0%, trần 2,5% và ≤ Rf | — | Giữ |
+
+Rf cũ cao hơn thực tế 0,58 điểm, làm giá trị hợp lý trung vị **thấp hơn 11,4%** (top 30 vốn hóa).
+
+**Chất lượng kết quả:**
+- Trước đây, con số chính của trang là **lõi KCI một mình**. Backtest cho lõi này IC +0,011 (không có khả năng dự
+  báo), và 10/21 mã lệch hơn 30% so với trang 🧮.
+- Đối thủ chỉ lấy trong danh sách nhập, nên chỉ 5/30 mã được đối chiếu.
+
+Giờ cột **Giá trị hợp lý / Chênh % / Độ tin cậy / Trạng thái** là kết luận của **quy trình định giá** (cùng công thức
+trang 🧮, IC +0,106), với đối thủ = top 8 vốn hóa cùng ngành, lấy giá mới mỗi lần chạy. Kết quả: 26/30 mã công bố
+(trước 22). Lõi KCI vẫn hiện ở cột "tham khảo".
+
+**Còn lại, chưa đổi:** "DCF earnings" dùng tăng trưởng 8%/năm × 5 năm cho mọi mã. Đây là số tự đặt, nhưng nằm trong lõi
+của quy trình đã backtest, nên muốn đổi phải backtest trước.

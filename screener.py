@@ -646,19 +646,44 @@ def fetch_many(queries: list[str], registry: Optional[TickerRegistry] = None,
 # ----------------------------------------------------------------------------
 # Tham số thị trường LIVE: Rf (TPCP 10Y) + Beta (52 tuần vs KOSPI)
 # ----------------------------------------------------------------------------
-def fetch_kgb10y() -> Optional[float]:
-    """Lợi suất TPCP Hàn 10 năm (Rf) dạng THẬP PHÂN, từ FRED (OECD, không cần key).
-    Series IRLTLT01KRM156N (theo tháng). None nếu lỗi."""
+RF_LAST: dict = {}          # nguồn + thời điểm của lần lấy Rf gần nhất (để giao diện ghi rõ)
+
+
+def fetch_kgb10y_detail() -> dict:
+    """Lợi suất TPCP Hàn 10 năm (국고채 10년) — {value (thập phân), source, asof}.
+
+    Ưu tiên Naver thời gian thực (KR10YT=RR, cập nhật trong phiên). Dự phòng FRED IRLTLT01KRM156N — chỉ là trung
+    bình THÁNG và trễ 1–2 tháng (11/2026: FRED còn tháng 9 = 4,454% trong khi thị trường 3,87% → Ke cao hơn thực tế
+    0,58 điểm, giá trị hợp lý bị đánh thấp ~11%). Lỗi cả hai → {}."""
+    import requests
     try:
-        import requests
-        r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv"
-                         "?id=IRLTLT01KRM156N", timeout=10)
+        j = requests.get("https://api.stock.naver.com/marketindex/bond/KR10YT=RR",
+                         headers={"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"},
+                         timeout=10).json()
+        v = float(str(j.get("closePrice")).replace(",", ""))
+        if 0.0 < v < 20.0:
+            out = {"value": v / 100.0, "source": "Naver 국고채 10년 (thời gian thực)",
+                   "asof": str(j.get("localTradedAt") or "")[:16].replace("T", " ")}
+            RF_LAST.clear(); RF_LAST.update(out)
+            return out
+    except Exception:
+        pass
+    try:
+        r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=IRLTLT01KRM156N", timeout=10)
         r.raise_for_status()
         vals = [ln.split(",") for ln in r.text.strip().splitlines()[1:]]
         last = [v for v in vals if len(v) == 2 and v[1] not in (".", "")][-1]
-        return float(last[1]) / 100.0
+        out = {"value": float(last[1]) / 100.0, "source": "FRED (trung bình tháng, có độ trễ)",
+               "asof": last[0][:7]}
+        RF_LAST.clear(); RF_LAST.update(out)
+        return out
     except Exception:
-        return None
+        return {}
+
+
+def fetch_kgb10y() -> Optional[float]:
+    """Rf = lợi suất TPCP Hàn 10 năm dạng THẬP PHÂN (Naver thời gian thực, dự phòng FRED). None nếu lỗi."""
+    return fetch_kgb10y_detail().get("value")
 
 
 def fetch_weekly_closes(symbol: str) -> list[float]:

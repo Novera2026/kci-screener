@@ -145,7 +145,8 @@ with st.sidebar:
     ASSUMP_HDR = st.empty()
     with st.expander("⚙️ Giả định chi phí vốn & dự phóng", expanded=bool(_changed)):
         rf = st.number_input("Rf — TPCP Hàn 10 năm (%)", 0.0, 10.0, step=0.05, key="as_rf",
-                             help="Mặc định lấy live từ FRED" if _rf else "FRED lỗi → 3,2%") / 100
+                             help="Mặc định = lợi suất TPCP Hàn 10 năm thời gian thực (Naver), dự phòng FRED"
+                             if _rf else "Không lấy được Rf → 3,2%") / 100
         erp = st.number_input("ERP (%)", 2.0, 10.0, step=0.05, key="as_erp", help="Damodaran, Hàn Quốc 01/2026") / 100
         g_term = st.number_input("g dài hạn (%)", 0.0, 2.5, step=0.1, key="as_g", help="Trần 2,5% và ≤ Rf") / 100
         w = st.select_slider("w — độ bền siêu lợi nhuận (RIM)", [0.8, 0.85, 0.9, 0.95, 1.0], key="as_w")
@@ -317,7 +318,7 @@ with HDR:
     _h1, _h2 = st.columns([4, 1])
     _bt = f"{beta:.2f}" if beta is not None else "—"
     _rfv = f"{_snap['rf'] * 100:.2f}%" if _snap.get("rf") else "—"
-    _h1.caption(f"🕒 Số liệu thị trường (giá, vốn hóa, P/E–P/B đối thủ, beta {_bt}, Rf FRED {_rfv}) lấy lúc "
+    _h1.caption(f"🕒 Số liệu thị trường (giá, vốn hóa, P/E–P/B đối thủ, beta {_bt}, Rf 국고채 10년 {_rfv}) lấy lúc "
                 f"**{_snap['at']:%H:%M:%S %d/%m}** — mỗi lần bấm Bắt đầu đều lấy mới; kết quả định giá không dùng lại "
                 "từ lần trước.")
     _h2.button("🔄 Cập nhật", on_click=_refresh_market, width="stretch",

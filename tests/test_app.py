@@ -64,12 +64,14 @@ def test_full_screen_run():
     at = next(b for b in at.button if "Cào" in b.label).click().run()
     assert not at.exception, at.exception
     frames = [d.value for d in at.dataframe]
-    assert any("Fair value" in getattr(f, "columns", []) for f in frames)
-    vt = next(f for f in frames if "Trạng thái" in getattr(f, "columns", []))   # cổng tin cậy 06/11/2026
-    assert all(s[0] in "✓○△⚪—" for s in vt["Trạng thái"])
-    # fair công bố luôn nằm trong vùng 0,4–2,5× giá (mã ngoài vùng → "—")
-    pub = vt.dropna(subset=["Fair value"])
-    assert all(0.4 <= fv / px <= 2.5 for fv, px in zip(pub["Fair value"], pub["Giá"]))
+    # con số chính = kết luận của quy trình định giá (trang 🧮); lõi KCI chỉ là cột tham khảo (11/11/2026)
+    vt = next(f for f in frames if "Giá trị hợp lý" in getattr(f, "columns", []))
+    assert "Lõi KCI (tham khảo)" in vt.columns
+    assert all(str(s)[0] in "✓○△⚪—" for s in vt["Trạng thái"])
+    # giá trị công bố luôn nằm trong vùng 0,4–2,5× giá
+    pub = vt.dropna(subset=["Giá trị hợp lý"])
+    assert len(pub) > 0
+    assert all(0.4 <= fv / px <= 2.5 for fv, px in zip(pub["Giá trị hợp lý"], pub["Giá"]))
     assert any("Giá realtime" in c.value for c in at.caption)       # có giờ lấy giá
     assert any("EPS đồng thuận" in getattr(f, "columns", []) for f in frames)
     cb = [c for c in at.checkbox if "EV/EBIT" in c.label]
