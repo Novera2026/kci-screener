@@ -712,28 +712,6 @@ if "screen" in st.session_state:
         return "⚪ Ngang ngành"
     df["valuation_tag"] = [_tag(p, m) for p, m in zip(df["per"], med)]
 
-    # EPS/ROE dự phóng (công thức) -> nuôi cả bảng & định giá forward. Bỏ qua nếu list quá lớn.
-    # Năm dự phóng đã có quý thực công bố → dự phóng = lũy kế quý thực + run-rate quý còn lại.
-    fwd_eps_col, fwd_roe_col, fwd_per_col = [], [], []
-    if len(df) <= PREFETCH_MAX:
-        for tk, mc, px, bps in zip(df["ticker"], df["market_cap"], df["price"], df["bps"]):
-            try:
-                _f = _fin(tk)
-                fc = project_forecast(
-                    [c for c in _f["annual"] if not c.get("is_consensus")], mc, px,
-                    quarters=_f["quarter"])
-            except Exception:
-                fc = None
-            fwd_eps_col.append(fc.get("eps") if fc else None)
-            fwd_roe_col.append((fc["eps"] / bps) if (fc and fc.get("eps") and bps) else None)
-            fwd_per_col.append(fc.get("period") if fc else None)
-    else:
-        fwd_eps_col = [None] * len(df)
-        fwd_roe_col = [None] * len(df)
-        fwd_per_col = [None] * len(df)
-    df["fwd_eps"] = fwd_eps_col
-    df["fwd_roe"] = fwd_roe_col
-    df["fwd_period"] = fwd_per_col
 
     # Beta riêng từng mã (52T vs KOSPI) → vào CAPM/Ke. Tắt hoặc lỗi → None (dùng beta phẳng).
     # Đã nạp song song lúc bấm 🚀; mã nào thiếu (phiên cũ) thì tính lại qua cache.
@@ -778,6 +756,41 @@ if "screen" in st.session_state:
     enrich = st.checkbox(
         "📑 Bổ sung số liệu tài chính (doanh thu, LN thuần, ROE, nợ, EPS dự tính, đánh giá "
         f"— cào thêm ~0.5s/mã · {len(df)} mã)", value=len(df) <= 60)
+
+    # EPS/ROE dự phóng (công thức) -> nuôi cả bảng & định giá forward.
+    # Năm dự phóng đã có quý thực công bố → dự phóng = lũy kế quý thực + run-rate quý còn lại.
+    # List lớn (> PREFETCH_MAX) chỉ tính khi bật "Bổ sung số liệu tài chính" (cần BCTC từng mã),
+    # nếu không P/E dự kiến / Giá hợp lý / Upside sẽ trống cả bảng.
+    fwd_eps_col, fwd_roe_col, fwd_per_col = [], [], []
+    if len(df) <= PREFETCH_MAX or enrich:
+        _fbar = (st.progress(0.0, text="Đang tính EPS dự phóng từng mã...")
+                 if len(df) > PREFETCH_MAX else None)
+        for _j, (tk, mc, px, bps) in enumerate(zip(df["ticker"], df["market_cap"],
+                                                   df["price"], df["bps"])):
+            try:
+                _f = _fin(tk)
+                fc = project_forecast(
+                    [c for c in _f["annual"] if not c.get("is_consensus")], mc, px,
+                    quarters=_f["quarter"])
+            except Exception:
+                fc = None
+            fwd_eps_col.append(fc.get("eps") if fc else None)
+            fwd_roe_col.append((fc["eps"] / bps) if (fc and fc.get("eps") and bps) else None)
+            fwd_per_col.append(fc.get("period") if fc else None)
+            if _fbar is not None:
+                _fbar.progress((_j + 1) / len(df))
+        if _fbar is not None:
+            _fbar.empty()
+    else:
+        fwd_eps_col = [None] * len(df)
+        fwd_roe_col = [None] * len(df)
+        fwd_per_col = [None] * len(df)
+        st.info(f"Danh sách {len(df)} mã > {PREFETCH_MAX}: cột **P/E dự kiến, Giá hợp lý (P/E), "
+                "Upside P/E** cần EPS dự phóng từ BCTC từng mã — tick ô **📑 Bổ sung số liệu tài "
+                "chính** ở trên để tính (lâu hơn, ~0.5s/mã).")
+    df["fwd_eps"] = fwd_eps_col
+    df["fwd_roe"] = fwd_roe_col
+    df["fwd_period"] = fwd_per_col
 
     def _ind(i):
         s = df["sector"].iloc[i]
