@@ -7,7 +7,15 @@ Chạy:
 
 Streamlit Cloud dùng file này làm Main file (không đổi). Nội dung từng trang nằm ở views/ và pages/.
 """
+import os
+
 import streamlit as st
+
+import reload_guard
+
+# Sau mỗi lần deploy: module dùng chung đã đổi trên đĩa → nạp lại cả bộ (tránh trang mới gọi hàm mà module cũ
+# trong bộ nhớ chưa có — lỗi ImportError fetch_kgb10y_detail 11/11/2026).
+reload_guard.drop_stale(os.path.dirname(os.path.abspath(__file__)))
 
 PAGES = [
     st.Page("views/tong_hop.py", title="Định giá tổng hợp", icon="📈", default=True),

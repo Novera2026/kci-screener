@@ -117,3 +117,49 @@ def test_navigation_names_and_order():
 def test_tong_hop_view_boots():
     at = AppTest.from_file(VIEW, default_timeout=120).run()
     assert not at.exception, at.exception
+
+
+def test_reload_guard_drops_stale_project_modules(tmp_path):
+    """Module dự án đổi trên đĩa → bỏ CẢ BỘ khỏi sys.modules (lần import sau đọc mã mới), không bỏ lặp lại."""
+    import importlib
+    import time as _t
+    import reload_guard
+    (tmp_path / "kci_mod_a.py").write_text("X = 1\n")
+    (tmp_path / "kci_mod_b.py").write_text("Y = 1\n")
+    sys.path.insert(0, str(tmp_path))
+    reg = sys.__dict__.setdefault(reload_guard._REG, {})
+    try:
+        importlib.import_module("kci_mod_a"); importlib.import_module("kci_mod_b")
+        far_future = _t.time() + 3600                                 # tiến trình "khởi động" sau khi sửa file
+        assert reload_guard.drop_stale(str(tmp_path), proc_start=far_future) == []      # ghi mốc
+        assert reload_guard.drop_stale(str(tmp_path), proc_start=far_future) == []      # không đổi → giữ
+        os.utime(tmp_path / "kci_mod_a.py", (_t.time() + 5, _t.time() + 5))
+        (tmp_path / "kci_mod_a.py").write_text("X = 2\n")
+        os.utime(tmp_path / "kci_mod_a.py", (_t.time() + 5, _t.time() + 5))
+        assert reload_guard.drop_stale(str(tmp_path), proc_start=far_future) == ["kci_mod_a", "kci_mod_b"]
+        assert importlib.import_module("kci_mod_a").X == 2
+        importlib.import_module("kci_mod_b")
+        assert reload_guard.drop_stale(str(tmp_path), proc_start=far_future) == []      # không bỏ lặp lại
+    finally:
+        sys.path.remove(str(tmp_path))
+        for n in ("kci_mod_a", "kci_mod_b"):
+            sys.modules.pop(n, None)
+            reg.pop(n, None)
+
+
+def test_reload_guard_first_sight_after_process_start(tmp_path):
+    """Tình huống Cloud: module nạp TRƯỚC deploy, file sửa SAU khi tiến trình khởi động → bỏ ngay lần đầu thấy."""
+    import importlib
+    import reload_guard
+    (tmp_path / "kci_mod_c.py").write_text("Z = 1\n")
+    sys.path.insert(0, str(tmp_path))
+    reg = sys.__dict__.setdefault(reload_guard._REG, {})
+    try:
+        importlib.import_module("kci_mod_c")
+        assert reload_guard.drop_stale(str(tmp_path), proc_start=1.0) == ["kci_mod_c"]
+        importlib.import_module("kci_mod_c")
+        assert reload_guard.drop_stale(str(tmp_path), proc_start=1.0) == []             # đã có mốc → giữ
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("kci_mod_c", None)
+        reg.pop("kci_mod_c", None)
