@@ -35,8 +35,11 @@ def _raw_signal(rec: dict) -> Optional[float]:
 
 
 def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years_fc: int = 5,
-                    with_fs: bool = True) -> list[dict]:
-    """Chạy pipeline.evaluate cho từng điểm của backtest_dart.build_point."""
+                    with_fs: bool = True, g_high_fn=None) -> list[dict]:
+    """Chạy pipeline.evaluate cho từng điểm của backtest_dart.build_point.
+
+    g_high_fn(row, hist, drivers) → tăng trưởng giai đoạn đầu RIÊNG từng mã (thay a.g_high cố định, dùng trong
+    "DCF earnings" và DDM 2 giai đoạn). None = giữ a.g_high. Chỉ dùng dữ liệu ≤ Y−1 (hist) và dự phóng tại mốc."""
     a = a or V.Assumptions()
     by_year: dict = {}
     for p in points:
@@ -65,6 +68,8 @@ def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years
                                          financial=idn["financial"])
                 if drv:
                     drv[0].pop("_basis", None)
+                if g_high_fn is not None:
+                    ap = dataclasses.replace(ap, g_high=g_high_fn(row, hist, drv))
                 ev = P.evaluate(D, ap, drv, idn, dq)
             except Exception:
                 continue
@@ -82,6 +87,8 @@ def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years
                 "raw_ratio": (raw / price) if (raw and price) else None,
                 "raw_upside": (raw / price - 1) if (raw and price) else None,
                 "fc_ok": ev["fg"]["ok"], "n_primary_pass": len(prim), "agree": agree,
+                "base_upside": ((ev["base"].fair_raw / price - 1) if (ev["base"].fair_raw and price) else None),
+                "base_method": ev["base"].auto_method, "g_high": ap.g_high,
                 "fcff_upside": ((ev["fcff"]["value"] / price - 1) if (ev.get("fcff") and ev["fcff"].get("value")
                                                                        and price) else None),
                 "fcff_pass": any(r["name"].startswith("FCFF-DCF") and r["pass"] for r in rec["rows"]),

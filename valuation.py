@@ -33,7 +33,11 @@ class Assumptions:
     beta: float = 1.0          # clamp [0.5, 1.8]
     blume: bool = True         # beta hồi quy TỪNG MÃ → Blume 0,67·β + 0,33 (kéo về 1, như beta điều chỉnh Bloomberg)
     g_terminal: float = 0.020  # tăng trưởng vĩnh viễn, cap 2.5% & ≤ Rf
-    g_high: float = 0.08       # tăng trưởng giai đoạn đầu (DCF/DDM 2 stage)
+    g_high: float = 0.08       # tăng trưởng giai đoạn đầu khi g_high_mode = "fixed"
+    # "sustainable" (mặc định từ 11/11/2026): g giai đoạn đầu RIÊNG từng mã = ROE × (1 − tỷ lệ cổ tức), kẹp [0; 15%]
+    # — công thức chuẩn. Backtest PIT 2021–25: IC kết luận +0,116 (78 mã) / +0,086 (top 200) so với +0,106 / +0,068
+    # của 8% cố định; chưa có ý nghĩa thống kê nhưng 8% cho mọi mã là số tự đặt (backtest_growth.py).
+    g_high_mode: str = "sustainable"
     years_high: int = 5        # số năm giai đoạn tăng trưởng cao
     persistence: float = 0.90  # hệ số duy trì siêu lợi nhuận S-RIM (w): 1.0/0.9/0.8
     payout: Optional[float] = None  # tỷ lệ chi trả cổ tức; None = suy từ DPS/EPS
@@ -86,6 +90,18 @@ def _num(x) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return v if math.isfinite(v) else None
+
+
+G_HIGH_BAND = (0.0, 0.15)
+
+
+def sustainable_growth(eps, bps, dps) -> float:
+    """Tăng trưởng bền vững = ROE × (1 − tỷ lệ cổ tức), kẹp G_HIGH_BAND. EPS/BPS ≤ 0 hoặc thiếu → 0."""
+    eps, bps, dps = _num(eps), _num(bps), _num(dps) or 0.0
+    if not eps or not bps or eps <= 0 or bps <= 0:
+        return 0.0
+    g = eps / bps * (1 - min(max(dps / eps, 0.0), 1.0))
+    return min(max(g, G_HIGH_BAND[0]), G_HIGH_BAND[1])
 
 
 # ----------------------------------------------------------------------------
@@ -624,8 +640,9 @@ def value_stock(row: dict, a: Assumptions,
     methods["P/B-ROE (justified)"] = _pb_roe(roe) if roe is not None else None
     methods["RIM nhiều giai đoạn"] = _rim_ms(roe) if roe is not None else None
     methods["DDM (Gordon)"] = ddm_gordon(dps, ke, g_term)
-    methods["DDM 2 giai đoạn"] = ddm_two_stage(dps, ke, a.g_high, a.years_high, g_term)
-    methods["DCF earnings (thô)"] = dcf_earnings(eps, ke, a.g_high, a.years_high, g_term)
+    g_hi = sustainable_growth(eps, bps, dps) if a.g_high_mode == "sustainable" else a.g_high
+    methods["DDM 2 giai đoạn"] = ddm_two_stage(dps, ke, g_hi, a.years_high, g_term)
+    methods["DCF earnings (thô)"] = dcf_earnings(eps, ke, g_hi, a.years_high, g_term)
     methods["P/E vs median ngành"] = relative_pe_value(eps, sector_median_pe)
     methods["P/B vs median ngành"] = relative_pb_value(bps, sector_median_pb)
 

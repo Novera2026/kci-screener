@@ -134,12 +134,18 @@ with st.sidebar:
     beta = st.slider("Beta mặc định (khi tắt β riêng / thiếu dữ liệu)", 0.5, 1.8, 1.0, 0.05)
     g_term = st.slider("g vĩnh viễn (%) — cap 2.5", 0.0, 2.5, 2.0, 0.1) / 100
     with st.expander("Tham số nâng cao (DCF/DDM 2 giai đoạn)"):
-        g_high = st.slider("g giai đoạn đầu (%)", 0.0, 25.0, 8.0, 0.5) / 100
+        _gmode = st.radio("Tăng trưởng giai đoạn đầu", ["Bền vững theo mã", "Cố định"], horizontal=True,
+                          help="Bền vững (mặc định) = ROE × (1 − tỷ lệ cổ tức) riêng từng mã, kẹp 0–15% — công "
+                               "thức chuẩn; backtest 2021–25 ≥ 8% cố định ở cả 78 mã và top 200 (chưa có ý nghĩa "
+                               "thống kê). Cố định = một tỷ lệ cho mọi mã.")
+        g_high = st.slider("g giai đoạn đầu cố định (%)", 0.0, 25.0, 8.0, 0.5,
+                           disabled=_gmode != "Cố định") / 100
         years_high = st.slider("Số năm tăng trưởng cao", 3, 10, 5, 1)
         persistence = st.select_slider(
             "Hệ số duy trì siêu LN (S-RIM, w)", options=[0.6, 0.8, 0.9, 1.0], value=0.9)
     assume = Assumptions(rf=rf, erp=erp, beta=beta, g_terminal=g_term,
-                         g_high=g_high, years_high=years_high, persistence=persistence)
+                         g_high=g_high, years_high=years_high, persistence=persistence,
+                         g_high_mode="sustainable" if _gmode == "Bền vững theo mã" else "fixed")
     st.caption(f"→ Ke = {assume.ke()*100:.2f}% · g = {assume.g_term_capped()*100:.2f}%")
 
 # ---- Danh mục cổ phiếu (browse theo ngành / chủ đề, giống Naver) ----
@@ -1021,7 +1027,7 @@ if "screen" in st.session_state:
                                 "Trạng thái": "Trạng thái lõi"})
 
     # ---- KẾT LUẬN THEO QUY TRÌNH ĐỊNH GIÁ (trang 🧮) — con số chính của trang ----
-    # Backtest point-in-time 2021–25 (78 mã): kết luận của quy trình IC +0,106 (t 3,2, dương mọi năm); lõi KCI một
+    # Backtest point-in-time 2021–25 (78 mã): kết luận của quy trình IC +0,116 (78 mã) / +0,086 (top 200); lõi KCI một
     # mình IC +0,011. Trước 11/11/2026 trang này chỉ hiện lõi KCI → 10/21 mã lệch > 30% so với trang 🧮.
     _scr = st.session_state["screen"]
     _pipe = {}
@@ -1161,7 +1167,7 @@ if "screen" in st.session_state:
         st.caption("**Giá trị hợp lý / Chênh % / Độ tin cậy / Trạng thái** = kết luận của **quy trình định giá** (cùng "
                    "công thức trang 🧮: dự phóng mặc định, nhiều mô hình chính qua cổng số, đối thủ = top vốn hóa "
                    f"cùng ngành, {len(_scr.get('peer_pool') or [])} mã đối thủ lấy giá mới trong lần chạy này). "
-                   "Backtest 2021–25: IC +0,106. **Lõi KCI (tham khảo)** là mô hình cũ một mình (IC +0,011) — chỉ để "
+                   "Backtest 2021–25: IC +0,116 (78 mã) / +0,086 (top 200). **Lõi KCI (tham khảo)** là mô hình cũ một mình (IC +0,011) — chỉ để "
                    "đối chiếu. Mở trang **🧮 Định giá** để đi đủ 5 bước cho một mã.")
     elif len(rows) > PREFETCH_MAX:
         st.caption(f"Danh sách > {PREFETCH_MAX} mã: chỉ hiện lõi KCI (tham khảo). Rút gọn danh sách để có kết luận "

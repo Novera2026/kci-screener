@@ -186,3 +186,16 @@ def test_confidence_model_kept_for_backtests():
     assert r.confidence == "Low" and r.confidence_model in ("Low", "Medium")
     ok = V.value_stock(_rv(0.12, price=150_000, sector="Bank"), A)
     assert ok.confidence_model == ok.confidence
+
+
+def test_sustainable_growth_default_and_fixed_mode():
+    from valuation import sustainable_growth, Assumptions, value_stock
+    assert sustainable_growth(1000, 10000, 300) == pytest.approx(0.10 * 0.7)      # ROE 10% × (1 − 30%)
+    assert sustainable_growth(5000, 10000, 0) == pytest.approx(0.15)              # kẹp 15%
+    assert sustainable_growth(-100, 10000, 0) == 0.0
+    row = {"ticker": "x", "price": 10000, "eps": 1000, "bps": 10000, "dps": 300}
+    a_s, a_f = Assumptions(rf=0.03), Assumptions(rf=0.03, g_high_mode="fixed", g_high=0.08)
+    assert a_s.g_high_mode == "sustainable"
+    v_s = value_stock(row, a_s).methods["DCF earnings (thô)"]
+    v_f = value_stock(row, a_f).methods["DCF earnings (thô)"]
+    assert v_s < v_f                                    # 7% bền vững < 8% cố định

@@ -151,3 +151,23 @@ Thử đưa FCFF-DCF (sales-to-capital, `dcf.py`) làm mô hình chính:
 
 Vì vậy FCFF-DCF và EV/EBIT 4 quý chỉ là mô hình **đối chiếu**. Bảng tính chi tiết vẫn hiện trên trang 🧮. Sau khi
 chuyển FCFF về đối chiếu, IC trở lại +0,106.
+
+## Tăng trưởng giai đoạn đầu của DCF earnings / DDM 2 giai đoạn — `backtest_growth.py` (11/11/2026)
+
+| Cách tính g giai đoạn đầu | 78 mã: IC kết luận (t) | Top 200: IC kết luận (t) |
+|---|---|---|
+| 8% cố định (cũ) | +0,106 (3,21) | +0,068 (1,36) |
+| **Bền vững ROE×(1−cổ tức), kẹp 0–15% — mặc định mới** | **+0,116 (1,66)** | **+0,086 (1,83)** |
+| Theo dự phóng của quy trình | +0,109 (1,79) | +0,083 (1,89) |
+| CAGR doanh thu lịch sử | +0,077 (0,91) | +0,082 (2,07) |
+| Không tăng trưởng vượt trội (2%) | +0,101 (1,64) | +0,051 (1,17) |
+
+Từ 11/11/2026, mặc định là **tăng trưởng bền vững riêng từng mã** (`Assumptions.g_high_mode = "sustainable"`). Lý do:
+- IC trung bình cao hơn 8% cố định ở **cả hai** bộ dữ liệu.
+- Đây là công thức chuẩn, trong khi 8% cho mọi mã là số tự đặt.
+
+Lưu ý:
+- Mức chênh **chưa có ý nghĩa thống kê**.
+- Trên 78 mã, kết quả kém ổn định hơn (t 3,21 → 1,66; năm 2022 âm).
+- Chạy lại backtest với mặc định mới ra đúng +0,116 (243 điểm công bố).
+- Trang tổng hợp vẫn cho chọn "Cố định" khi cần.

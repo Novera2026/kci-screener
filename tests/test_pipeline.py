@@ -223,11 +223,13 @@ def test_scenarios_withhold_expected_when_one_blocked():
 
 
 def test_sensitivity_higher_ke_lower_value():
+    # kịch bản dựng với tăng trưởng 8% cố định: lõi DCF earnings rơi khỏi cổng khi Ke tăng (kiểm fair_same_set)
+    a_fix = V.Assumptions(rf=0.03, erp=0.05, g_terminal=0.02, g_high_mode="fixed")
     for mult in (0.6, 1.2):
         D = _D(mult)
-        drv = P.default_drivers(D["series"], D["row"], A, years=3)
+        drv = P.default_drivers(D["series"], D["row"], a_fix, years=3)
         drv[0].pop("_basis", None)
-        se = P.sensitivity(D, A, drv, P.identify(D["row"]), {"cap": None}, None, ke_shifts=(-0.005, 0.005),
+        se = P.sensitivity(D, a_fix, drv, P.identify(D["row"]), {"cap": None}, None, ke_shifts=(-0.005, 0.005),
                            g_grid=(0.02,))
         lo_ke, hi_ke = se["grid"][0]["values"][0.02], se["grid"][1]["values"][0.02]
         if mult == 0.6:      # mọi mô hình trong dải → giảm đơn điệu

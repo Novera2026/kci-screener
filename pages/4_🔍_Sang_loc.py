@@ -189,7 +189,7 @@ else:
                  .map(_c, subset=[c for c in ("Đạt tiêu chuẩn", "Kết luận") if c in ddf.columns]),
                  hide_index=True, width="stretch")
     st.caption("Xếp: đạt tiêu chuẩn tầng 2 → kết luận (🟢 trước) → chênh lệch → chất lượng. Backtest 2021–25 kiểm chứng "
-               "phần **định giá** của quy trình (IC +0,106); các bộ tiêu chuẩn là quy tắc kinh điển, **chưa được backtest "
+               "phần **định giá** của quy trình (IC +0,116 trên 78 mã · +0,086 trên top 200); các bộ tiêu chuẩn là quy tắc kinh điển, **chưa được backtest "
                "riêng trên thị trường Hàn** trong App. Đây là danh sách để nghiên cứu tiếp, không phải khuyến nghị đầu tư.")
 
     c1, c2 = st.columns([3, 1])

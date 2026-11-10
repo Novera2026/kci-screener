@@ -23,3 +23,6 @@ demo_output.xlsx
 # nhật ký định giá (dữ liệu người dùng, trang 🧮)
 valuation_log.csv
 dossiers/
+
+# trạng thái bot săn cổ phiếu (lần quét trước)
+bot_state.json

@@ -205,3 +205,8 @@ Trang **Tin nong** (logic ở `hotnews.py`) theo dõi realtime, **tự làm mớ
 
 Địa chỉ giữ nguyên (`/Dinh_gia`, `/Sang_loc`, …). Muốn đổi tên hay thứ tự thì sửa danh sách `PAGES` trong `app.py`.
 Chạy vẫn là `streamlit run app.py`, Streamlit Cloud vẫn dùng Main file `app.py`.
+
+## 🤖 Bot săn cổ phiếu
+
+`bot_hunt.py` + `.github/workflows/bot_hunt.yml`: mỗi ngày làm việc 16:30 KST, bot chạy sàng lọc (5 bộ tiêu chuẩn) và
+định giá sâu, rồi gửi báo cáo Telegram (mã mới / rớt / đổi kết luận + Excel). Cài đặt: xem **HUONG_DAN_BOT.md**.

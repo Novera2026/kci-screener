@@ -8,7 +8,7 @@ KCI — quy trình SÀNG LỌC cổ phiếu rẻ rồi ĐỊNH GIÁ SÂU danh s�
                 với đối thủ = các mã cùng ngành trong vũ trụ; lưu hồ sơ dossiers/ cho từng mã
   ④ Xếp hạng  : kết luận theo quy tắc số → chênh lệch → chất lượng
 
-Bằng chứng: backtest 2021–25 (backtest_pipeline.py) — IC upside đã công bố +0,106/năm (t 3,2). Lọc rẻ đơn thuần
+Bằng chứng: backtest 2021–25 (backtest_pipeline.py) — IC upside đã công bố +0,116 (78 mã) / +0,086 (top 200). Lọc rẻ đơn thuần
 theo P/E thấp chưa được kiểm chứng riêng; nó chỉ để thu hẹp danh sách trước bước định giá.
 """
 from __future__ import annotations
@@ -213,7 +213,7 @@ def rank(results: list[dict]) -> list[dict]:
 PRESETS: dict[str, dict] = {
     "kci": {
         "name": "KCI — rẻ so với ngành & chất lượng (khuyến nghị)",
-        "source": "Quy tắc nhà KCI; phần định giá đã backtest 2021–25 (IC +0,106).",
+        "source": "Quy tắc nhà KCI; phần định giá đã backtest 2021–25 (IC +0,116 trên 78 mã · +0,086 trên top 200).",
         "desc": "Có lãi, ROE ≥ 8%, điểm rẻ (P/E và P/B ÷ trung vị ngành) ≤ 0,8 → sau định giá: chất lượng tài sản "
                 "không hạng D, có giá trị hợp lý được công bố.",
         "stage1": {"require_profit": True, "max_rel": 0.8, "min_roe": 8.0},
