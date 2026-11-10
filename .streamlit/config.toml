@@ -3,9 +3,34 @@
 headless = true
 
 [theme]
-# Giao diện SÁNG — bảng dùng màu pastel (xanh/vàng/đỏ) nên cần nền sáng để dễ đọc.
+# Giao diện SÁNG phong cách Apple — bảng dùng màu pastel (xanh/vàng/đỏ) nên cần nền sáng để dễ đọc.
+# Hiệu ứng (kính mờ, thẻ nổi, chuyển động) nằm ở ui_theme.py, nạp từ app.py cho mọi trang.
 base = "light"
-primaryColor = "#1F3864"
+primaryColor = "#0071E3"                 # Apple blue
+backgroundColor = "#F5F5F7"              # nền xám rất nhạt
+secondaryBackgroundColor = "#FFFFFF"     # ô nhập, thanh bên: trắng nổi trên nền xám
+textColor = "#1D1D1F"
+linkColor = "#0066CC"
+linkUnderline = false
+font = "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'Apple SD Gothic Neo', 'Segoe UI', Roboto, sans-serif"
+headingFont = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', 'Apple SD Gothic Neo', 'Segoe UI', Roboto, sans-serif"
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+baseRadius = "12px"
+buttonRadius = "980px"                   # nút viên thuốc như apple.com
+borderColor = "#E5E5EA"
+dataframeBorderColor = "#EDEDF0"
+dataframeHeaderBackgroundColor = "#F5F5F7"
+showSidebarBorder = false
+showWidgetBorder = true
+greenColor = "#34C759"
+redColor = "#FF3B30"
+orangeColor = "#FF9500"
+yellowColor = "#FFCC00"
+blueColor = "#0071E3"
+violetColor = "#AF52DE"
+greenTextColor = "#1E7F34"               # chữ xanh/đỏ đậm hơn để đủ tương phản trên nền sáng
+redTextColor = "#D70015"
+chartCategoricalColors = ["#0071E3", "#34C759", "#FF9500", "#AF52DE", "#FF3B30", "#5AC8FA", "#FFCC00", "#8E8E93"]
 
 [browser]
 gatherUsageStats = false

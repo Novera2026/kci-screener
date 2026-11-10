@@ -12,6 +12,7 @@ import os
 import streamlit as st
 
 import reload_guard
+import ui_theme
 
 # Sau mỗi lần deploy: module dùng chung đã đổi trên đĩa → nạp lại cả bộ (tránh trang mới gọi hàm mà module cũ
 # trong bộ nhớ chưa có — lỗi ImportError fetch_kgb10y_detail 11/11/2026).
@@ -26,4 +27,6 @@ PAGES = [
     st.Page("pages/3_🧮_Dinh_gia.py", title="Định giá", icon="🧮", url_path="Dinh_gia"),
 ]
 
-st.navigation(PAGES).run()
+_nav = st.navigation(PAGES)
+ui_theme.apply()          # giao diện kiểu Apple cho mọi trang (màu/font ở .streamlit/config.toml)
+_nav.run()
