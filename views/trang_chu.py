@@ -234,8 +234,10 @@ if hunt:
         st.dataframe(view.style.format({"Giá": "{:,.0f}", "Giá trị hợp lý": "{:,.0f}", "Chênh %": "{:+.1f}"},
                                        na_rep="—").map(_color, subset=["Chênh %"]),
                      hide_index=True, width="stretch")
-        st.caption("🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm. Backtest 2021–25 chỉ kiểm chứng phần **định giá**; "
-                   "các bộ tiêu chuẩn chưa thắng vũ trụ có ý nghĩa thống kê. Để nghiên cứu tiếp, không phải khuyến nghị.")
+        st.caption("Xếp theo **chênh lệch định giá**. 🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm. Backtest 2021–25 (top "
+                   "200): định giá xếp hạng có tín hiệu yếu (IC +0,08), nhưng **danh sách kiểu này chưa thắng trung bình "
+                   "thị trường** (top 12 ≈ +0,4%/năm, không có ý nghĩa thống kê) — để nghiên cứu tiếp, không phải danh "
+                   "mục mua.")
         if len(view):
             c1, c2 = st.columns([3, 1])
             pick = c1.selectbox("Định giá đủ 5 bước một mã", [f"{r['Mã']} · {r['Tên']}" for _, r in view.iterrows()],

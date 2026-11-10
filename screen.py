@@ -8,8 +8,9 @@ KCI — quy trình SÀNG LỌC cổ phiếu rẻ rồi ĐỊNH GIÁ SÂU danh s�
                 với đối thủ = các mã cùng ngành trong vũ trụ; lưu hồ sơ dossiers/ cho từng mã
   ④ Xếp hạng  : kết luận theo quy tắc số → chênh lệch → chất lượng
 
-Bằng chứng: backtest 2021–25 (backtest_pipeline.py) — IC upside đã công bố +0,116 (78 mã) / +0,086 (top 200). Lọc rẻ đơn thuần
-theo P/E thấp chưa được kiểm chứng riêng; nó chỉ để thu hẹp danh sách trước bước định giá.
+Bằng chứng (backtest 2021–25, sau rà soát 10/11/2026): IC upside đã công bố +0,117 (78 mã, t 2,9) / +0,076 (top 200,
+t 1,95) — xếp HẠNG có tín hiệu yếu. Nhưng MUA nhóm 'rẻ' (chênh > 0) trong top 200 thua trung bình vũ trụ ~7%/năm
+(2023–25 thị trường dẫn bởi mã tăng trưởng đắt) — danh sách là để nghiên cứu, không phải danh mục mua.
 """
 from __future__ import annotations
 
@@ -213,7 +214,7 @@ def rank(results: list[dict]) -> list[dict]:
 PRESETS: dict[str, dict] = {
     "kci": {
         "name": "KCI — rẻ so với ngành & chất lượng (khuyến nghị)",
-        "source": "Quy tắc nhà KCI; phần định giá đã backtest 2021–25 (IC +0,116 trên 78 mã · +0,086 trên top 200).",
+        "source": "Quy tắc nhà KCI; phần định giá đã backtest 2021–25 (IC +0,117 trên 78 mã (t 2,9) · +0,076 trên top 200 (t 1,95)).",
         "desc": "Có lãi, ROE ≥ 8%, điểm rẻ (P/E và P/B ÷ trung vị ngành) ≤ 0,8 → sau định giá: chất lượng tài sản "
                 "không hạng D, có giá trị hợp lý được công bố.",
         "stage1": {"require_profit": True, "max_rel": 0.8, "min_roe": 8.0},
@@ -385,15 +386,15 @@ def stage2_check(res: dict, key: str, overrides: Optional[dict] = None) -> tuple
     return (not why, "; ".join(why))
 
 
-# Kết quả backtest_presets.py (10/11/2026): top 200 vốn hóa hiện tại, mốc 15/4/2021–2025, giữ 12 tháng, tầng 1+2,
+# Kết quả backtest_presets.py (chạy lại 10/11/2026 sau rà soát định giá): top 200 vốn hóa hiện tại, mốc 15/4/2021–2025, giữ 12 tháng, tầng 1+2,
 # danh mục chia đều. vs_univ = vượt trung bình vũ trụ cùng năm (TB/năm); t = t-thống kê theo năm; |t| < 2 = chưa có
 # ý nghĩa thống kê. Hiện cạnh mỗi bộ trên trang 🔍 để người dùng thấy bằng chứng trước khi chọn.
 BACKTEST_2021_2025 = {
-    "kci": {"vs_univ": -0.0421, "t": -0.8, "years_beat": "1/5", "vs_kospi": 0.1141, "avg_n": 20.4, "loss30": 0.095},
-    "graham": {"vs_univ": -0.1157, "t": -1.31, "years_beat": "1/5", "vs_kospi": 0.0406, "avg_n": 19.4, "loss30": 0.007},
-    "graham_number": {"vs_univ": -0.0674, "t": -1.04, "years_beat": "2/5", "vs_kospi": 0.0889, "avg_n": 61.4, "loss30": 0.054},
-    "valueup": {"vs_univ": 0.0267, "t": 0.55, "years_beat": "3/5", "vs_kospi": 0.1829, "avg_n": 12.6, "loss30": 0.027},
-    "dividend": {"vs_univ": -0.0188, "t": -0.12, "years_beat": "2/5", "vs_kospi": 0.1375, "avg_n": 12.8, "loss30": 0.008},
-    "magic": {"vs_univ": -0.0069, "t": -0.11, "years_beat": "2/5", "vs_kospi": 0.1494, "avg_n": 28.8, "loss30": 0.097},
-    "piotroski": {"vs_univ": -0.2386, "t": -1.06, "years_beat": "2/4", "vs_kospi": -0.0985, "avg_n": 3.6, "loss30": 0.0},
+    "kci": {"vs_univ": -0.0043, "t": -0.10, "years_beat": "1/5", "vs_kospi": 0.1136, "avg_n": 20.4, "loss30": 0.085},
+    "graham": {"vs_univ": -0.0774, "t": -1.36, "years_beat": "1/5", "vs_kospi": 0.0406, "avg_n": 19.4, "loss30": 0.007},
+    "graham_number": {"vs_univ": -0.0290, "t": -0.90, "years_beat": "2/5", "vs_kospi": 0.0889, "avg_n": 61.4, "loss30": 0.054},
+    "valueup": {"vs_univ": 0.0650, "t": 1.32, "years_beat": "4/5", "vs_kospi": 0.1829, "avg_n": 12.6, "loss30": 0.027},
+    "dividend": {"vs_univ": 0.0196, "t": 0.15, "years_beat": "2/5", "vs_kospi": 0.1375, "avg_n": 12.8, "loss30": 0.008},
+    "magic": {"vs_univ": 0.0315, "t": 0.75, "years_beat": "3/5", "vs_kospi": 0.1494, "avg_n": 28.8, "loss30": 0.097},
+    "piotroski": {"vs_univ": -0.1898, "t": -1.04, "years_beat": "2/4", "vs_kospi": -0.0985, "avg_n": 3.6, "loss30": 0.0},
 }

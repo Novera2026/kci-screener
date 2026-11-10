@@ -1040,7 +1040,7 @@ if "screen" in st.session_state:
                                 "Trạng thái": "Trạng thái lõi"})
 
     # ---- KẾT LUẬN THEO QUY TRÌNH ĐỊNH GIÁ (trang 🧮) — con số chính của trang ----
-    # Backtest point-in-time 2021–25 (78 mã): kết luận của quy trình IC +0,116 (78 mã) / +0,086 (top 200); lõi KCI một
+    # Backtest point-in-time 2021–25 (78 mã): kết luận của quy trình IC +0,117 (78 mã) / +0,076 (top 200) — 10/11; lõi KCI một
     # mình IC +0,011. Trước 11/11/2026 trang này chỉ hiện lõi KCI → 10/21 mã lệch > 30% so với trang 🧮.
     _scr = st.session_state["screen"]
     _pipe = {}

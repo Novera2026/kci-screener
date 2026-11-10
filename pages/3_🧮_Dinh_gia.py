@@ -941,7 +941,7 @@ with T["end"]:
     st.caption("**Định giá** = 50 + chênh lệch % (không công bố → không chấm) · **Sức khỏe tài chính** = tiêu chí đầu "
                "tư cơ bản · **Chất lượng tài sản** = bước ③ · **Vị thế cạnh tranh** = hạng trong nước của tăng trưởng, "
                "biên LN HĐ, ROE. Kết luận theo quy tắc số: không thể 'rẻ và chất lượng tốt' khi chưa công bố giá trị "
-               "hoặc chất lượng hạng D / ≥ 3 ❌. Backtest 2021–25 mới kiểm chứng phần **định giá** (IC +0,116 trên 78 mã · +0,086 trên top 200); điểm "
+               "hoặc chất lượng hạng D / ≥ 3 ❌. Backtest 2021–25 mới kiểm chứng phần **định giá** (IC +0,117 trên 78 mã (t 2,9) · +0,076 trên top 200 (t 1,95)); điểm "
                "tổng hợp là bản tóm tắt, chưa được kiểm chứng như một tín hiệu.")
     st.markdown("#### Kết luận định giá")
     c1, c2, c3, c4 = st.columns(4)

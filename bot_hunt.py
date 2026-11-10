@@ -51,7 +51,9 @@ def aggregate(results: dict, hits: dict) -> list[dict]:
     """results: {mã: dòng deep_stage}; hits: {bộ: [mã đạt tầng 2]} → danh sách săn đã xếp hạng.
 
     Vào danh sách khi: đạt tầng 2 của ≥ 1 bộ, có giá trị hợp lý (qua cổng số) và chênh lệch > 0.
-    Xếp: số bộ đạt ↓ → kết luận (🟢 trước) → chênh lệch ↓."""
+    Xếp: chênh lệch ↓ (tín hiệu định giá — phần duy nhất có IC dương). 10/11/2026: mô phỏng PIT 2021–25 top 200, 5 bộ
+    mặc định: top 12 xếp theo SỐ BỘ ĐẠT thua TB vũ trụ −14,1%/năm (t −2,29); xếp theo chênh lệch +0,4%/năm (t 0,11).
+    Xếp theo độ tin cậy trước cũng kém (−11%/năm) — không dùng. Số bộ đạt vẫn hiện để đọc, không dùng để xếp."""
     import screen as SC
     by_tk: dict = {}
     for key, tks in hits.items():
@@ -67,7 +69,7 @@ def aggregate(results: dict, hits: dict) -> list[dict]:
                       "price": r.get("Giá"), "fair": r.get("Giá trị hợp lý"), "upside": up,
                       "quality": r.get("Chất lượng TS"), "verdict": r.get("Kết luận") or "",
                       "presets": sorted(presets, key=lambda k: list(SC.PRESETS).index(k))})
-    picks.sort(key=lambda p: (-len(p["presets"]), SC._verdict_rank(p["verdict"]), -p["upside"]))
+    picks.sort(key=lambda p: -p["upside"])
     return picks
 
 
@@ -116,8 +118,9 @@ def format_message(picks: list[dict], d: dict, meta: dict, top: int = 12) -> lis
     L += ["", f"📋 <b>Danh sách săn ({len(picks)} mã) — top {min(top, len(picks))}</b>"]
     L += [_line(p, names) for p in picks[:top]] or ["— không mã nào đạt chuẩn hôm nay"]
     L += ["", "🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm (chất lượng/ngành tài chính) · TS = hạng chất lượng tài sản.",
-          "Backtest 2021–25: chỉ phần định giá có bằng chứng (IC +0,116/+0,086); bộ tiêu chuẩn chưa thắng vũ trụ có ý "
-          "nghĩa thống kê. Để nghiên cứu tiếp, không phải khuyến nghị đầu tư.",
+          "Xếp theo chênh lệch định giá. Backtest 2021–25 (top 200): định giá xếp hạng có tín hiệu yếu (IC +0,08); "
+          "danh sách kiểu này CHƯA thắng trung bình thị trường (top 12 ≈ +0,4%/năm, không ý nghĩa thống kê). "
+          "Để nghiên cứu tiếp, không phải danh mục mua.",
           f'Định giá đủ 5 bước: <a href="{APP_URL}/Dinh_gia">KCI · Định giá</a>']
     msgs, cur = [], ""
     for ln in L:

@@ -9,13 +9,13 @@ def _res(tk, up, verdict="🟢 Rẻ…", fair=True):
             "Chênh %": up, "Chất lượng TS": "A", "Kết luận": verdict}
 
 
-def test_aggregate_ranks_by_presets_then_verdict_then_upside():
+def test_aggregate_filters_and_keeps_preset_list():
     results = {"a": _res("a", 30), "b": _res("b", 60, "🟡 Rẻ…"), "c": _res("c", 20), "d": _res("d", -5),
                "e": _res("e", 40, fair=False)}
     hits = {"kci": ["a", "b", "c", "d", "e"], "valueup": ["c"], "magic": ["c"]}
     picks = BH.aggregate(results, hits)
-    assert [p["ticker"] for p in picks] == ["c", "a", "b"]            # c qua 3 bộ; d chênh âm; e không có giá trị
-    assert picks[0]["presets"] == ["kci", "valueup", "magic"]
+    assert [p["ticker"] for p in picks] == ["b", "a", "c"]            # xếp chênh ↓; d chênh âm; e không có giá trị
+    assert picks[2]["presets"] == ["kci", "valueup", "magic"]
 
 
 def test_diff_new_dropped_changed():
@@ -42,3 +42,15 @@ def test_state_roundtrip_feeds_diff():
     picks = BH.aggregate({"a": _res("a", 30)}, {"kci": ["a"]})
     st = BH.state_of(picks, dt.datetime(2026, 11, 11, 16, 30))
     assert BH.diff(st, picks)["new"] == [] and not BH.diff(st, picks)["first_run"]
+
+
+def test_aggregate_ranks_by_valuation_upside_not_preset_count():
+    """Xếp theo chênh lệch (mô phỏng PIT 2021–25: xếp theo số bộ đạt làm top 12 thua vũ trụ −14%/năm, t −2,3)."""
+    import bot_hunt as BH
+    res = {"A": {"Tên": "A", "Giá": 100, "Giá trị hợp lý": 110, "Chênh %": 10.0, "Kết luận": "🟢"},
+           "B": {"Tên": "B", "Giá": 100, "Giá trị hợp lý": 150, "Chênh %": 50.0, "Kết luận": "🟡"},
+           "C": {"Tên": "C", "Giá": 100, "Giá trị hợp lý": 90, "Chênh %": -10.0, "Kết luận": "🟢"}}
+    hits = {"kci": ["A", "B", "C"], "valueup": ["A"], "magic": ["A"]}
+    picks = BH.aggregate(res, hits)
+    assert [p["ticker"] for p in picks] == ["B", "A"]          # C (chênh âm) bị loại; B chênh cao hơn đứng đầu
+    assert len(picks[1]["presets"]) == 3                       # số bộ đạt vẫn giữ để hiển thị
