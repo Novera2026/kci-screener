@@ -99,12 +99,18 @@ def data_quality(row: dict, series: list[dict], quarters: Optional[list[dict]] =
     # EPS × số cp so với LN công ty mẹ (hoặc LN thuần) năm gần nhất
     np_ref = _num(last.get("ctrl_net")) if last.get("ctrl_net") is not None else _num(last.get("net_profit"))
     eps_last = _num(last.get("eps")) or eps
+    share_break = False
     if shares and eps_last and np_ref and np_ref > 0 and eps_last > 0:
         r = eps_last * shares / 1e8 / np_ref
+        # ngoài [0,5; 1,5]: số cp hiện tại ≠ số cp của BCTC năm (sáp nhập, tách/niêm yết mới, phát hành lớn) →
+        # mọi số MỖI CỔ PHIẾU của dự phóng sai theo đúng tỷ lệ này (HD건설기계 2,69× sau sáp nhập 2026 → RIM 5,3× giá)
+        share_break = not SHARE_BREAK_BAND[0] <= r <= SHARE_BREAK_BAND[1]
         checks.append(_check("EPS × số cp ÷ LN năm gần nhất", f"{r:.2f}×",
-                             OK if 0.7 <= r <= 1.3 else WARN,
-                             "" if 0.7 <= r <= 1.3 else "Lệch >30%: số cp thay đổi (phát hành/mua lại) "
-                             "hoặc EPS và LN khác kỳ"))
+                             OK if 0.7 <= r <= 1.3 else FAIL if share_break else WARN,
+                             "" if 0.7 <= r <= 1.3 else
+                             "Số cp đổi mạnh so với BCTC năm (sáp nhập/tách/phát hành) — chặn mô hình dựa trên dự phóng "
+                             "mỗi cổ phiếu" if share_break else
+                             "Lệch >30%: số cp thay đổi (phát hành/mua lại) hoặc EPS và LN khác kỳ"))
     # BPS × số cp so với VCSH (DART — có cả cổ đông thiểu số nên chỉ cảnh báo)
     eq = _num(last.get("equity"))
     if shares and bps and eq and eq > 0:
@@ -153,7 +159,7 @@ def data_quality(row: dict, series: list[dict], quarters: Optional[list[dict]] =
     n_fail = sum(1 for c in checks if c["Kết quả"] == FAIL)
     n_warn = sum(1 for c in checks if c["Kết quả"] == WARN)
     cap = "Low" if n_fail else ("Medium" if n_warn >= 2 else None)
-    return {"checks": checks, "cap": cap, "n_fail": n_fail, "n_warn": n_warn}
+    return {"checks": checks, "cap": cap, "n_fail": n_fail, "n_warn": n_warn, "share_break": share_break}
 
 
 # ============================================================================ Bước 3 — phân tích
@@ -224,6 +230,9 @@ def reported_evidence(series: list[dict], quarters: Optional[list[dict]]) -> Opt
 
 
 MID_MARGIN_FLOOR = 0.0          # sàn biên LN ròng dài hạn mặc định (hòa vốn) — xem default_drivers
+
+
+SHARE_BREAK_BAND = (0.5, 1.5)    # EPS × số cp hiện tại ÷ LN năm: ngoài dải = số cp đã đổi mạnh (data_quality)
 
 
 def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int = 5,
@@ -304,7 +313,9 @@ def run_forecast(series: list[dict], row: dict, drivers: list[dict]) -> list[dic
     mc, price = _num(row.get("market_cap")), _num(row.get("price"))
     shares = _shares_estimate(reals, mc, price)
     rev = _num(reals[-1].get("revenue"))
-    bps = _num(row.get("bps")) or _num(reals[-1].get("bps"))
+    # B0 = BPS CUỐI NĂM TÀI CHÍNH gần nhất: năm 1 dự phóng là CẢ năm sau đó. BPS Naver ở row là cuối QUÝ gần nhất (đã
+    # gồm LN các quý của năm 1) → cộng EPS cả năm lên đó đếm hai lần (005930: 63.997 cuối 2025 vs 86.052 Q2/2026)
+    bps = _num(reals[-1].get("bps")) or _num(row.get("bps"))
     if not shares or not rev or bps is None:
         return []
     conv = conversion_ratio(reals)
@@ -723,13 +734,18 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
     pm = peer_medians(D.get("peers") or [], exclude=D.get("ticker"))
     fc = run_forecast(series, row, drivers)
     fg = forecast_gates(series, fc, financial=idn["financial"], evidence=evidence)
+    if (dq or {}).get("share_break") and fc:
+        fg = {**fg, "ok": False, "n_fail": fg["n_fail"] + 1,
+              "checks": [c for c in fg["checks"] if c["Kết quả"] != OK]
+              + [_check("Số cổ phiếu", "đổi mạnh so với BCTC năm", FAIL,
+                        "EPS/BPS dự phóng không cùng gốc số cổ phiếu hiện tại")]}
     r_fwd = dict(row)
-    if fc:
+    if fc and fg["ok"]:          # dự phóng bị cổng chặn không được nuôi P/E forward → phép neo peer (rà soát 10/11)
         r_fwd["fwd_eps"] = fc[0]["EPS"]
         r_fwd["fwd_roe"] = fc[0]["EPS"] / fc[0]["BPS đầu kỳ"] if fc[0]["BPS đầu kỳ"] else None
     base = V.value_stock(r_fwd, a, pm["pe"], pm["pb"], history=reals or None)
     anchor = peer_anchor(base.methods, "mid-cycle" in base.auto_method)
-    rim = rim_explicit(_num(row.get("bps")), fc, ke, w)
+    rim = rim_explicit(fc[0]["BPS đầu kỳ"] if fc else None, fc, ke, w)   # B0 cùng gốc với dự phóng (cuối năm tài chính)
     ddm = ddm_explicit(fc, ke, coc["g_term"])
     fc_block = (None if fg["ok"] else f"cổng dự phóng: {fg['n_fail']} vi phạm" if fc
                 else "không có dự phóng (thiếu doanh thu/LN ≥ 2 năm)")
@@ -745,7 +761,9 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
         {"name": "P/B × trung vị peer", "value": base.methods.get("P/B vs median ngành"), "role": "cross"},
     ]
     fs = D.get("fs_full")
-    shares = _shares_estimate(reals, mc, price) if reals else None
+    # EV → vốn chủ MỖI CỔ PHIẾU: số cp thực (vốn hóa ÷ giá). LN/EPS (gồm cổ đông thiểu số) thổi phồng số cp → trừ
+    # thiểu số hai lần (bridge đã trừ) — rà soát 10/11/2026
+    shares = (mc / price) if (mc and price) else (_shares_estimate(reals, mc, price) if reals else None)
     fcff_m = evm = None
     if fs and not idn["financial"] and fc and shares and mc:
         import dcf as _dcf

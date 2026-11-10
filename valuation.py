@@ -198,7 +198,7 @@ def normalized_metrics(history: Optional[list]) -> dict:
     for h in reals:
         np_, eq = h.get("net_profit"), h.get("equity")
         rev, op = h.get("revenue"), h.get("op_profit")
-        if np_ is not None and eq:
+        if np_ is not None and eq and eq > 0:   # VCSH âm: lỗ/VCSH âm ra ROE DƯƠNG giả → bỏ năm đó
             roes.append(np_ / eq)
         elif h.get("roe") is not None:          # Naver không có VCSH → dùng ROE % có sẵn
             roes.append(h["roe"] / 100.0)
@@ -258,21 +258,32 @@ def ddm_two_stage(dps: float, ke: float, g_high: float, years: int,
 # §3.2 — DCF earnings (FCFE proxy). ROUGH: dùng EPS thay FCFE.
 # ----------------------------------------------------------------------------
 def dcf_earnings(eps: float, ke: float, g_high: float, years: int,
-                 g_term: float) -> Optional[float]:
-    """Chiết khấu chuỗi EPS (proxy cho dòng tiền cổ đông).
+                 g_term: float, roe: Optional[float] = None) -> Optional[float]:
+    """Chiết khấu dòng tiền cổ đông xấp xỉ FCFE = EPS × (1 − g/ROE).
 
-    ⚠️ Đây là proxy thô: EPS ≠ FCFE (bỏ qua reinvestment & nợ). Chỉ dùng
-    cross-check / cảm nhận độ lớn, KHÔNG phải full DCF. Cần EPS > 0, Ke > g_term.
+    10/11/2026 (rà soát): bản cũ chiết khấu TOÀN BỘ EPS trong khi vẫn cho EPS tăng g — tăng trưởng đó phải trả bằng
+    chính phần lợi nhuận giữ lại (tỷ lệ tái đầu tư = g/ROE) → đếm hai lần. ROE 8% < Ke 8,07%, giữ lại 100%: bản cũ
+    1,74× sổ sách, đúng ≈ 1× sổ sách. Nay: tái đầu tư g/ROE mỗi năm; ROE < Ke → không tăng trưởng (g = 0, trả hết —
+    cùng quy tắc P/B-ROE/RIM). Không có ROE → giữ cách cũ nhưng không cho tăng trưởng (EPS/Ke…). Cần EPS > 0, Ke > g.
     """
     eps = _pos(eps)
     if eps is None or ke is None or ke <= g_term:
         return None
+    roe = _num(roe)
+    if roe is None or roe <= 0 or roe < ke:
+        g_high, g_term_eff = 0.0, 0.0                 # tăng trưởng không tạo giá trị → không tái đầu tư
+    else:
+        g_term_eff = g_term
+    g_high = min(g_high, roe) if (roe and roe > 0) else g_high
+
+    def _payout(g):
+        return 1.0 if (not roe or roe <= 0) else min(max(1 - g / roe, 0.0), 1.0)
     pv, e = 0.0, eps
     for t in range(1, years + 1):
         e *= (1 + g_high)
-        pv += e / (1 + ke) ** t
-    e_term = e * (1 + g_term)
-    tv = e_term / (ke - g_term)
+        pv += e * _payout(g_high) / (1 + ke) ** t
+    e_term = e * (1 + g_term_eff)
+    tv = e_term * _payout(g_term_eff) / (ke - g_term_eff)
     pv += tv / (1 + ke) ** years
     return pv
 
@@ -642,7 +653,8 @@ def value_stock(row: dict, a: Assumptions,
     methods["DDM (Gordon)"] = ddm_gordon(dps, ke, g_term)
     g_hi = sustainable_growth(eps, bps, dps) if a.g_high_mode == "sustainable" else a.g_high
     methods["DDM 2 giai đoạn"] = ddm_two_stage(dps, ke, g_hi, a.years_high, g_term)
-    methods["DCF earnings (thô)"] = dcf_earnings(eps, ke, g_hi, a.years_high, g_term)
+    methods["DCF earnings (thô)"] = dcf_earnings(eps, ke, g_hi, a.years_high, g_term,
+                                                 roe=roe if roe is not None else (eps / bps if (eps and bps) else None))
     methods["P/E vs median ngành"] = relative_pe_value(eps, sector_median_pe)
     methods["P/B vs median ngành"] = relative_pb_value(bps, sector_median_pb)
 
@@ -847,7 +859,12 @@ def value_batch(df, a: Assumptions, agg=None, histories: Optional[dict] = None):
     histories = histories or {}
     results = []
     for row in rows:
-        med = medians.get(peer_key(row), {})
-        results.append(value_stock(row, a, med.get("pe"), med.get("pb"),
-                                   history=histories.get(row.get("ticker"))))
+        # trung vị ngành KHÔNG gồm chính mã (so mã với chính nó + 2 peer từng qua được ngưỡng 3 mã)
+        g = [x for x in groups.get(peer_key(row), []) if x.get("ticker") != row.get("ticker")]
+        if peer_key(row) is None:
+            pe = pb = None
+        else:
+            pe = _robust_median([_num(x.get("per")) for x in g], 0.0, PE_CAP)
+            pb = _robust_median([_num(x.get("pbr")) for x in g], 0.0)
+        results.append(value_stock(row, a, pe, pb, history=histories.get(row.get("ticker"))))
     return results, medians

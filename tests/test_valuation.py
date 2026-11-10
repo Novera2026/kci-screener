@@ -199,3 +199,33 @@ def test_sustainable_growth_default_and_fixed_mode():
     v_s = value_stock(row, a_s).methods["DCF earnings (thô)"]
     v_f = value_stock(row, a_f).methods["DCF earnings (thô)"]
     assert v_s < v_f                                    # 7% bền vững < 8% cố định
+
+
+def test_dcf_earnings_does_not_double_count_reinvestment():
+    """ROE < Ke: tăng trưởng không tạo giá trị → ≈ EPS/Ke (≈ sổ sách khi ROE ≈ Ke), không phải 1,74× (rà soát 10/11)."""
+    import valuation as V
+    v = V.dcf_earnings(800.0, 0.0807, 0.08, 5, 0.02, roe=0.08)
+    assert v == pytest.approx(800 / 0.0807, rel=1e-6)
+    # ROE > Ke: chỉ phần không tái đầu tư được chiết khấu → thấp hơn bản đếm hai lần
+    hi = V.dcf_earnings(1500.0, 0.08, 0.10, 5, 0.02, roe=0.15)
+    naive = sum(1500 * 1.1 ** t / 1.08 ** t for t in range(1, 6)) + 1500 * 1.1 ** 5 * 1.02 / 0.06 / 1.08 ** 5
+    assert hi < naive
+
+
+def test_normalized_metrics_skips_negative_equity_years():
+    import valuation as V
+    h = [{"net_profit": 10, "equity": 100, "revenue": 100}, {"net_profit": -100, "equity": -500, "revenue": 100},
+         {"net_profit": 5, "equity": 100, "revenue": 100}]
+    m = V.normalized_metrics(h)
+    assert m["median_roe"] == pytest.approx(0.075)      # (10% + 5%)/2 — năm VCSH âm bị bỏ, không thành ROE +20%
+
+
+def test_value_batch_peer_median_excludes_self():
+    import pandas as pd
+    import valuation as V
+    rows = [{"ticker": t, "name": t, "sector": "Food", "price": 10000, "eps": 1000, "bps": 10000, "dps": 0,
+             "per": pe, "pbr": 1.0, "industry_kr": "식품"} for t, pe in (("A", 50.0), ("B", 10.0), ("C", 12.0))]
+    res, _ = V.value_batch(pd.DataFrame(rows), V.Assumptions(rf=0.03))
+    b = next(r for r in res if r.ticker == "B")
+    # chỉ 2 peer (A, C) → median {50,12} hợp lệ hoặc None theo ngưỡng; không được là median {50,10,12} = 12 gồm chính B
+    assert b.methods.get("P/E vs median ngành") != pytest.approx(1000 * 12)

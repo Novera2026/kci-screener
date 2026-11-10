@@ -234,8 +234,9 @@ def test_sensitivity_higher_ke_lower_value():
         lo_ke, hi_ke = se["grid"][0]["values"][0.02], se["grid"][1]["values"][0.02]
         if mult == 0.6:      # mọi mô hình trong dải → giảm đơn điệu
             assert lo_ke and hi_ke and lo_ke > hi_ke
-        else:                # Ke cao đẩy lõi xuống dưới 0,4× giá → ô đó ⚪, không đổi bộ mô hình mà TĂNG
-            assert lo_ke and hi_ke is None
+        else:                # Ke cao: hoặc lõi rơi khỏi cổng → ô ⚪ (không đổi bộ mô hình mà TĂNG), hoặc vẫn giảm
+            # (DCF earnings sửa 10/11/2026 trừ tái đầu tư → lõi thấp hơn, kịch bản cũ không còn rơi khỏi cổng)
+            assert lo_ke and (hi_ke is None or lo_ke > hi_ke)
 
 
 def test_shifted_assumptions_only_moves_ke():
@@ -363,3 +364,30 @@ def test_unpublished_reason_uses_core_value_even_if_self_flagged():
     rows_fc = [{"name": "Lõi", "role": "primary", "value": None, "blocked": None},
                {"name": "RIM", "role": "primary", "value": 10.0, "blocked": "cổng dự phóng: 2 vi phạm"}]
     assert "dự phóng bị cổng" in P.unpublished_reason(rows_fc, 100.0)
+
+
+def test_share_count_break_blocks_forecast_models():
+    """Số cp hiện tại gấp ~3 số cp của BCTC năm (sáp nhập) → ❌ dữ liệu, dự phóng bị chặn, không nuôi P/E forward."""
+    s = _series()
+    r = _row(s)
+    r["market_cap"] *= 3                                  # vốn hóa ÷ giá = 3× số cp cũ
+    dq = P.data_quality(r, s, [], beta=1.0, today=dt.date(2026, 11, 9))
+    assert dq["share_break"]
+    drv = P.default_drivers(s, r, A, years=3)
+    drv[0].pop("_basis", None)
+    D = {"row": dict(r, beta=1.0), "series": s, "quarters": [], "extras": {}, "peers": [], "ticker": "000001"}
+    E = P.evaluate(D, A, drv, P.identify(r), dq, None)
+    assert not E["fg"]["ok"]
+    rim = next(x for x in E["rec"]["rows"] if x["name"].startswith("RIM tường minh"))
+    assert not rim["pass"] and "cổng dự phóng" in rim["why"]
+    ok = P.data_quality(_row(s), s, [], beta=1.0, today=dt.date(2026, 11, 9))
+    assert not ok["share_break"]
+
+
+def test_run_forecast_starts_from_fiscal_year_end_book():
+    """BPS ở row là cuối QUÝ gần nhất (đã gồm LN năm 1) → dự phóng phải bắt đầu từ BPS cuối năm tài chính."""
+    s = _series()
+    r = _row(s)
+    r["bps"] = s[-1]["bps"] * 1.3                          # BPS Naver giữa năm, đã cộng LN nửa năm
+    fc = P.run_forecast(s, r, [{"Năm": "2026", "Tăng trưởng DT %": 5, "Biên LN ròng %": 10, "Tỷ lệ cổ tức %": 0}])
+    assert fc[0]["BPS đầu kỳ"] == pytest.approx(s[-1]["bps"])
