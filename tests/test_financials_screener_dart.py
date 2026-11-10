@@ -249,3 +249,13 @@ def test_run_rate_does_not_extrapolate_one_off():
     assert out["net_profit"] == pytest.approx(8 + 60 + 2 * 8)
     assert out["net_profit_core"] == pytest.approx(8 + 8 + 2 * 8)
     assert [o["period"] for o in out["one_offs"]] == ["202606"]
+
+
+def test_normalize_code_common_formats():
+    """Mã viết kiểu HTS/DART (A005950), Yahoo (.KS/.KQ), TradingView (KRX:) đều nhận ra; tên thì không đổi."""
+    from screener import normalize_code
+    for q in ("A005950", "a005950", "A 005950", "005950.KS", "005950.kq", "KRX:005950", "KOSPI: 005950", "005950"):
+        assert normalize_code(q) == "005950", q
+    assert normalize_code("A0001A0") == "0001A0"
+    for q in ("Samsung", "삼성전자", "ABC", "A1234567", "", "Apple"):
+        assert normalize_code(q) is None, q

@@ -223,6 +223,9 @@ def reported_evidence(series: list[dict], quarters: Optional[list[dict]]) -> Opt
             "one_offs": ytd.get("one_offs", []), "conv_ratio": ytd.get("conv_ratio")}
 
 
+MID_MARGIN_FLOOR = 0.0          # sàn biên LN ròng dài hạn mặc định (hòa vốn) — xem default_drivers
+
+
 def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int = 5,
                     quarters: Optional[list[dict]] = None, cyclical: bool = False,
                     financial: bool = False) -> list[dict]:
@@ -254,6 +257,13 @@ def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int 
     if m1 is None:
         return []
     m_mid = V._median(hm)
+    # Biên dài hạn (mid-cycle) không được âm: trung vị lịch sử âm (vd 이수화학 2020–25, 4/6 năm lỗ) mà trượt về đó
+    # = giả định LỖ VĨNH VIỄN trên doanh thu vẫn tăng → RIM ≤ 0 → "không tính được" → mất mô hình chính dù năm 1
+    # đã có lãi quý thực. Doanh nghiệp hoạt động liên tục: sàn hòa vốn (0%) — ROE 0% < Ke nên vẫn thận trọng
+    # (giá trị dưới sổ sách ở trạng thái dừng). Người dùng sửa được ở bảng ④; cổng số giữ nguyên.
+    mid_floored = m_mid is not None and m_mid < MID_MARGIN_FLOOR
+    if mid_floored:
+        m_mid_raw, m_mid = m_mid, MID_MARGIN_FLOOR
     m1_rest = ev["margin"] if ev else m1          # điểm xuất phát năm 2+: biên lõi, không mang phần một lần
     fade_margin = (cyclical or m1_rest <= 0) and m_mid is not None
     g_long = a.g_term_capped()
@@ -280,7 +290,9 @@ def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int 
                     "Biên LN HĐ %": round(opm * 100, 2),
                     "Biên LN ròng %": round(m * 100, 2), "Tỷ lệ cổ tức %": round(payout * 100, 1)})
     if out:
-        out[0]["_basis"] = fc1.get("_basis", "")
+        out[0]["_basis"] = fc1.get("_basis", "") + (
+            f" · biên dài hạn: trung vị lịch sử âm ({m_mid_raw * 100:.1f}%) → chặn ở hòa vốn "
+            f"{MID_MARGIN_FLOOR * 100:.0f}%" if (mid_floored and fade_margin) else "")
     return out
 
 
@@ -484,6 +496,29 @@ def _gate(value: Optional[float], price: Optional[float], anchor: Optional[float
     return True, f"{r:.2f}× giá"
 
 
+def unpublished_reason(rows: list[dict], price: Optional[float]) -> str:
+    """Vì sao không công bố — nói rõ CHIỀU khi mọi mô hình chính cùng lệch một phía (số vẫn không công bố).
+    Rà soát 200 mã 10/11/2026: 52/66 mã không công bố là do mọi mô hình chính < 0,4× giá."""
+    prim = [r for r in rows if r["role"] == "primary"]
+    # giá trị bị chặn vì DỰ PHÓNG sai không dùng để nói chiều; lõi KCI tự gắn "ngoài vùng tin cậy" vẫn là số thật
+    fc_blocked = [r for r in prim if "cổng dự phóng" in str(r.get("blocked") or "")]
+    ratios = [r["value"] / price for r in prim
+              if r.get("value") is not None and price and r not in fc_blocked]
+    lo, hi = V.RELIABLE_BAND
+    if ratios:
+        if all(x < lo for x in ratios):
+            return (f"mọi mô hình chính < {lo}× giá: thị giá đang vượt xa giá trị tính từ BCTC hiện có "
+                    "(kỳ vọng tăng trưởng chưa vào số liệu)")
+        if all(x > hi for x in ratios):
+            return (f"mọi mô hình chính > {hi}× giá: chênh lệch quá lớn để tin — thường do dữ liệu/ngành đặc thù "
+                    "(holding, tài chính), cần kiểm tra số liệu")
+    if fc_blocked:
+        return "dự phóng bị cổng số chặn và mô hình còn lại ngoài vùng tin cậy"
+    if all(r.get("value") is None for r in prim):
+        return "không mô hình chính nào tính được (thiếu lợi nhuận/vốn chủ dương hoặc thiếu dữ liệu)"
+    return "không mô hình chính nào qua cổng số"
+
+
 def reconcile(price: Optional[float], candidates: list[dict], anchor: Optional[float],
               caps: list[Optional[str]]) -> dict:
     """candidates: [{name, value, role: 'primary'|'cross', blocked: str|None}].
@@ -504,7 +539,7 @@ def reconcile(price: Optional[float], candidates: list[dict], anchor: Optional[f
     allv = [r["value"] for r in rows if r["pass"]]
     if not prim:
         return {"fair": None, "low": None, "high": None, "upside": None, "confidence": "Low",
-                "status": "⚪ không công bố — không mô hình chính nào qua cổng số", "rows": rows}
+                "status": "⚪ không công bố — " + unpublished_reason(rows, price), "rows": rows}
     fair = V._median(prim)
     near_anchor = anchor is None or HIGH_ANCHOR_BAND[0] <= fair / anchor <= HIGH_ANCHOR_BAND[1]
     if len(prim) >= 2 and all(abs(v / fair - 1) <= AGREE_BAND for v in prim) and near_anchor:
@@ -696,7 +731,8 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
     anchor = peer_anchor(base.methods, "mid-cycle" in base.auto_method)
     rim = rim_explicit(_num(row.get("bps")), fc, ke, w)
     ddm = ddm_explicit(fc, ke, coc["g_term"])
-    fc_block = None if fg["ok"] else f"cổng dự phóng: {fg['n_fail']} vi phạm"
+    fc_block = (None if fg["ok"] else f"cổng dự phóng: {fg['n_fail']} vi phạm" if fc
+                else "không có dự phóng (thiếu doanh thu/LN ≥ 2 năm)")
     cands = [
         # tên gắn trạng thái tam giác hóa: lõi đổi sang 50/50 với peer = một mô hình KHÁC (fair_same_set)
         {"name": f"Lõi KCI — {base.auto_method}" + (" · △ 50/50 peer" if base.triangulated else ""),
@@ -990,7 +1026,8 @@ def overall_assessment(rec: dict, fin_health: Optional[dict], quality: Optional[
     g = (quality or {}).get("grade")
     n_fail = (quality or {}).get("n_fail", 0)
     if not rec.get("fair"):
-        verdict = "⚪ Chưa đủ cơ sở định giá — không mô hình chính nào qua cổng số"
+        verdict = "⚪ Chưa đủ cơ sở định giá — " + (str(rec.get("status") or "").split(" — ", 1)[-1]
+                                                   or "không mô hình chính nào qua cổng số")
     elif g == "D" or n_fail >= 3:
         verdict = "🔴 Rủi ro chất lượng tài sản — cần kiểm kỹ trước mọi kết luận về giá"
     elif up is not None and up >= 20 and (quality or {}).get("fin_limited"):

@@ -322,3 +322,44 @@ def test_overall_assessment_rules():
     assert P.overall_assessment(rec, fh, {"score": 55, "grade": "C", "n_fail": 1}, ps)["verdict"].startswith("🟡")
     bank_q = {"score": 83, "grade": "B", "n_fail": 0, "fin_limited": True}
     assert P.overall_assessment(rec, fh, bank_q, ps)["verdict"].startswith("🟡")    # không 🟢 khi chưa chấm đủ
+
+
+def test_default_drivers_mid_cycle_margin_never_below_breakeven():
+    """Lịch sử lỗ nhiều năm (trung vị biên âm) → biên dài hạn mặc định chặn ở 0%, không giả định lỗ vĩnh viễn
+    (005950 이수화학: trung vị −1,7% → RIM ≤ 0 → không có mô hình chính, 10/11/2026)."""
+    s = _series(n=6, margin=-0.02)
+    s[1]["net_profit"] = s[1]["revenue"] * 0.05
+    d = P.default_drivers(s, _row(s), A, years=5, cyclical=True)
+    ms = [x["Biên LN ròng %"] for x in d[1:]]
+    assert ms == sorted(ms)                                  # trượt từ lỗ hiện tại LÊN hòa vốn, không xuống −x%
+    assert d[-1]["Biên LN ròng %"] == pytest.approx(0.0)
+    assert "hòa vốn" in d[0]["_basis"]
+
+
+def test_default_drivers_positive_mid_cycle_unchanged():
+    s = _series(n=6, margin=0.08)
+    d = P.default_drivers(s, _row(s), A, years=5, cyclical=True)
+    assert d[-1]["Biên LN ròng %"] == pytest.approx(8.0, abs=0.01)
+    assert "hòa vốn" not in d[0]["_basis"]
+
+
+def test_unpublished_reason_states_direction():
+    rows = [{"name": "A", "role": "primary", "value": 10.0}, {"name": "B", "role": "primary", "value": 20.0}]
+    assert "< 0.4× giá" in P.unpublished_reason(rows, 100.0)
+    rows_hi = [{"name": "A", "role": "primary", "value": 300.0}, {"name": "B", "role": "primary", "value": 400.0}]
+    assert "> 2.5× giá" in P.unpublished_reason(rows_hi, 100.0)
+    rows_none = [{"name": "A", "role": "primary", "value": None}, {"name": "B", "role": "primary", "value": None}]
+    assert "tính được" in P.unpublished_reason(rows_none, 100.0)
+    rec = P.reconcile(100.0, [dict(r, blocked=None) for r in rows], None, [])
+    assert rec["fair"] is None and rec["status"].startswith("⚪ không công bố — mọi mô hình chính < 0.4× giá")
+
+
+def test_unpublished_reason_uses_core_value_even_if_self_flagged():
+    """373220: lõi KCI tự gắn '⚪ ngoài vùng tin cậy' (0,31×) + RIM 0,10× → vẫn phải nói 'thị giá vượt xa'."""
+    rows = [{"name": "Lõi", "role": "primary", "value": 31.0, "blocked": "⚪ ngoài vùng tin cậy"},
+            {"name": "RIM", "role": "primary", "value": 10.0, "blocked": None},
+            {"name": "P/E", "role": "cross", "value": 500.0}]
+    assert "< 0.4× giá" in P.unpublished_reason(rows, 100.0)
+    rows_fc = [{"name": "Lõi", "role": "primary", "value": None, "blocked": None},
+               {"name": "RIM", "role": "primary", "value": 10.0, "blocked": "cổng dự phóng: 2 vi phạm"}]
+    assert "dự phóng bị cổng" in P.unpublished_reason(rows_fc, 100.0)

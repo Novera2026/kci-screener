@@ -216,6 +216,9 @@ class TickerRegistry:
         out = {"query": q, "ticker": None, "how": None, "alts": []}
         if not q:
             return out
+        code = normalize_code(q)            # A005950 · 005950.KS · KRX:005950 → 005950
+        if code:
+            return dict(out, ticker=code, how="ticker")
         # 1) đã là ticker? (6 số, hoặc mã chữ-số KRX mới cấp từ 2024 như 0001A0)
         if q.isdigit() and len(q) <= 6:
             return dict(out, ticker=q.zfill(6), how="ticker")
@@ -276,6 +279,15 @@ class TickerRegistry:
 
 # Mã KRX: 6 số, hoặc chữ-số kiểu mới (0001A0, 0126Z0) cho mã niêm yết từ 2024
 _TICKER_RE = re.compile(r"^[0-9][0-9A-Z]{5}$")
+# Cách viết mã hay gặp: A005930 (HTS/DART/KRX), 005930.KS/.KQ (Yahoo), KRX:/KOSPI:/KOSDAQ:005930 (TradingView)
+_CODE_FORMS = re.compile(r"^(?:(?:KRX|KOSPI|KOSDAQ|KONEX)\s*:\s*)?A?([0-9][0-9A-Z]{5})(?:\.(?:KS|KQ|KN))?$")
+
+
+def normalize_code(q: str) -> Optional[str]:
+    """Chuỗi trông như MÃ (mọi cách viết thường gặp) → mã 6 ký tự; không phải mã → None. Tên công ty không đổi."""
+    s = re.sub(r"[\s\-]", "", str(q or "")).upper()
+    m = _CODE_FORMS.match(s)
+    return m.group(1) if m else None
 # Tên cổ phiếu ưu đãi: <tên gốc>[số]우[B/C][(전환)]
 _PREF_RE = re.compile(r"^(.+?)\d?우[A-C]?(\(전환\))?$")
 
