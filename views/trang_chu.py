@@ -131,30 +131,129 @@ else:
     st.info("Hôm nay chưa có chủ đề nào tăng đủ rộng (≥ 5 mã).")
 
 # ---------------------------------------------------------------- bot
-st.subheader("🤖 Bot săn cổ phiếu — lần chạy gần nhất")
-bot = MT.load_bot_state(os.path.join(_ROOT, "bot_state.json"))
-if not bot:
-    st.info("Chưa có kết quả bot trong App. Bot hiện gửi kết quả qua Telegram; bước tiếp theo là cho bot lưu "
-            "kết quả vào chỗ App đọc được (Google Sheet hoặc repo) để hiện ở đây.")
-    st.page_link("pages/4_🔍_Sang_loc.py", label="Tự chạy sàng lọc ngay trong App →", icon="🔍")
+st.subheader("🤖 Bot săn cổ phiếu")
+st.caption("Bot lọc qua các **bộ tiêu chuẩn** (tầng 1: rẻ theo chỉ số) rồi **định giá sâu** từng mã qua cổng số "
+           "(tầng 2). Chọn phạm vi săn bên dưới — mọi số lấy mới lúc bấm chạy.")
+
+
+@st.cache_resource
+def _reg():
+    from screener import TickerRegistry
+    return TickerRegistry()
+
+
+@st.cache_data(show_spinner=False)
+def _theme_names() -> list[str]:
+    import csv
+    path = os.path.join(_ROOT, "themes_all.csv")
+    if not os.path.exists(path):
+        return []
+    return sorted({r["theme_kr"] for r in csv.DictReader(open(path, encoding="utf-8"))})
+
+
+import bot_hunt as BH                                # noqa: E402
+import screen as SC                                  # noqa: E402
+
+reg = _reg()
+_mkt_of = dict(zip(reg.df["ticker"].astype(str).str.zfill(6), reg.df["market"]))
+_ind_of = dict(zip(reg.df["ticker"].astype(str).str.zfill(6), reg.df["industry_kr"]))
+_MK = {"ALL": "Cả hai sàn", "KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}
+
+kind = st.segmented_control("Phạm vi săn", ["Top vốn hóa", "Ngành KRX", "Chủ đề Naver", "Mega trend"],
+                            default="Top vốn hóa", key="hb_kind") or "Top vốn hóa"
+c1, c2 = st.columns(2)
+if kind == "Top vốn hóa":
+    mk = c1.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk")
+    n_top = c2.select_slider("Top vốn hóa", [50, 100, 200, 300, 400], value=200, key="hb_n")
+    scope = f"top {n_top} vốn hóa {_MK[mk]}"
+elif kind == "Ngành KRX":
+    ind = c1.selectbox("Ngành", sorted(reg.df["industry_kr"].dropna().unique()), key="hb_ind")
+    mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_i")
+    scope = f"ngành {ind}" + ("" if mk == "ALL" else f" · {mk}")
+elif kind == "Chủ đề Naver":
+    th = c1.selectbox("Chủ đề", _theme_names(), key="hb_th")
+    mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_t")
+    scope = f"chủ đề {th}" + ("" if mk == "ALL" else f" · {mk}")
 else:
+    _mt = {f"{m['icon']} {m['name']}": m["key"] for m in MT.MEGATRENDS}
+    mt_lab = c1.selectbox("Mega trend", list(_mt), key="hb_mt")
+    mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_m")
+    scope = f"mega trend {mt_lab}" + ("" if mk == "ALL" else f" · {mk}")
+
+c3, c4 = st.columns([3, 1])
+presets = c3.multiselect("Bộ tiêu chuẩn", list(SC.PRESETS), default=BH.DEFAULT_PRESETS,
+                         format_func=lambda k: SC.PRESETS[k]["name"].split(" — ")[0], key="hb_presets")
+max_deep = c4.slider("Định giá sâu tối đa / bộ", 3, 15, 8, key="hb_deep",
+                     help="Mỗi bộ lấy tối đa chừng này mã qua tầng 1 để định giá sâu. Nhiều hơn = lâu hơn.")
+
+if st.button("🤖 Cho bot săn", type="primary", disabled=not presets, key="hb_run"):
+    with st.status(f"Bot đang săn trong {scope}…", expanded=True) as _sts:
+        if kind == "Top vốn hóa":
+            tks = None
+        elif kind == "Ngành KRX":
+            tks = SC.by_industry(ind, reg)
+        elif kind == "Chủ đề Naver":
+            tks = SC.by_theme(th)
+        else:
+            st.write("Lấy thành viên các chủ đề của mega trend…")
+            tks = MT.trend_tickers(_mt[mt_lab])
+        if tks is not None and mk != "ALL":
+            tks = [t for t in tks if _mkt_of.get(t) == mk]
+        if tks is not None and not tks:
+            _sts.update(label="Phạm vi này không có mã nào.", state="error")
+            st.stop()
+        out = BH.hunt(presets, universe=n_top if kind == "Top vốn hóa" else 200, max_deep=max_deep,
+                      progress=st.write, tickers=tks, market=mk, scope=scope)
+        st.session_state["home_hunt"] = out
+        _sts.update(label=f"Xong · {len(out['picks'])} mã đạt chuẩn trong {out['meta']['universe']} mã "
+                          f"({out['meta']['scope']})", state="complete", expanded=False)
+
+hunt = st.session_state.get("home_hunt")
+if hunt:
+    _meta = hunt["meta"]
+    st.caption(f"Kết quả săn lúc **{_meta['at']:%H:%M %d/%m/%Y}** KST · {_meta.get('scope', '')} · "
+               f"{_meta['universe']} mã · định giá sâu {_meta['n_deep']} mã.")
+    picks = hunt["picks"]
+    if not picks:
+        st.info("Không mã nào qua đủ 2 tầng trong phạm vi này. Thử mở rộng phạm vi hoặc thêm bộ tiêu chuẩn.")
+    else:
+        pdf = pd.DataFrame([{
+            "Mã": p["ticker"], "Tên": p["name"], "Sàn": _mkt_of.get(p["ticker"], "—"),
+            "Ngành": p.get("industry") or _ind_of.get(p["ticker"]) or "—",
+            "Kết luận": p["verdict"] or "—", "Giá": p["price"], "Giá trị hợp lý": p["fair"],
+            "Chênh %": p["upside"], "Chất lượng TS": p.get("quality") or "—", "Số bộ đạt": len(p["presets"]),
+            "Bộ tiêu chuẩn": ", ".join(SC.PRESETS[k]["name"].split(" — ")[0] for k in p["presets"]),
+        } for p in picks])
+        f1, f2 = st.columns(2)
+        fm = f1.segmented_control("Lọc sàn", ["Tất cả", "KOSPI", "KOSDAQ"], default="Tất cả", key="hb_fm") or "Tất cả"
+        inds = sorted(pdf["Ngành"].unique())
+        fi = f2.multiselect("Lọc ngành", inds, key="hb_fi")
+        view = pdf[(pdf["Sàn"] == fm) if fm != "Tất cả" else pdf["Sàn"].notna()]
+        if fi:
+            view = view[view["Ngành"].isin(fi)]
+        st.dataframe(view.style.format({"Giá": "{:,.0f}", "Giá trị hợp lý": "{:,.0f}", "Chênh %": "{:+.1f}"},
+                                       na_rep="—").map(_color, subset=["Chênh %"]),
+                     hide_index=True, width="stretch")
+        st.caption("🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm. Backtest 2021–25 chỉ kiểm chứng phần **định giá**; "
+                   "các bộ tiêu chuẩn chưa thắng vũ trụ có ý nghĩa thống kê. Để nghiên cứu tiếp, không phải khuyến nghị.")
+        if len(view):
+            c1, c2 = st.columns([3, 1])
+            pick = c1.selectbox("Định giá đủ 5 bước một mã", [f"{r['Mã']} · {r['Tên']}" for _, r in view.iterrows()],
+                                key="home_pick_hunt")
+            if c2.button("Mở trong 🧮", key="home_open_hunt", width="stretch"):
+                _open_valuation(pick.split(" · ")[0])
+
+bot = MT.load_bot_state(os.path.join(_ROOT, "bot_state.json"))
+if bot:
     try:
         _at = _dt.datetime.fromisoformat(bot["at"]).strftime("%H:%M %d/%m/%Y")
     except (KeyError, ValueError):
         _at = "—"
-    bdf = pd.DataFrame([{"Mã": tk, "Tên": p.get("name"), "Kết luận": p.get("verdict") or "—",
-                         "Số bộ đạt": len(p.get("presets") or []),
-                         "Bộ tiêu chuẩn": ", ".join(p.get("presets") or [])}
-                        for tk, p in bot["picks"].items()])
-    st.caption(f"Bot chạy lúc **{_at}** KST · {len(bdf)} mã. Chỉ là danh sách để nghiên cứu tiếp — giá & giá trị "
-               "hợp lý **tính lại mới** khi mở mã trong 🧮, không dùng lại số lúc bot chạy.")
-    if len(bdf):
-        st.dataframe(bdf, hide_index=True, width="stretch")
-        c1, c2 = st.columns([3, 1])
-        pick = c1.selectbox("Định giá một mã của bot", [f"{r['Mã']} · {r['Tên']}" for _, r in bdf.iterrows()],
-                            key="home_pick_bot")
-        if c2.button("Mở trong 🧮", key="home_open_bot", width="stretch"):
-            _open_valuation(pick.split(" · ")[0])
+    with st.expander(f"📨 Lần chạy tự động gần nhất (Telegram) · {_at} KST · {len(bot['picks'])} mã"):
+        st.dataframe(pd.DataFrame([{"Mã": tk, "Tên": p.get("name"), "Sàn": _mkt_of.get(tk, "—"),
+                                    "Kết luận": p.get("verdict") or "—", "Số bộ đạt": len(p.get("presets") or [])}
+                                   for tk, p in bot["picks"].items()]), hide_index=True, width="stretch")
+        st.caption("Danh sách lúc bot chạy — giá & giá trị hợp lý tính lại mới khi mở mã trong 🧮.")
 
 st.divider()
 st.caption("Không phải khuyến nghị đầu tư. Chủ đề & xu hướng phản ánh dòng tiền ngắn hạn, cần đọc kèm định giá.")

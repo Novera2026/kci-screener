@@ -175,3 +175,20 @@ def test_reload_guard_first_sight_after_process_start(tmp_path):
         sys.path.remove(str(tmp_path))
         sys.modules.pop("kci_mod_c", None)
         reg.pop("kci_mod_c", None)
+
+
+@pytest.mark.skipif(os.environ.get("KCI_E2E") != "1",
+                    reason="Bot săn gọi Naver/DART thật: chạy  KCI_E2E=1 pytest")
+def test_home_bot_hunt_by_industry():
+    """Trang chủ: chọn phạm vi Ngành KRX → bot săn đúng phạm vi, ra bảng có cột Sàn/Ngành."""
+    at = AppTest.from_file(APP, default_timeout=900).run()
+    at.button_group(key="hb_kind").set_value("Ngành KRX").run()
+    at.selectbox(key="hb_ind").set_value("은행").run()
+    at.multiselect(key="hb_presets").set_value(["kci", "valueup"]).run()
+    at.slider(key="hb_deep").set_value(3).run()
+    at.button(key="hb_run").click().run()
+    assert not at.exception, at.exception
+    assert any("ngành 은행" in c.value for c in at.caption)
+    frames = [d.value for d in at.dataframe if "Bộ tiêu chuẩn" in getattr(d.value, "columns", [])]
+    for f in frames:
+        assert {"Sàn", "Ngành", "Giá trị hợp lý"} <= set(f.columns)

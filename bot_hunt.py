@@ -149,15 +149,25 @@ def market_open_today(now: Optional[_dt.datetime] = None) -> Optional[bool]:
         return None
 
 
-def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=print) -> dict:
-    """Chạy sàng lọc + định giá sâu. Trả {picks, results, hits, rows, meta}."""
+def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=print,
+         tickers: Optional[list[str]] = None, market: str = "ALL", scope: str = "") -> dict:
+    """Chạy sàng lọc + định giá sâu. Trả {picks, results, hits, rows, meta}.
+
+    Mặc định vũ trụ = top `universe` vốn hóa của `market` (ALL / KOSPI / KOSDAQ).
+    Truyền `tickers` để săn trong danh sách riêng (ngành, chủ đề, mega trend…), tối đa 400 mã."""
     import screen as SC
     import valuation as V
     from screener import TickerRegistry, fetch_kgb10y_detail, fetch_many
     reg = TickerRegistry()
     at = _dt.datetime.now(KST)
-    progress(f"① Vũ trụ top {universe} vốn hóa…")
-    tks = SC.top_by_cap("ALL", universe, reg)
+    if tickers:
+        tks = list(dict.fromkeys(str(t).zfill(6) for t in tickers))[:400]
+        scope = scope or f"{len(tks)} mã tự chọn"
+    else:
+        scope = scope or f"top {universe} vốn hóa " + ("cả hai sàn" if market == "ALL" else market)
+        progress(f"① Vũ trụ {scope}…")
+        tks = SC.top_by_cap(market, universe, reg)
+    progress(f"① Lấy chỉ số {len(tks)} mã ({scope})…")
     rows, _ = fetch_many(tks, registry=reg, prefer="naver")
     stage1 = {k: [r["Mã"] for r in SC.apply_preset(rows, k) if r["Qua lọc"]][:max_deep] for k in presets}
     union = list(dict.fromkeys(t for k in presets for t in stage1[k]))
@@ -171,7 +181,7 @@ def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=p
     progress("③ Tầng 2: " + ", ".join(f"{k} {len(v)}" for k, v in hits.items()))
     picks = aggregate(results, hits)
     return {"picks": picks, "results": results, "hits": hits, "rows": rows,
-            "meta": {"at": at, "universe": len(rows), "presets": presets, "n_deep": len(union), "rf": rf.get("value")}}
+            "meta": {"at": at, "universe": len(rows), "scope": scope, "presets": presets, "n_deep": len(union), "rf": rf.get("value")}}
 
 
 def excel_bytes(out: dict) -> bytes:
