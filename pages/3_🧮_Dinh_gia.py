@@ -997,9 +997,20 @@ with T["end"]:
                        "text/markdown", width="stretch")
     d2.download_button("⬇️ Bảng tính (.xlsx)", buf.getvalue(), f"dinh_gia_{tk}_{ctx['date']}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
-    d3.download_button("⬇️ Báo cáo in PDF (.html)", P.report_html(md, f"Định giá {name} {tk}").encode("utf-8"),
-                       f"dinh_gia_{tk}_{ctx['date']}.html", "text/html", width="stretch",
-                       help="Mở file trong trình duyệt → In (⌘P) → Lưu thành PDF")
+    try:
+        import report_pdf as RPDF
+        _pdf = RPDF.report_pdf(md, f"Định giá {name} {tk}", {
+            "price": price, "fair": rec.get("fair"), "low": rec.get("low"), "high": rec.get("high"),
+            "upside": rec.get("upside"), "verdict": (overall or {}).get("verdict") or rec.get("verdict"),
+            "confidence": rec.get("confidence")})
+        d3.download_button("⬇️ Báo cáo đầy đủ (.pdf)", _pdf, f"dinh_gia_{tk}_{ctx['date']}.pdf", "application/pdf",
+                           type="primary", width="stretch",
+                           help="Toàn bộ báo cáo: kết luận, tổng quan, đối thủ, bóc tách năm + quý, chất lượng tài sản, "
+                                "dự phóng, chi phí vốn, mô hình & cổng số, kịch bản, độ nhạy")
+    except Exception as _e:                      # thiếu thư viện/font → vẫn cho bản HTML in ra PDF
+        d3.download_button("⬇️ Báo cáo in PDF (.html)", P.report_html(md, f"Định giá {name} {tk}").encode("utf-8"),
+                           f"dinh_gia_{tk}_{ctx['date']}.html", "text/html", width="stretch",
+                           help=f"Không dựng được PDF ({str(_e)[:80]}). Mở file trong trình duyệt → In (⌘P) → Lưu PDF")
     if d4.button("📓 Lưu vào nhật ký", width="stretch", disabled=not rec["fair"],
                  help="Chỉ lưu được khi có giá trị hợp lý công bố"):
         P.log_append(LOG_PATH, P.log_entry(ctx, drivers, A, scen))
