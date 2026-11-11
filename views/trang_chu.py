@@ -139,6 +139,20 @@ if hot:
 else:
     st.info("Hôm nay chưa có chủ đề nào tăng đủ rộng (≥ 5 mã).")
 
+# ---------------------------------------------------------------- tóm tắt phiên (Facebook)
+st.subheader("📝 Tóm tắt phiên — đăng Facebook")
+st.caption("Viết tự động từ số liệu realtime ở trên (chỉ số, mega trend, mã tăng mạnh trong nhóm dẫn dắt). Bấm biểu "
+           "tượng 📋 ở góc khung để copy. Trước giờ đóng cửa (15:30) là **diễn biến phiên**, sau đó là **tổng kết phiên** "
+           "— bấm 🔄 Làm mới để lấy số mới nhất.")
+_lead = [t for t in tt if t.get("chg") is not None][:3]
+with st.spinner("Đang lấy mã tăng mạnh của các nhóm dẫn dắt..."):
+    _mv = {}
+    for _t in _lead:
+        _mm = next(x for x in MT.MEGATRENDS if x["key"] == _t["key"])
+        _mv[_t["key"]] = MT.trend_leaders(_t["key"], _details(tuple(_mm["themes"])), top=5)
+_post = MT.session_summary(idx, tt, _mv, _dt.datetime.now(_KST), mstatus)
+st.code(_post, language=None, wrap_lines=True)
+
 # ---------------------------------------------------------------- bot
 st.subheader("🤖 Bot săn cổ phiếu")
 st.caption("Bot lọc qua các **bộ tiêu chuẩn** (tầng 1: rẻ theo chỉ số) rồi **định giá sâu** từng mã qua cổng số "

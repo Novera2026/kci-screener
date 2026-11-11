@@ -128,3 +128,52 @@ def trend_tickers(key: str, per_theme: int = 100) -> list[str]:
     m = next(x for x in MEGATRENDS if x["key"] == key)
     det = H.parallel(lambda no: H.theme_detail(no, per_theme), m["themes"])
     return list(dict.fromkeys(s["ticker"] for no in m["themes"] for s in (det.get(no) or {}).get("stocks", [])))
+
+
+def _vn(x: Optional[float], d: int = 2, sign: bool = False) -> str:
+    """Số kiểu Việt Nam: 5.188,00 · +3,37."""
+    if x is None:
+        return "—"
+    s = f"{x:+,.{d}f}" if sign else f"{x:,.{d}f}"
+    return s.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def session_summary(indices: list[dict], trends: list[dict], movers: dict, at, status: Optional[str],
+                    n_trends: int = 3, n_movers: int = 2) -> str:
+    """Bản tóm tắt phiên (văn bản thuần, dán thẳng lên Facebook) — chỉ từ số liệu realtime đã lấy.
+
+    indices = market_indices(); trends = trend_table() (đã xếp % ↓); movers = {key xu hướng: trend_leaders(...)};
+    at = datetime KST lúc lấy số; status = marketStatus Naver (OPEN/CLOSE/...)."""
+    live = status == "OPEN"
+    head = (f"📊 DIỄN BIẾN PHIÊN {at:%d/%m/%Y} — CHỨNG KHOÁN HÀN QUỐC (cập nhật {at:%H:%M})" if live
+            else f"📊 TỔNG KẾT PHIÊN {at:%d/%m/%Y} — CHỨNG KHOÁN HÀN QUỐC")
+    L = [head, ""]
+    for r in indices:
+        if r.get("price") is None:
+            continue
+        arrow = "🔺" if (r.get("chg") or 0) > 0 else "🔻" if (r.get("chg") or 0) < 0 else "▪️"
+        L.append(f"{arrow} {r['code']}: {_vn(r['price'])} điểm ({_vn(r.get('chg_pt'), 2, True)} điểm, "
+                 f"{_vn(r.get('chg'), 2, True)}%)")
+    valid = [t for t in trends if t.get("chg") is not None]
+    if valid:
+        up = sum(1 for t in valid if t["chg"] > 0)
+        mood = ("Dòng tiền lan tỏa rộng" if up == len(valid) else "Đa số nhóm ngành tăng" if up > len(valid) / 2
+                else "Thị trường phân hóa" if up > 0 else "Áp lực bán bao trùm")
+        L += ["", f"🧭 {mood}: {up}/{len(valid)} xu hướng lớn tăng điểm."]
+        L += ["", "🔥 NHÓM DẪN DẮT"]
+        used: set = set()                       # một mã thuộc nhiều nhóm chỉ nêu MỘT lần trong bài
+        for i, t in enumerate(valid[:n_trends], 1):
+            br = f", {t['rise']}/{t['total']} mã tăng" if t.get("total") else ""
+            L.append(f"{i}. {t['icon']} {t['name']}: {_vn(t['chg'], 2, True)}%{br}")
+            top = [s for s in (movers.get(t["key"]) or [])
+                   if s.get("chg") is not None and (s.get("ticker") or s["name"]) not in used][:n_movers]
+            used.update(s.get("ticker") or s["name"] for s in top)
+            if top:
+                L.append("   ↳ " + " · ".join(f"{s['name']} {_vn(s['chg'], 1, True)}%" for s in top))
+        weak = valid[-1]
+        if len(valid) > n_trends:
+            L += ["", f"🐢 Yếu nhất: {weak['icon']} {weak['name']} ({_vn(weak['chg'], 2, True)}%)"]
+    L += ["", "⚠️ Thông tin tổng hợp từ dữ liệu thị trường (Naver), chỉ mang tính tham khảo — không phải khuyến nghị "
+              "mua bán.",
+          "", "#ChungKhoanHanQuoc #KOSPI #KOSDAQ #DauTuHanQuoc #KCI"]
+    return "\n".join(L)
