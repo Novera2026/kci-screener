@@ -166,6 +166,35 @@ def _throttle() -> None:
         _last_call[0] = time.time()
 
 
+# Nghĩa các mã trạng thái của OpenDART (để cảnh báo trên app nói rõ NGUYÊN NHÂN, không chỉ "lỗi").
+DART_STATUS = {
+    "010": "khóa API chưa đăng ký — kiểm tra DART_API_KEY trong Secrets",
+    "011": "khóa API đang bị tạm ngừng sử dụng",
+    "012": "DART không cho địa chỉ IP của máy chủ này truy cập",
+    "020": "đã vượt hạn mức gọi DART trong ngày của khóa (khoảng 20.000 lần)",
+    "021": "vượt số công ty được tra trong một lần gọi",
+    "100": "tham số gửi lên DART không hợp lệ",
+    "101": "DART từ chối truy cập (truy cập không hợp lệ)",
+    "800": "DART đang bảo trì hệ thống",
+    "900": "DART gặp lỗi chưa xác định ở phía máy chủ của họ",
+    "901": "khóa API đã hết hạn sử dụng (thời hạn lưu thông tin cá nhân)",
+}
+
+
+def describe_exception(e: BaseException) -> str:
+    """Lỗi mạng khi gọi DART → câu tiếng Việt nói rõ loại lỗi (không chứa URL vì URL có khóa API)."""
+    name = type(e).__name__
+    if "Timeout" in name:
+        return f"DART trả lời quá chậm (quá {_TIMEOUT} giây, {name})"
+    if name in ("JSONDecodeError", "ValueError") or "JSON" in name:
+        return "DART trả về trang không phải dữ liệu (thường là đang bảo trì hoặc chặn tạm thời)"
+    if "SSL" in name:
+        return f"lỗi bảo mật kết nối tới DART ({name})"
+    if "Connection" in name or "Reset" in name or "Refused" in name:
+        return f"DART đóng / từ chối kết nối ({name}) — thường do gọi dồn dập, thử lại sau ít phút"
+    return f"lỗi kết nối DART ({name})"
+
+
 def error_count() -> int:
     """Số lần gọi DART hỏng từ đầu tiến trình — nơi gọi so trước/sau để biết lượt lấy của mình có đầy đủ không."""
     return STATS["errors"]
@@ -181,7 +210,9 @@ def fetch_statements(corp_code: str, year: int, reprt_code: str = "11011", fs_di
     if time.time() < STATS["open_until"]:
         with _gate:
             STATS["errors"] += 1
-        raise DartError("DART đang từ chối kết nối — tạm ngừng gọi, thử lại sau khoảng 1–2 phút")
+        wait = max(int(STATS["open_until"] - time.time()), 1)
+        raise DartError(f"tạm ngừng gọi DART khoảng {wait} giây sau {BREAKER_AFTER} lần lỗi liên tiếp — nguyên nhân: "
+                        f"{STATS['last_error'] or 'không rõ'}")
     last = "lỗi không rõ"
     for i in range(len(RETRY_WAITS) + 1):
         if not budget_take():
@@ -195,7 +226,7 @@ def fetch_statements(corp_code: str, year: int, reprt_code: str = "11011", fs_di
                                      "reprt_code": reprt_code, "fs_div": fs_div},
                              timeout=timeout or _TIMEOUT).json()
         except Exception as e:                    # không ghi str(e): chứa URL kèm khóa API
-            last = f"lỗi kết nối DART ({type(e).__name__})"
+            last = describe_exception(e)
         else:
             if not isinstance(j, dict):
                 j = {"status": "bad-body"}
@@ -211,7 +242,7 @@ def fetch_statements(corp_code: str, year: int, reprt_code: str = "11011", fs_di
                     STATS["streak"] = 0
                 return None
             last = ("DART trả dữ liệu không đúng dạng" if st == "bad-body" else
-                    f"DART trả mã lỗi {st}" + (" (vượt hạn mức gọi trong ngày)" if st == "020" else ""))
+                    f"DART báo mã {st}: {DART_STATUS.get(st) or str(j.get('message') or 'không rõ')}")
             if st not in ("800", "900", "bad-body"):     # hạn mức / khóa: thử lại ngay cũng vô ích
                 break
         if i < len(RETRY_WAITS):

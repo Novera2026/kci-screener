@@ -573,3 +573,34 @@ def test_net_profit_never_read_from_equity_statement():
              it("CIS", "ifrs-full_ProfitLossAttributableToNoncontrollingInterests", "비지배지분", 56)]
     assert D.main_accounts(items)["net_profit"] == pytest.approx(400)
     assert D.main_accounts([it("SCE", "x", "당기순이익", 56)]) == {}            # chỉ có ở SCE → không lấy
+
+
+def test_dart_errors_name_the_root_cause(monkeypatch):
+    """Cảnh báo trên app phải nói được NGUYÊN NHÂN: mã trạng thái DART, loại lỗi mạng, và khi đã ngắt mạch thì vẫn
+    nhắc lại lỗi gốc (lần đầu trên máy chủ Cloud mới chỉ hiện 'đang từ chối kết nối', không biết vì sao)."""
+    import requests as _rq
+
+    class R:
+        def __init__(self, p):
+            self.p = p
+
+        def json(self):
+            return self.p
+    _dart_env(monkeypatch, lambda url, params=None, timeout=None: R({"status": "012", "message": "접근할 수 없는 IP"}))
+    with pytest.raises(D.DartError) as e:
+        D.fetch_statements("1", 2025)
+    assert "012" in str(e.value) and "IP" in str(e.value)
+
+    def slow(url, params=None, timeout=None):
+        raise _rq.ReadTimeout("https://opendart…crtfc_key=test-key")
+    monkeypatch.setattr(D.requests, "get", slow)
+    for _ in range(D.BREAKER_AFTER - 1):
+        with pytest.raises(D.DartError):
+            D.fetch_statements("1", 2025)
+    with pytest.raises(D.DartError) as e:
+        D.fetch_statements("1", 2025)
+    assert "quá chậm" in str(e.value) and "test-key" not in str(e.value)
+    with pytest.raises(D.DartError) as e:                               # đã ngắt mạch: vẫn nêu nguyên nhân gốc
+        D.fetch_statements("1", 2025)
+    assert "tạm ngừng gọi DART" in str(e.value) and "quá chậm" in str(e.value)
+    assert "đóng / từ chối kết nối" in D.describe_exception(ConnectionResetError())
