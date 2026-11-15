@@ -175,6 +175,7 @@ def _theme_names() -> list[str]:
 
 
 import bot_hunt as BH                                # noqa: E402
+import guard as GD                                   # noqa: E402
 import screen as SC                                  # noqa: E402
 
 reg = _reg()
@@ -210,26 +211,30 @@ max_deep = c4.slider("Định giá sâu tối đa / bộ", 3, 15, 8, key="hb_dee
                      help="Mỗi bộ lấy tối đa chừng này mã qua tầng 1 để định giá sâu. Nhiều hơn = lâu hơn.")
 
 if st.button("🤖 Cho bot săn", type="primary", disabled=not presets, key="hb_run"):
-    with st.status(f"Bot đang săn trong {scope}…", expanded=True) as _sts:
-        if kind == "Top vốn hóa":
-            tks = None
-        elif kind == "Ngành KRX":
-            tks = SC.by_industry(ind, reg)
-        elif kind == "Chủ đề Naver":
-            tks = SC.by_theme(th)
-        else:
-            st.write("Lấy thành viên các chủ đề của mega trend…")
-            tks = MT.trend_tickers(_mt[mt_lab])
-        if tks is not None and mk != "ALL":
-            tks = [t for t in tks if _mkt_of.get(t) == mk]
-        if tks is not None and not tks:
-            _sts.update(label="Phạm vi này không có mã nào.", state="error")
+    with GD.heavy_slot() as _ok:      # giới hạn tác vụ nặng cùng lúc trên máy chủ; luôn nhả khi xong/lỗi
+        if not _ok:
+            st.warning(GD.BUSY_MSG)
             st.stop()
-        out = BH.hunt(presets, universe=n_top if kind == "Top vốn hóa" else 200, max_deep=max_deep,
-                      progress=st.write, tickers=tks, market=mk, scope=scope)
-        st.session_state["home_hunt"] = out
-        _sts.update(label=f"Xong · {len(out['picks'])} mã đạt chuẩn trong {out['meta']['universe']} mã "
-                          f"({out['meta']['scope']})", state="complete", expanded=False)
+        with st.status(f"Bot đang săn trong {scope}…", expanded=True) as _sts:
+            if kind == "Top vốn hóa":
+                tks = None
+            elif kind == "Ngành KRX":
+                tks = SC.by_industry(ind, reg)
+            elif kind == "Chủ đề Naver":
+                tks = SC.by_theme(th)
+            else:
+                st.write("Lấy thành viên các chủ đề của mega trend…")
+                tks = MT.trend_tickers(_mt[mt_lab])
+            if tks is not None and mk != "ALL":
+                tks = [t for t in tks if _mkt_of.get(t) == mk]
+            if tks is not None and not tks:
+                _sts.update(label="Phạm vi này không có mã nào.", state="error")
+                st.stop()
+            out = BH.hunt(presets, universe=n_top if kind == "Top vốn hóa" else 200, max_deep=max_deep,
+                          progress=st.write, tickers=tks, market=mk, scope=scope)
+            st.session_state["home_hunt"] = out
+            _sts.update(label=f"Xong · {len(out['picks'])} mã đạt chuẩn trong {out['meta']['universe']} mã "
+                              f"({out['meta']['scope']})", state="complete", expanded=False)
 
 hunt = st.session_state.get("home_hunt")
 if hunt:

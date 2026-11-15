@@ -1,7 +1,11 @@
 # 🤖 Bot săn cổ phiếu (Telegram)
 
-Mỗi **ngày làm việc lúc 16:30 giờ Hàn**, bot chạy quy trình sàng lọc và định giá của App. Sau đó nó gửi báo cáo về
-Telegram, kèm file Excel. Ngày sàn nghỉ thì bot không gửi.
+> **Từ 15/11/2026:** bot săn chạy bằng **tác vụ Claude 2 tuần/lần** (`bot_hunt.py --export`, ghi Google Sheet). Lịch
+> tự động trên GitHub Actions đã **tắt** (workflow `Bot săn cổ phiếu` chỉ còn chạy tay): GitHub kích hoạt lịch trễ ~8
+> giờ, rơi sau nửa đêm giờ Hàn nên bot tưởng sàn nghỉ và chưa quét lần nào. Bot nay hiểu lần chạy trễ qua nửa đêm; muốn
+> dùng lại kênh Telegram thì làm theo phần cài đặt dưới đây rồi chạy tay hoặc thêm lại khối `schedule`.
+
+Bot chạy quy trình sàng lọc và định giá của App, gửi báo cáo về Telegram kèm file Excel. Ngày sàn nghỉ thì bot không gửi.
 
 **Bot làm gì mỗi lần chạy** (`bot_hunt.py`):
 
@@ -10,7 +14,8 @@ Telegram, kèm file Excel. Ngày sàn nghỉ thì bot không gửi.
    15 mã mỗi bộ.
 3. Định giá sâu bằng đúng quy trình trang 🧮, rồi kiểm tầng 2 của từng bộ bằng BCTC DART.
 4. Lập **danh sách săn**: mã đạt tầng 2 của ít nhất 1 bộ, có giá trị hợp lý qua cổng số và đang rẻ hơn giá trị ước
-   tính. Xếp theo số bộ đạt → kết luận 🟢/🟡 → % chênh.
+   tính. Xếp theo **% chênh** (tín hiệu định giá — phần duy nhất có bằng chứng backtest); số bộ đạt chỉ để đọc. Mã tin
+   cậy Thấp hoặc có lỗi dữ liệu được đánh dấu ⚠️.
 5. So với hôm trước: **🆕 mã mới vào · 🔁 đổi kết luận · ❌ rớt ra**.
 
 Chạy thử 10/11/2026 mất khoảng 45 giây: 45 mã được định giá sâu, 21 mã trong danh sách săn.

@@ -1,0 +1,66 @@
+# Kiểm thử trước khi deploy (rà soát 15/11/2026, đợt 2).
+#
+# Mỗi lần push lên main: chạy toàn bộ test (pytest + pyflakes, không cần khóa API). Đạt hết thì đẩy đúng commit đó
+# sang nhánh `deploy`. Streamlit Cloud deploy từ nhánh `deploy` (anh đổi một lần trong Settings của App) → code
+# chưa qua test không bao giờ lên bản công khai. Chưa đổi thì Cloud vẫn deploy từ main như cũ, workflow chỉ báo đỏ/xanh.
+#
+# Action ghim theo mã commit (không theo tag có thể bị dời) · quyền tối thiểu · không dùng secret nào.
+name: Kiểm thử
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262      # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Chạy test
+        env:
+          KCI_PUBLIC: "0"
+        run: python -m pytest -q
+
+  promote:
+    # chỉ khi test đạt trên push vào main → đưa đúng commit đó sang nhánh deploy (chỉ tiến, không ghi đè lịch sử)
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: promote-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262      # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Đẩy commit đã qua test sang nhánh deploy
+        run: git push origin "${GITHUB_SHA}:refs/heads/deploy"

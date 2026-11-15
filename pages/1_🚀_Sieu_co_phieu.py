@@ -17,6 +17,7 @@ import streamlit as st
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 import growth as G                                   # noqa: E402
+import guard as GD                                   # noqa: E402
 from financials import fetch_financials              # noqa: E402
 from screener import TickerRegistry                  # noqa: E402
 
@@ -97,11 +98,20 @@ _hour = _dt.datetime.now().strftime("%Y%m%d%H")
 THEMES, THEMES_OF = _themes()
 
 
+# Bộ nhớ dùng chung giữ dữ liệu theo NGÀY / GIỜ; trước 15/11/2026 không bao giờ xóa → mỗi ngày quét toàn sàn lại cộng
+# thêm (~1.300 chuỗi giá + BCTC + tin). Giữ đúng ngày hôm nay và giờ hiện tại, xóa phần còn lại.
+for _k in list(store.keys()):
+    if _k[-1] not in (_today, _hour):
+        store.pop(_k, None)
+
+
 def _cached(kind, tk, key, fn):
     k = (kind, tk, key)
-    if k not in store:
-        store[k] = fn(tk)
-    return store[k]
+    v = store.get(k)
+    if v is None:
+        v = fn(tk)
+        store[k] = v
+    return v
 
 
 def _daily(tk):
@@ -139,8 +149,8 @@ min_cap = c3.number_input("Vốn hóa tối thiểu (억)", 100, 1_000_000, 1000
                           help="1.000억 ≈ 1 nghìn tỷ won. Bỏ mã quá nhỏ, thanh khoản kém.")
 manual = ""
 if scope == "Nhập tay":
-    manual = st.text_area("Danh sách mã (mỗi dòng 1 mã / tên)", "192820\n028670\n006400",
-                          height=100)
+    manual = st.text_area(f"Danh sách mã (mỗi dòng 1 mã / tên, tối đa {GD.MAX_LIST} mã)", "192820\n028670\n006400",
+                          height=100, max_chars=GD.MAX_INPUT_CHARS)
 
 f1, f2 = st.columns([1.6, 1])
 stages_ok = f1.multiselect("Giai đoạn cho phép", ["🌱 Sớm", "🌿 Đang chạy", "🔥 Đã chạy xa"],
@@ -166,147 +176,151 @@ run = st.button("🔎 Tìm siêu cổ phiếu tiềm năng", type="primary")
 
 # ---------------------------------------------------------------- tìm
 if run:
-    full = scope.startswith("Toàn sàn")
-    if full:
-        if not markets:
-            st.error("Chọn ít nhất 1 sàn.")
+    with GD.heavy_slot() as _ok:      # giới hạn tác vụ nặng cùng lúc trên máy chủ; luôn nhả khi xong/lỗi
+        if not _ok:
+            st.warning(GD.BUSY_MSG)
             st.stop()
-        uni = _universe(float(min_cap), tuple(markets))
-    else:
-        if scope == "Danh sách ở trang chính":
-            raw = st.session_state.get("main_list") or st.session_state.get("raw_input", "")
-        elif scope.startswith("Từ trang Tin nóng") and _handoff:
-            raw = "\n".join(_handoff["tickers"])
+        full = scope.startswith("Toàn sàn")
+        if full:
+            if not markets:
+                st.error("Chọn ít nhất 1 sàn.")
+                st.stop()
+            uni = _universe(float(min_cap), tuple(markets))
         else:
-            raw = manual
-        qs = [x.strip() for x in raw.replace(",", "\n").splitlines() if x.strip()]
-        uni = []
-        for q in qs:
-            tk = reg.resolve(q)
-            if tk:
-                uni.append({"ticker": tk, "name": reg.name_of(tk) or q, "market": "",
-                            "cap_eok": None, "price": None})
-        if not uni:
-            st.error("Không có mã hợp lệ. Ở trang chính hãy nhập danh sách trước, "
-                     "hoặc chọn 'Nhập tay'.")
-            st.stop()
-    names = {u["ticker"]: u["name"] for u in uni}
-    caps = {u["ticker"]: u["cap_eok"] for u in uni}
+            if scope == "Danh sách ở trang chính":
+                raw = st.session_state.get("main_list") or st.session_state.get("raw_input", "")
+            elif scope.startswith("Từ trang Tin nóng") and _handoff:
+                raw = "\n".join(_handoff["tickers"])
+            else:
+                raw = manual
+            qs = GD.clip_queries(raw)[0]
+            uni = []
+            for q in qs:
+                tk = reg.resolve(q)
+                if tk:
+                    uni.append({"ticker": tk, "name": reg.name_of(tk) or q, "market": "",
+                                "cap_eok": None, "price": None})
+            if not uni:
+                st.error("Không có mã hợp lệ. Ở trang chính hãy nhập danh sách trước, "
+                         "hoặc chọn 'Nhập tay'.")
+                st.stop()
+        names = {u["ticker"]: u["name"] for u in uni}
+        caps = {u["ticker"]: u["cap_eok"] for u in uni}
 
-    # Bước 1 — biểu đồ toàn danh sách gốc
-    bar = st.progress(0.0, text=f"Bước 1/2 · Tải biểu đồ {len(uni)} mã…")
-    daily = G.parallel_map(_daily, [u["ticker"] for u in uni],
-                           progress=lambda d, n: bar.progress(d / n,
-                           text=f"Bước 1/2 · Biểu đồ {d}/{n} mã"))
-    mets = {tk: G.chart_metrics(d) for tk, d in daily.items() if d}
-    mets = {tk: m for tk, m in mets.items() if m}
+        # Bước 1 — biểu đồ toàn danh sách gốc
+        bar = st.progress(0.0, text=f"Bước 1/2 · Tải biểu đồ {len(uni)} mã…")
+        daily = G.parallel_map(_daily, [u["ticker"] for u in uni],
+                               progress=lambda d, n: bar.progress(d / n,
+                               text=f"Bước 1/2 · Biểu đồ {d}/{n} mã"))
+        mets = {tk: G.chart_metrics(d) for tk, d in daily.items() if d}
+        mets = {tk: m for tk, m in mets.items() if m}
 
-    ref = None if full else store.get(("rsdist", _today))
-    G.assign_rs(mets, ref=ref)
-    for m in mets.values():
-        G.finalize_chart(m, rs_min)
-        m["stage"], m["stage_why"] = G.stage_of(m, lim)
+        ref = None if full else store.get(("rsdist", _today))
+        G.assign_rs(mets, ref=ref)
+        for m in mets.values():
+            G.finalize_chart(m, rs_min)
+            m["stage"], m["stage_why"] = G.stage_of(m, lim)
 
-    ind_of = {tk: reg.industry_of(tk) for tk in mets}
-    if full and len(mets) >= 300:
-        inds = collections.defaultdict(list)
-        for tk, ind in ind_of.items():
-            if ind:
-                inds[ind].append(tk)
-        theme_rank = G.group_strength(mets, THEMES)
-        ind_rank = G.group_strength(mets, inds)
-        store[("rsdist", _today)] = [m["rs_raw"] for m in mets.values()]
-        store[("meta", _today)] = (theme_rank, ind_rank)
-    else:
-        theme_rank, ind_rank = store.get(("meta", _today), ({}, {}))
-    meta_ok = bool(theme_rank)
+        ind_of = {tk: reg.industry_of(tk) for tk in mets}
+        if full and len(mets) >= 300:
+            inds = collections.defaultdict(list)
+            for tk, ind in ind_of.items():
+                if ind:
+                    inds[ind].append(tk)
+            theme_rank = G.group_strength(mets, THEMES)
+            ind_rank = G.group_strength(mets, inds)
+            store[("rsdist", _today)] = [m["rs_raw"] for m in mets.values()]
+            store[("meta", _today)] = (theme_rank, ind_rank)
+        else:
+            theme_rank, ind_rank = store.get(("meta", _today), ({}, {}))
+        meta_ok = bool(theme_rank)
 
-    for tk, m in mets.items():
-        m["meta"] = (G.meta_for(tk, THEMES_OF, ind_of, theme_rank, ind_rank, top_k)
-                     if meta_ok else {"in_meta": None, "meta_pct": None, "theme": None,
-                                      "theme_rank": None, "ind_rank": None})
+        for tk, m in mets.items():
+            m["meta"] = (G.meta_for(tk, THEMES_OF, ind_of, theme_rank, ind_rank, top_k)
+                         if meta_ok else {"in_meta": None, "meta_pct": None, "theme": None,
+                                          "theme_rank": None, "ind_rank": None})
 
-    trend = [tk for tk, m in mets.items() if m["chart_pass"] >= chart_min]
-    extended = [tk for tk in trend if mets[tk]["stage"].startswith("🔥")]
-    cand = [tk for tk in trend if mets[tk]["stage"] in stages_ok]
-    hidden_meta = []
-    if only_meta and meta_ok:
-        hidden_meta = [tk for tk in cand if not mets[tk]["meta"]["in_meta"]]
-        cand = [tk for tk in cand if mets[tk]["meta"]["in_meta"]]
-    cand.sort(key=lambda t: (-(mets[t]["meta"]["meta_pct"] or 0) * 0.5
-                             - mets[t]["chart_pass"] * 5 - mets[t]["rs"] * 0.5))
-    short = cand[:top_n]
+        trend = [tk for tk, m in mets.items() if m["chart_pass"] >= chart_min]
+        extended = [tk for tk in trend if mets[tk]["stage"].startswith("🔥")]
+        cand = [tk for tk in trend if mets[tk]["stage"] in stages_ok]
+        hidden_meta = []
+        if only_meta and meta_ok:
+            hidden_meta = [tk for tk in cand if not mets[tk]["meta"]["in_meta"]]
+            cand = [tk for tk in cand if mets[tk]["meta"]["in_meta"]]
+        cand.sort(key=lambda t: (-(mets[t]["meta"]["meta_pct"] or 0) * 0.5
+                                 - mets[t]["chart_pass"] * 5 - mets[t]["rs"] * 0.5))
+        short = cand[:top_n]
 
-    # Bước 2 — BCTC + tin tức cho ứng viên
-    bar.progress(0.0, text=f"Bước 2/2 · Phân tích sâu {len(short)} mã…")
-    fins = G.parallel_map(_fin, short)
-    bar.progress(0.5, text="Bước 2/2 · Đọc tin tức…")
-    news = G.parallel_map(_news, short)
-    bar.empty()
+        # Bước 2 — BCTC + tin tức cho ứng viên
+        bar.progress(0.0, text=f"Bước 2/2 · Phân tích sâu {len(short)} mã…")
+        fins = G.parallel_map(_fin, short)
+        bar.progress(0.5, text="Bước 2/2 · Đọc tin tức…")
+        news = G.parallel_map(_news, short)
+        bar.empty()
 
-    rows, details = [], {}
-    for tk in short:
-        m = mets[tk]
-        mt = m["meta"]
-        g = G.growth_metrics(fins.get(tk) or {})
-        gc = G.growth_criteria(g, rev_th, np_th)
-        nm = G.news_metrics(news.get(tk) or [])
-        chart_pct = m["chart_pass"] / 8 * 100
-        g_pct, n_pct = G.score_pct(gc), G.score_pct(nm["crit"])
-        meta_pct = mt["meta_pct"] or 0
-        total = 0.35 * chart_pct + 0.35 * (g_pct or 0) + 0.20 * meta_pct + 0.10 * (n_pct or 0)
-        in_meta = mt["in_meta"] if mt["in_meta"] is not None else True
-        rv = G.review(m, g, nm, rev_th, np_th)
-        rows.append({
-            "Mã": tk, "Tên": names.get(tk, tk),
-            "Xếp loại": f"{rv['grade']} · {rv['grade_txt']}",
-            "Điểm rà soát": rv["score"],
-            "Vì sao chọn": "; ".join(rv["pros"][:2]) or "—",
-            "Rủi ro chính": rv["cons"][0] if rv["cons"] else "—",
-            "Nhãn": G.label(m["chart_pass"], g_pct, m.get("rs"), m["stage"], in_meta),
-            "Điểm tiềm năng": round(total),
-            "Giai đoạn": m["stage"],
-            "Meta": ("✓ " if mt["in_meta"] else "") + (mt.get("why") or "—"),
-            "Biểu đồ /8": m["chart_pass"], "RS": m.get("rs"),
-            "Tăng trưởng %": round(g_pct) if g_pct is not None else None,
-            "Tin tức %": round(n_pct) if n_pct is not None else None,
-            "DT quý YoY": _fmt_pct(g.get("rev_yoy")),
-            "LN quý YoY": _fmt_pct(g.get("np_yoy")),
-            "Giá": m["price"],
-            "Cách MA50 %": round(m["ext_ma50"], 1) if m.get("ext_ma50") is not None else None,
-            "Từ đáy 52T %": round(m["pct_from_lo"]) if m.get("pct_from_lo") is not None else None,
-            "Từ đỉnh 52T %": round(m["pct_from_hi"], 1),
-            "RSI": round(m["rsi14"]) if m.get("rsi14") is not None else None,
-            "Nền siết": round(m["tight"], 2) if m.get("tight") is not None else None,
-            "Gần điểm mua": "🎯" if m["near_pivot"] else "",
-            "Ngành": ind_of.get(tk) or "",
-            "Vốn hóa (억)": round(caps[tk]) if caps.get(tk) else None,
-        })
-        details[tk] = {"m": m, "g": g, "gc": gc, "nm": nm, "d": daily.get(tk), "rv": rv}
-    rows.sort(key=lambda r: (-r["Điểm rà soát"], -r["Điểm tiềm năng"]))
+        rows, details = [], {}
+        for tk in short:
+            m = mets[tk]
+            mt = m["meta"]
+            g = G.growth_metrics(fins.get(tk) or {})
+            gc = G.growth_criteria(g, rev_th, np_th)
+            nm = G.news_metrics(news.get(tk) or [])
+            chart_pct = m["chart_pass"] / 8 * 100
+            g_pct, n_pct = G.score_pct(gc), G.score_pct(nm["crit"])
+            meta_pct = mt["meta_pct"] or 0
+            total = 0.35 * chart_pct + 0.35 * (g_pct or 0) + 0.20 * meta_pct + 0.10 * (n_pct or 0)
+            in_meta = mt["in_meta"] if mt["in_meta"] is not None else True
+            rv = G.review(m, g, nm, rev_th, np_th)
+            rows.append({
+                "Mã": tk, "Tên": names.get(tk, tk),
+                "Xếp loại": f"{rv['grade']} · {rv['grade_txt']}",
+                "Điểm rà soát": rv["score"],
+                "Vì sao chọn": "; ".join(rv["pros"][:2]) or "—",
+                "Rủi ro chính": rv["cons"][0] if rv["cons"] else "—",
+                "Nhãn": G.label(m["chart_pass"], g_pct, m.get("rs"), m["stage"], in_meta),
+                "Điểm tiềm năng": round(total),
+                "Giai đoạn": m["stage"],
+                "Meta": ("✓ " if mt["in_meta"] else "") + (mt.get("why") or "—"),
+                "Biểu đồ /8": m["chart_pass"], "RS": m.get("rs"),
+                "Tăng trưởng %": round(g_pct) if g_pct is not None else None,
+                "Tin tức %": round(n_pct) if n_pct is not None else None,
+                "DT quý YoY": _fmt_pct(g.get("rev_yoy")),
+                "LN quý YoY": _fmt_pct(g.get("np_yoy")),
+                "Giá": m["price"],
+                "Cách MA50 %": round(m["ext_ma50"], 1) if m.get("ext_ma50") is not None else None,
+                "Từ đáy 52T %": round(m["pct_from_lo"]) if m.get("pct_from_lo") is not None else None,
+                "Từ đỉnh 52T %": round(m["pct_from_hi"], 1),
+                "RSI": round(m["rsi14"]) if m.get("rsi14") is not None else None,
+                "Nền siết": round(m["tight"], 2) if m.get("tight") is not None else None,
+                "Gần điểm mua": "🎯" if m["near_pivot"] else "",
+                "Ngành": ind_of.get(tk) or "",
+                "Vốn hóa (억)": round(caps[tk]) if caps.get(tk) else None,
+            })
+            details[tk] = {"m": m, "g": g, "gc": gc, "nm": nm, "d": daily.get(tk), "rv": rv}
+        rows.sort(key=lambda r: (-r["Điểm rà soát"], -r["Điểm tiềm năng"]))
 
-    ext_rows = sorted(({"Mã": tk, "Tên": names.get(tk, tk), "RS": mets[tk]["rs"],
-                        "Biểu đồ /8": mets[tk]["chart_pass"],
-                        "Lý do loại": "; ".join(mets[tk]["stage_why"])} for tk in extended),
-                      key=lambda r: -r["RS"])
-    meta_rows = [{"#": v["rank"], "Chủ đề": k, "RS trung vị": v["med_rs"],
-                  "% đạt xu hướng": round(v["breadth"]), "3 tháng %": round(v["ret3m"]),
-                  "Số mã": v["n"]}
-                 for k, v in sorted(theme_rank.items(), key=lambda kv: kv[1]["rank"])[:top_k]]
-    ind_rows = [{"#": v["rank"], "Ngành": k, "RS trung vị": v["med_rs"],
-                 "% đạt xu hướng": round(v["breadth"]), "3 tháng %": round(v["ret3m"]),
-                 "Số mã": v["n"]}
-                for k, v in sorted(ind_rank.items(), key=lambda kv: kv[1]["rank"])[:5]]
+        ext_rows = sorted(({"Mã": tk, "Tên": names.get(tk, tk), "RS": mets[tk]["rs"],
+                            "Biểu đồ /8": mets[tk]["chart_pass"],
+                            "Lý do loại": "; ".join(mets[tk]["stage_why"])} for tk in extended),
+                          key=lambda r: -r["RS"])
+        meta_rows = [{"#": v["rank"], "Chủ đề": k, "RS trung vị": v["med_rs"],
+                      "% đạt xu hướng": round(v["breadth"]), "3 tháng %": round(v["ret3m"]),
+                      "Số mã": v["n"]}
+                     for k, v in sorted(theme_rank.items(), key=lambda kv: kv[1]["rank"])[:top_k]]
+        ind_rows = [{"#": v["rank"], "Ngành": k, "RS trung vị": v["med_rs"],
+                     "% đạt xu hướng": round(v["breadth"]), "3 tháng %": round(v["ret3m"]),
+                     "Số mã": v["n"]}
+                    for k, v in sorted(ind_rank.items(), key=lambda kv: kv[1]["rank"])[:5]]
 
-    st.session_state["growth_scan"] = {
-        "rows": rows, "details": details, "ext_rows": ext_rows, "meta_rows": meta_rows,
-        "ind_rows": ind_rows, "meta_ok": meta_ok,
-        "at": _dt.datetime.now().strftime("%H:%M %d/%m"),
-        "n_uni": len(uni), "n_trend": len(trend), "n_ext": len(extended),
-        "n_cand": len(cand), "n_hidden_meta": len(hidden_meta),
-        "hidden_meta": [f"{names.get(t, t)} ({mets[t]['meta'].get('why')})"
-                        for t in sorted(hidden_meta, key=lambda t: -mets[t]['rs'])[:8]],
-        "rs_basis": "toàn sàn" if (full or ref) else "chỉ danh sách này"}
+        st.session_state["growth_scan"] = {
+            "rows": rows, "details": details, "ext_rows": ext_rows, "meta_rows": meta_rows,
+            "ind_rows": ind_rows, "meta_ok": meta_ok,
+            "at": _dt.datetime.now().strftime("%H:%M %d/%m"),
+            "n_uni": len(uni), "n_trend": len(trend), "n_ext": len(extended),
+            "n_cand": len(cand), "n_hidden_meta": len(hidden_meta),
+            "hidden_meta": [f"{names.get(t, t)} ({mets[t]['meta'].get('why')})"
+                            for t in sorted(hidden_meta, key=lambda t: -mets[t]['rs'])[:8]],
+            "rs_basis": "toàn sàn" if (full or ref) else "chỉ danh sách này"}
 
 # ---------------------------------------------------------------- kết quả
 res = st.session_state.get("growth_scan")

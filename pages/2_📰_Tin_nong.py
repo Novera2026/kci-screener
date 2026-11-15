@@ -26,6 +26,15 @@ st.caption("Cổ phiếu Hàn thường chạy theo **chủ đề + tin nóng**.
 
 
 # ---------------------------------------------------------------- dữ liệu (cache ngắn)
+import guard as GD                                    # noqa: E402
+
+
+def _link(n: dict) -> str:
+    """Tiêu đề tin (nguồn ngoài) thành liên kết markdown an toàn: thoát ký tự định dạng, chỉ nhận URL http(s)."""
+    title, url = GD.md_escape(n.get("title")), GD.safe_url(n.get("url"))
+    return f"[{title}]({url})" if url else title
+
+
 @st.cache_resource
 def _ref():
     reg = TickerRegistry()
@@ -204,8 +213,8 @@ def board():
                     st.markdown("**Tin của chủ đề** (xếp theo giá trị)")
                     for n in tnews:
                         nm = ", ".join(CODE2NAME.get(c, c) for c in n["stocks"])
-                        st.markdown(f"`{n['score']}` {n['kind']} [{n['title']}]({n['url']}) — "
-                                    f"{nm} · {n['office']} · {_ago(n['age_h'])}")
+                        st.markdown(f"`{n['score']}` {n['kind']} {_link(n)} — "
+                                    f"{GD.md_escape(nm)} · {GD.md_escape(n['office'])} · {_ago(n['age_h'])}")
 
     # ================================================= TAB 2 — tin giá trị cao
     with tab2:
@@ -232,7 +241,7 @@ def board():
             st.markdown("**Nổi bật nhất**")
             for n in flt[:5]:
                 with st.container(border=True):
-                    st.markdown(f"**`{n['score']}` {n['kind']} · [{n['title']}]({n['url']})**")
+                    st.markdown(f"**`{n['score']}` {n['kind']} · {_link(n)}**")
                     meta = [x for x in (_stk(n), ", ".join(n["themes"]), n["office"],
                                         _ago(n["age_h"])) if x]
                     st.caption(" · ".join(meta) + (f" — vì: {', '.join(n['why'])}" if n["why"] else ""))

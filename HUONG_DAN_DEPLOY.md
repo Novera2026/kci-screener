@@ -29,13 +29,19 @@ gh repo create kci-screener --private --source=. --push
 2. **New app** → chọn repo `kci-screener`, branch `main`, **Main file path** = `app.py`.
 3. Bấm **Deploy**. Lần đầu cài thư viện ~2–4 phút.
 
-## 3. Nạp Secrets (key Toss/DART)
+## 3. Nạp Secrets (key Toss/DART + mật khẩu chủ app)
 Trong trang app: **Settings (⋮) → Secrets** → dán theo mẫu (điền key thật):
 ```toml
 TOSS_CLIENT_ID = "..."
 TOSS_CLIENT_SECRET = "..."
 DART_API_KEY = "..."
+KCI_OWNER_PASSWORD = "một mật khẩu dài, chỉ anh biết"
 ```
+`KCI_OWNER_PASSWORD` (từ 15/11/2026): trên bản công khai, các tính năng dùng khóa / tài khoản riêng — **backtest**,
+**nguồn giá Toss và pykrx/KRX**, **nhật ký định giá** — chỉ mở sau khi nhập mật khẩu này ở ô **🔒 Chủ app** (thanh bên
+trang Định giá tổng hợp và trang 🧮). Chưa đặt mật khẩu thì các tính năng đó khóa hẳn trên Cloud. Chạy trên máy của anh
+thì không khóa gì. Ngoài ra bản công khai tự giới hạn: tối đa 200 mã mỗi danh sách, 2 tác vụ nặng chạy cùng lúc, và
+10.000 lần gọi DART mỗi ngày (đổi bằng Secret `KCI_DART_DAILY_BUDGET`).
 Streamlit tự biến các dòng này thành biến môi trường → code đọc y hệt lúc chạy local,
 **không cần sửa gì**. (Xem mẫu trong `.streamlit/secrets.toml.example`.)
 
@@ -62,12 +68,16 @@ Streamlit tự biến các dòng này thành biến môi trường → code đ�
 4. **Giới hạn bản free:** ~1GB RAM, app "ngủ" sau thời gian không ai dùng (mở lại tự thức dậy).
    Tránh định giá quá nhiều mã (>60–80) một lần để khỏi quá tải.
 
-5. **Cập nhật về sau:** chỉ cần `git push`, Streamlit Cloud tự deploy lại bản mới.
+5. **Cập nhật về sau — chỉ deploy code đã qua test (từ 15/11/2026):** mỗi lần `git push` lên `main`, GitHub Actions
+   (workflow **Kiểm thử**, `.github/workflows/test.yml`) chạy toàn bộ test; đạt hết thì tự đẩy đúng commit đó sang nhánh
+   **`deploy`**. Làm một lần: trong Streamlit Cloud → app → **Settings → General** (hoặc xóa app rồi tạo lại) đổi
+   **Branch** từ `main` sang **`deploy`**. Sau đó code chưa qua test không bao giờ lên bản công khai. Xem kết quả test ở tab
+   **Actions** của repo.
 
 ---
 
 ## Phương án khác (nâng cao, không bắt buộc)
 - **Hugging Face Spaces** (cũng free, chọn SDK = Streamlit) — tương tự, dùng khi muốn dự phòng.
 - **Render / Railway / Fly.io** — chạy bằng Docker, kiểm soát nhiều hơn nhưng phức tạp hơn, có thể tốn phí.
-- Nếu cần **giới hạn người truy cập**: thêm 1 lớp mật khẩu đơn giản bằng `st.text_input(type="password")`
-  so với 1 secret — mình làm thêm được nếu bạn muốn.
+- Các tính năng dùng khóa riêng đã có lớp mật khẩu chủ app (`guard.py`, Secret `KCI_OWNER_PASSWORD`). Muốn khóa CẢ app
+  (người lạ không xem được gì) thì cần bản trả phí của Streamlit hoặc nền tảng khác.

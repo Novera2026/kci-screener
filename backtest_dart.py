@@ -92,6 +92,8 @@ def _dart_get(path: str, **params) -> dict:
             time.sleep(wait)
         _LAST[0] = time.time()
     for attempt in range(3):
+        if not dart_api.budget_take():             # hạn mức DART trong ngày của App (dart_api)
+            return {"status": "ERR", "message": dart_api.BUDGET_MSG}
         try:
             return requests.get(f"https://opendart.fss.or.kr/api/{path}",
                                 params=dict(crtfc_key=dart_api.api_key(), **params),

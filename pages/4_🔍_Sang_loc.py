@@ -22,6 +22,7 @@ try:
 except Exception:
     pass
 
+import guard as GD                                     # noqa: E402
 import screen as SC                                    # noqa: E402
 import valuation as V                                  # noqa: E402
 from screener import TickerRegistry                    # noqa: E402
@@ -98,7 +99,8 @@ with st.expander("Danh sách gốc (mặc định: top 200 vốn hóa cả hai s
     elif kind == "Chủ đề":
         th = st.selectbox("Chủ đề (Naver 테마)", _themes())
     else:
-        manual = st.text_area("Mã hoặc tên, cách nhau bởi dấu phẩy / xuống dòng", "005930, 000660, 105560")
+        manual = st.text_area("Mã hoặc tên, cách nhau bởi dấu phẩy / xuống dòng (tối đa 400 mã)",
+                              "005930, 000660, 105560", max_chars=GD.MAX_INPUT_CHARS)
 
 _LABELS = {"max_pe": ("P/E tối đa", 1.0), "max_pb": ("P/B tối đa", 0.1), "max_pe_pb": ("P/E × P/B tối đa", 0.5),
            "min_roe": ("ROE tối thiểu (%)", 1.0), "min_div": ("Cổ tức tối thiểu (%)", 0.5),
@@ -126,33 +128,37 @@ with st.expander("⚙️ Chỉnh ngưỡng (không bắt buộc — mặc địn
     n_deep = st.slider("Tối đa số mã định giá sâu", 5, MAX_DEEP, 20)
 
 if st.button("▶️ Chạy sàng lọc", type="primary"):
-    with st.spinner("① Lấy danh sách gốc và chỉ số thị trường…"):
-        if kind == "Top vốn hóa":
-            tks = SC.top_by_cap(mk, n_top, reg)
-        elif kind == "Ngành KRX":
-            tks = SC.by_industry(ind, reg)
-        elif kind == "Chủ đề":
-            tks = SC.by_theme(th)
-        else:
-            tks = [t for t in (reg.resolve(x.strip()) for x in manual.replace("\n", ",").split(",") if x.strip()) if t]
-        tks = list(dict.fromkeys(tks))[:400]
-        rows = _rows(tuple(tks)) if tks else []
-    st1 = SC.apply_preset(rows, key, ov1)
-    passed = [r for r in st1 if r["Qua lọc"]][:n_deep]
-    deep = []
-    if passed:
-        bar = st.progress(0.0, text="② Định giá sâu…")
-        _rfd = _rf()
-        a = V.Assumptions(rf=_rfd["value"])
-        deep = SC.deep_stage([r["Mã"] for r in passed], {r["ticker"]: r for r in rows}, rows, a, reg,
-                             progress=lambda d, n: bar.progress(d / n, text=f"② Định giá sâu {d}/{n} mã"),
-                             preset=key, overrides2=ov2,
-                             feeds={} if _rfd["live"] else {"rf": {"ok": False, "note": _rfd["note"]}})
-        bar.empty()
-    import datetime as _dt
-    st.session_state["sc"] = {"key": key, "st1": st1, "deep": deep, "n_univ": len(rows),
-                              "n_pass": sum(1 for r in st1 if r["Qua lọc"]), "at": _dt.datetime.now(),
-                              "rf_note": "" if (not passed or _rfd["live"]) else _rfd["note"]}
+    with GD.heavy_slot() as _ok:      # giới hạn tác vụ nặng cùng lúc trên máy chủ; luôn nhả khi xong/lỗi
+        if not _ok:
+            st.warning(GD.BUSY_MSG)
+            st.stop()
+        with st.spinner("① Lấy danh sách gốc và chỉ số thị trường…"):
+            if kind == "Top vốn hóa":
+                tks = SC.top_by_cap(mk, n_top, reg)
+            elif kind == "Ngành KRX":
+                tks = SC.by_industry(ind, reg)
+            elif kind == "Chủ đề":
+                tks = SC.by_theme(th)
+            else:
+                tks = [t for t in (reg.resolve(x) for x in GD.clip_queries(manual, 400)[0]) if t]
+            tks = list(dict.fromkeys(tks))[:400]
+            rows = _rows(tuple(tks)) if tks else []
+        st1 = SC.apply_preset(rows, key, ov1)
+        passed = [r for r in st1 if r["Qua lọc"]][:n_deep]
+        deep = []
+        if passed:
+            bar = st.progress(0.0, text="② Định giá sâu…")
+            _rfd = _rf()
+            a = V.Assumptions(rf=_rfd["value"])
+            deep = SC.deep_stage([r["Mã"] for r in passed], {r["ticker"]: r for r in rows}, rows, a, reg,
+                                 progress=lambda d, n: bar.progress(d / n, text=f"② Định giá sâu {d}/{n} mã"),
+                                 preset=key, overrides2=ov2,
+                                 feeds={} if _rfd["live"] else {"rf": {"ok": False, "note": _rfd["note"]}})
+            bar.empty()
+        import datetime as _dt
+        st.session_state["sc"] = {"key": key, "st1": st1, "deep": deep, "n_univ": len(rows),
+                                  "n_pass": sum(1 for r in st1 if r["Qua lọc"]), "at": _dt.datetime.now(),
+                                  "rf_note": "" if (not passed or _rfd["live"]) else _rfd["note"]}
 
 res = st.session_state.get("sc")
 if not res:

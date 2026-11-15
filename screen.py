@@ -196,7 +196,9 @@ def deep_stage(tickers: list[str], rows_by_tk: dict, universe_rows: list[dict], 
             return analyze_one(tk, rows_by_tk[tk], universe_rows, a, registry, kospi, peers=peer_map.get(tk),
                                feeds=feeds)
         except Exception as e:                       # một mã lỗi không làm hỏng cả danh sách
-            return {"Mã": tk, "Tên": rows_by_tk[tk].get("name"), "Kết luận": f"⚪ Chưa định giá được ({str(e)[:60]})"}
+            import guard as _G                    # URL lỗi của requests có thể chứa khóa DART → che trước khi hiện
+            return {"Mã": tk, "Tên": rows_by_tk[tk].get("name"),
+                    "Kết luận": f"⚪ Chưa định giá được ({_G.redact(e)[:80]})"}
     with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
         for r in ex.map(_one, tickers):
             out.append(r)

@@ -48,10 +48,49 @@ def load(ticker: str, day: Optional[_dt.date] = None, base: str = DIR) -> dict:
         return {}
 
 
+KEEP_DAYS = 30            # hồ sơ cũ hơn chừng này ngày bị xóa
+MAX_FILES = 3000          # và không giữ quá chừng này file (xóa file cũ nhất)
+_last_prune: dict = {}
+
+
+def prune(base: str = DIR, keep_days: int = KEEP_DAYS, max_files: int = MAX_FILES,
+          today: Optional[_dt.date] = None) -> int:
+    """Dọn thư mục hồ sơ: mọi lượt định giá (kể cả người lạ trên app công khai) đều ghi một file — trước 15/11/2026
+    thư mục chỉ lớn lên. Trả số file đã xóa."""
+    if not os.path.isdir(base):
+        return 0
+    today = today or _dt.date.today()
+    files = []
+    for fn in os.listdir(base):
+        if not fn.endswith(".json") or "_" not in fn:
+            continue
+        try:
+            day = _dt.datetime.strptime(fn[:-5].rsplit("_", 1)[1], "%Y%m%d").date()
+        except ValueError:
+            continue
+        files.append((day, fn))
+    files.sort()
+    old = [fn for d, fn in files if (today - d).days > keep_days]
+    rest = [fn for d, fn in files if (today - d).days <= keep_days]
+    extra = rest[:max(len(rest) - max_files, 0)]
+    n = 0
+    for fn in old + extra:
+        try:
+            os.remove(os.path.join(base, fn))
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
 def save_section(ticker: str, section: str, data, day: Optional[_dt.date] = None, base: str = DIR,
                  meta: Optional[dict] = None) -> str:
     """Ghi/ghi đè 1 mục (vd 'peers', 'financials', 'quality', 'valuation', 'overall') của hồ sơ hôm nay."""
     os.makedirs(base, exist_ok=True)
+    import time as _time
+    if _time.time() - _last_prune.get(base, 0) > 3600:      # dọn tối đa mỗi giờ một lần
+        _last_prune[base] = _time.time()
+        prune(base)
     d = load(ticker, day, base)
     d.setdefault("ticker", ticker)
     d.setdefault("sections", {})[section] = {"saved_at": _dt.datetime.now().isoformat(timespec="seconds"),
@@ -59,7 +98,8 @@ def save_section(ticker: str, section: str, data, day: Optional[_dt.date] = None
     if meta:
         d.setdefault("meta", {}).update(_clean(meta))
     p = path_for(ticker, day, base)
-    tmp = p + ".tmp"
+    import threading as _th
+    tmp = f"{p}.{os.getpid()}.{_th.get_ident()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=1)
     os.replace(tmp, p)

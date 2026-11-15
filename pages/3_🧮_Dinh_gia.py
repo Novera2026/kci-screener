@@ -29,10 +29,12 @@ import peers as PR                                     # noqa: E402
 import pipeline as P                                   # noqa: E402
 import sector_models as P_S                            # noqa: E402
 import valuation as V                                  # noqa: E402
+import guard as GD                                     # noqa: E402
 from screener import TickerRegistry                    # noqa: E402
 
 st.set_page_config(page_title="Quy trình định giá — KCI", page_icon="🧮", layout="wide")
 st.title("🧮 Quy trình định giá")
+GD.owner_panel()
 st.caption("Năm bước cho **một mã**: ① so sánh đối thủ **trong & ngoài nước** → ② phân tích & bóc tách tài chính → "
            "③ chất lượng tài sản → ④ định giá theo mô hình hợp ngành → ⑤ kết luận & đánh giá tổng quan. Kết quả mỗi "
            "bước được **lưu vào hồ sơ** cho bước sau. Mọi mô hình định giá phải qua **cổng số** "
@@ -231,7 +233,8 @@ def _refresh_market():
 
 st.session_state.setdefault("vp_query_box", st.session_state.get("vp_query", ""))
 c_in, c_btn = st.columns([4, 1])
-c_in.text_input("Mã hoặc tên cổ phiếu", key="vp_query_box", placeholder="vd 005930, Samsung, 삼성전자, KB금융")
+c_in.text_input("Mã hoặc tên cổ phiếu", key="vp_query_box", placeholder="vd 005930, Samsung, 삼성전자, KB금융",
+                max_chars=GD.MAX_QUERY_CHARS)
 c_btn.button("▶️ Bắt đầu", type="primary", width="stretch", on_click=_start)
 if st.session_state.get("vp_err"):
     st.error(f"Không nhận diện được “{st.session_state['vp_err']}”.")
@@ -289,7 +292,8 @@ with PEER_CFG:
     _fdef = ", ".join(PR.FOREIGN_PEERS.get(_bucket0, []))
     _fcodes = st.text_input("Đối thủ nước ngoài (mã Reuters của Naver)", _fdef, key=f"fx_{tk}",
                             help="vd TSM, MU.O, 7203.T, 0700.HK — để trống = không so nước ngoài")
-foreign_codes = tuple(c.strip() for c in _fcodes.split(",") if c.strip())
+# chỉ chữ, số, '.', '-' (mã đi thẳng vào đường dẫn API của Naver), tối đa 10 mã
+foreign_codes = tuple(GD.clean_codes(c for c in _fcodes.split(",") if c.strip()))
 with st.spinner(f"Đang lấy BCTC {tk} và đối thủ cùng ngành…"):
     S0 = _load_static(tk, _ik0 or "", n_peers)
 _snap_key = (tk, tuple(S0["ptk"]), foreign_codes)
@@ -981,7 +985,10 @@ with T["8"]:
     st.markdown("#### 📓 Nhật ký định giá")
     st.caption("Lưu mỗi lần định giá (giá, giá trị hợp lý, giả định) để sau này so với giá thật. File "
                "`valuation_log.csv` trong thư mục App — trên Streamlit Cloud file sẽ mất khi App khởi động lại.")
-    hist = P.log_read(LOG_PATH, tk)
+    # một file chung cho mọi người dùng → trên Cloud chỉ chủ app xem / ghi
+    hist = P.log_read(LOG_PATH, tk) if GD.owner_ok() else []
+    if not GD.owner_ok():
+        GD.owner_gate("Nhật ký định giá (một file chung trên máy chủ)")
     if hist:
         tdf = pd.DataFrame(P.log_track(hist, price))
         st.dataframe(tdf.style.format({"Giá lúc định giá": "{:,.0f}", "Giá trị hợp lý": "{:,.0f}",
@@ -990,7 +997,8 @@ with T["8"]:
                      hide_index=True, width="stretch")
         st.caption("**Đi được về giá trị %**: 100% = giá đã chạm giá trị hợp lý ước tính lúc đó; âm = giá đi ngược.")
     else:
-        st.caption("Chưa có lần định giá nào được lưu cho mã này.")
+        if GD.owner_ok():
+            st.caption("Chưa có lần định giá nào được lưu cho mã này.")
 
 # ---------------------------------------------------------------------------- kết luận
 ctx = {"ticker": tk, "name": name, "date": _dt.date.today().isoformat(), "price": price, "identify": idn,
@@ -1088,8 +1096,9 @@ with T["end"]:
         d3.download_button("⬇️ Báo cáo in PDF (.html)", P.report_html(md, f"Định giá {name} {tk}").encode("utf-8"),
                            f"dinh_gia_{tk}_{ctx['date']}.html", "text/html", width="stretch",
                            help=f"Không dựng được PDF ({str(_e)[:80]}). Mở file trong trình duyệt → In (⌘P) → Lưu PDF")
-    if d4.button("📓 Lưu vào nhật ký", width="stretch", disabled=not rec["fair"],
-                 help="Chỉ lưu được khi có giá trị hợp lý công bố"):
+    if d4.button("📓 Lưu vào nhật ký", width="stretch", disabled=not (rec["fair"] and GD.owner_ok()),
+                 help="Chỉ lưu được khi có giá trị hợp lý công bố"
+                      + ("" if GD.owner_ok() else " · trên bản công khai chỉ chủ app ghi được (ô 🔒 Chủ app)")):
         P.log_append(LOG_PATH, P.log_entry(ctx, drivers, A, scen))
         st.toast("Đã lưu vào nhật ký định giá")
         st.rerun()

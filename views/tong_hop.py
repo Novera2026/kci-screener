@@ -28,6 +28,7 @@ try:
 except Exception:
     pass
 
+import guard as G                                     # noqa: E402
 from screener import (TickerRegistry, sector_aggregates, export_excel, COLUMN_KR)
 from valuation import (Assumptions, value_batch, recommend_method,
                        _cap_conf, ev_ebit_value, fcff_value,
@@ -100,15 +101,17 @@ def _beta(ticker: str):
 
 
 # ---- Sidebar: cấu hình ----
+G.owner_panel()
 with st.sidebar:
     st.header("⚙️ Cấu hình")
+    # toss / pykrx dùng khóa Toss và tài khoản KRX của chủ app → trên Cloud chỉ hiện sau khi mở khóa chủ app
     prefer = st.selectbox(
         "Nguồn giá ưu tiên",
-        ["naver", "toss", "pykrx"],
+        ["naver", "toss", "pykrx"] if G.owner_ok() else ["naver"],
         help="naver (mặc định) = nhanh nhất ~0.1s/mã, giá REALTIME trong phiên + 52T + P/E + "
              "P/B + EPS + BPS + cổ tức, chạy được cả trên cloud. toss = giá realtime chính "
              "thức của sàn (cần .env). pykrx = KRX chính thức nhưng chậm (~13s/mã) & bị chặn "
-             "trên server/cloud.",
+             "trên server/cloud. Toss và pykrx dùng khóa riêng của chủ app.",
     )
     if prefer == "toss":
         ok = bool(os.environ.get("TOSS_CLIENT_ID")) or os.path.exists(".env")
@@ -323,8 +326,8 @@ with tab_top:
 col1, col2 = st.columns([3, 1])
 with col1:
     raw = st.text_area(
-        "Danh sách mã (mỗi dòng 1 mã — tên Hàn/Anh hoặc ticker đều được)",
-        height=160, key="raw_input",
+        f"Danh sách mã (mỗi dòng 1 mã — tên Hàn/Anh hoặc ticker đều được; tối đa {G.MAX_LIST} mã)",
+        height=160, key="raw_input", max_chars=G.MAX_INPUT_CHARS,
     )
     # Bản sao KHÔNG gắn widget: Streamlit xóa state của ô nhập khi chuyển trang,
     # các trang khác (🚀 Siêu cổ phiếu) đọc danh sách qua khóa này.
@@ -640,38 +643,44 @@ def _style_table(d):
 
 # ---- Run: chỉ cào dữ liệu (network) rồi lưu vào session_state ----
 if run_btn:
-    queries = [x.strip() for x in raw.replace(",", "\n").splitlines() if x.strip()]
+    queries, _cut = G.clip_queries(raw)
     if not queries:
         st.error("Chưa nhập mã nào.")
         st.stop()
-    prog = st.progress(0.0, text="Đang resolve & cào dữ liệu (5 luồng song song)...")
-    from screener import fetch_many
-    n_q = len(queries)
+    if _cut:
+        st.warning(f"Danh sách dài quá {G.MAX_LIST} mã — chỉ lấy {G.MAX_LIST} mã đầu (bỏ {_cut} mã).")
+    with G.heavy_slot() as _ok:          # giới hạn số tác vụ nặng cùng lúc trên máy chủ; luôn nhả khi xong/lỗi
+        if not _ok:
+            st.warning(G.BUSY_MSG)
+            st.stop()
+        prog = st.progress(0.0, text="Đang resolve & cào dữ liệu (5 luồng song song)...")
+        from screener import fetch_many
+        n_q = len(queries)
 
-    def _on_prog(done, total):
-        prog.progress(done / total if total else 1.0,
-                      text=f"Đang cào song song: {done}/{total} mã")
+        def _on_prog(done, total):
+            prog.progress(done / total if total else 1.0,
+                          text=f"Đang cào song song: {done}/{total} mã")
 
-    resolutions: list = []
-    rows, unresolved = fetch_many(queries, registry=reg, prefer=prefer,
-                                  max_workers=5, retries=1, progress=_on_prog,
-                                  resolutions=resolutions)
-    if not rows:
+        resolutions: list = []
+        rows, unresolved = fetch_many(queries, registry=reg, prefer=prefer,
+                                      max_workers=5, retries=1, progress=_on_prog,
+                                      resolutions=resolutions)
+        if not rows:
+            prog.empty()
+            st.error("Không cào được mã nào. Kiểm tra tên/ticker hoặc kết nối mạng.")
+            st.stop()
+        fins, betas = {}, {}
+        if len(rows) <= PREFETCH_MAX:
+            def _on_fin(done, total):
+                prog.progress(done / total, text=f"Đang nạp BCTC + beta song song: {done}/{total} mã")
+            fins, betas = _prefetch([r["ticker"] for r in rows], _on_fin)
+        pipe_series, peer_map = {}, {}
+        if len(rows) <= PREFETCH_MAX:
+            def _on_pipe(done, total):
+                prog.progress(done / total, text=f"Đang chuẩn bị quy trình định giá (BCTC nhiều năm + đối thủ "
+                                                 f"cùng ngành): {done}/{total} mã")
+            pipe_series, peer_map = _prefetch_pipeline(rows, fins, _on_pipe)
         prog.empty()
-        st.error("Không cào được mã nào. Kiểm tra tên/ticker hoặc kết nối mạng.")
-        st.stop()
-    fins, betas = {}, {}
-    if len(rows) <= PREFETCH_MAX:
-        def _on_fin(done, total):
-            prog.progress(done / total, text=f"Đang nạp BCTC + beta song song: {done}/{total} mã")
-        fins, betas = _prefetch([r["ticker"] for r in rows], _on_fin)
-    pipe_series, peer_map = {}, {}
-    if len(rows) <= PREFETCH_MAX:
-        def _on_pipe(done, total):
-            prog.progress(done / total, text=f"Đang chuẩn bị quy trình định giá (BCTC nhiều năm + đối thủ "
-                                             f"cùng ngành): {done}/{total} mã")
-        pipe_series, peer_map = _prefetch_pipeline(rows, fins, _on_pipe)
-    prog.empty()
     st.session_state["screen"] = {
         "records": rows, "unresolved": unresolved, "resolutions": resolutions,
         "fin": fins, "beta": betas, "pipe_series": pipe_series, "peer_map": peer_map,
@@ -1528,6 +1537,8 @@ with st.expander("🔬 Backtest — kiểm chứng định giá trên dữ liệ
                "trước, giá, beta 78 tuần, Rf tháng trước) rồi so với lợi suất vượt KOSPI sau N "
                "tháng. Đo: IC (upside có dự báo được lợi suất không) · ngũ phân vị · tỷ lệ mất "
                ">30% · độ chính xác dự phóng so với naive. Đây là bằng chứng độ tin cậy.")
+    if not G.owner_gate("Backtest (hàng nghìn lượt gọi DART bằng khóa của chủ app, KRX bằng tài khoản của chủ app)"):
+        st.stop()                                     # mục cuối của trang
     bt_src = st.radio("Nguồn dữ liệu", ["DART — số gốc point-in-time (khuyến nghị)",
                                         "KRX qua pykrx (cần tài khoản KRX)"],
                       horizontal=True, key="bt_src")
@@ -1559,7 +1570,7 @@ with st.expander("🔬 Backtest — kiểm chứng định giá trên dữ liệ
                     [t for t in bt_tks if t], years=bt_years, horizon_months=bt_hd, a=assume,
                     registry=reg, progress=lambda s, x: _bp.progress(min(max(x, 0.0), 1.0), text=s))
             except Exception as e:
-                st.error(f"Lỗi backtest: {e}")
+                st.error(f"Lỗi backtest: {G.redact(e)}")
             _bp.empty()
         if st.session_state.get("bt_dart"):
             _render_bt_dart(*st.session_state["bt_dart"])
@@ -1598,7 +1609,7 @@ with st.expander("🔬 Backtest — kiểm chứng định giá trên dữ liệ
                             bdf, bm = _bt.run_backtest(tickers, asofs, horizon_months=bt_h,
                                                        a=assume, verbose=False)
                         except Exception as e:
-                            st.error(f"Lỗi backtest: {e}")
+                            st.error(f"Lỗi backtest: {G.redact(e)}")
                 if bm and bm.get("n"):
                     k1, k2, k3, k4 = st.columns(4)
                     k1.metric("Số điểm", bm["n"])

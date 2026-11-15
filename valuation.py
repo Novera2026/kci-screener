@@ -5,7 +5,7 @@ Bám theo "KCI Valuation Master Spec":
   - §2/§8: chọn phương pháp theo entity type (recommend_method).
   - §3   : intrinsic — S-RIM (RIM Hàn), P/B–ROE justified, DDM, DCF-earnings (FCFE proxy).
   - §4   : relative — P/E, P/B so với median ngành.
-  - §5   : house assumptions Hàn (Rf=KGB10Y, ERP 6.5%, beta clamp 0.5–1.8, g cap 2.5%).
+  - §5   : house assumptions Hàn (Rf=KGB10Y, ERP 4,87% Damodaran 01/2026, beta riêng mã kẹp 0.5–1.8 + Blume, g cap 2.5%).
 
 Nguyên tắc (đồng bộ spec):
   - Intrinsic làm base, multiples chỉ cross-check.

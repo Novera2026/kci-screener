@@ -1,13 +1,18 @@
-# 🤖 KCI bot săn cổ phiếu — chạy bot_hunt.py mỗi ngày làm việc lúc 16:30 giờ Hàn (sau giờ đóng cửa 15:30)
-# và gửi báo cáo Telegram. Ngày sàn nghỉ: bot tự nhận biết (KOSPI không có phiên) và không gửi.
-# Cần 3 GitHub Secrets (Settings → Secrets and variables → Actions):
+# 🤖 KCI bot săn cổ phiếu — CHỈ CHẠY TAY (rà soát 15/11/2026, đợt 2).
+#
+# Lịch tự động hằng ngày đã TẮT: GitHub kích hoạt lịch trễ ~8 giờ (rơi sau nửa đêm giờ Hàn) và repo chưa có secret
+# nên 4/4 lần chạy gần nhất báo "thành công" mà không quét gì. Bot săn hiện chạy bằng tác vụ Claude 2 tuần/lần, ghi
+# Google Sheet (HUONG_DAN_BOT.md). Muốn dùng lại kênh Telegram: thêm 3 secret dưới đây rồi bấm Run workflow (tab
+# Actions → Bot săn cổ phiếu); muốn chạy lịch lại thì thêm khối `schedule` (bot đã hiểu lần chạy trễ qua nửa đêm).
 #   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DART_API_KEY
+# Repo công khai → log ai cũng đọc được: bot che khóa / token trong mọi thông báo lỗi (guard.redact).
 name: Bot săn cổ phiếu
 
 on:
-  schedule:
-    - cron: "30 7 * * 1-5"        # 07:30 UTC = 16:30 KST, thứ 2–6
-  workflow_dispatch: {}           # chạy tay: tab Actions → Bot săn cổ phiếu → Run workflow
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 concurrency:
   group: bot-hunt
@@ -18,9 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262      # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -29,7 +36,7 @@ jobs:
 
       # trạng thái lần trước (để báo mã mới/rớt) + BCTC DART đã nộp (không đổi) — giữ giữa các lần chạy
       - name: Khôi phục trạng thái
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830   # v4.3.0
         with:
           path: |
             bot_state.json
@@ -46,7 +53,7 @@ jobs:
 
       - name: Lưu trạng thái
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830      # v4.3.0
         with:
           path: |
             bot_state.json

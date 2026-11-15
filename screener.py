@@ -214,7 +214,7 @@ class TickerRegistry:
         `contains`/`fuzzy` = đoán; `alts` = các mã khác cũng khớp (tên mơ hồ)."""
         q = str(query).strip()
         out = {"query": q, "ticker": None, "how": None, "alts": []}
-        if not q:
+        if not q or len(q) > 60:          # tên/mã thật không dài thế; chuỗi rất dài làm tra mờ toàn sàn rất chậm
             return out
         code = normalize_code(q)            # A005950 · 005950.KS · KRX:005950 → 005950
         if code:
@@ -233,7 +233,8 @@ class TickerRegistry:
         # 3) cổ phiếu ưu đãi (삼성전자우, 현대차2우B…): registry chỉ có cổ phiếu thường →
         #    KHÔNG được đoán sang mã thường (dữ liệu khác hẳn). Thử mã ưu đãi chuẩn KRX.
         pm = _PREF_RE.match(q)
-        base = self.resolve_info(pm.group(1)) if pm else None
+        # chỉ một cấp: "삼성전자우우우…" trước đây gọi đệ quy theo số chữ "우" (chuỗi dài → RecursionError)
+        base = self.resolve_info(pm.group(1)) if (pm and not _PREF_RE.match(pm.group(1))) else None
         if base and base["how"] == "exact" and base["ticker"].isdigit():
             for d in "5789":
                 code = base["ticker"][:5] + d

@@ -91,6 +91,73 @@ _gate = threading.Lock()
 _last_call = [0.0]
 
 
+# ---------------------------------------------------------------------------
+# Hạn mức gọi DART THEO NGÀY của tiến trình này (rà soát 15/11/2026, đợt 2). OpenDART cho mỗi khóa khoảng 20.000 lần
+# gọi/ngày; app công khai trên Cloud dùng chung khóa với bot và máy của anh. Hết hạn mức → DartError, KHÔNG gọi tiếp
+# (dữ liệu đã lưu vẫn dùng được). Đếm lưu ở .cache/dart_budget.json để khởi động lại App không xóa số đếm.
+# Mặc định 10.000/ngày trên Cloud, không giới hạn trên máy của anh; đổi bằng KCI_DART_DAILY_BUDGET (0 = không giới hạn).
+# ---------------------------------------------------------------------------
+BUDGET_PATH = os.path.join(_HERE, ".cache", "dart_budget.json")
+_BUDGET = {"day": None, "used": 0}
+
+
+def daily_budget() -> int:
+    """Hạn mức/ngày: KCI_DART_DAILY_BUDGET nếu đặt; không thì 10.000 trên bản công khai (Cloud) — chừa nửa hạn mức
+    của khóa cho bot và máy của anh — và không giới hạn khi chạy trên máy của anh."""
+    v = os.environ.get("KCI_DART_DAILY_BUDGET")
+    if v is not None:
+        try:
+            return max(int(v), 0)
+        except ValueError:
+            pass
+    try:
+        import guard
+        return 10000 if guard.is_cloud() else 0
+    except Exception:
+        return 10000
+
+
+def _budget_save() -> None:
+    try:
+        os.makedirs(os.path.dirname(BUDGET_PATH), exist_ok=True)
+        tmp = f"{BUDGET_PATH}.{os.getpid()}.{threading.get_ident()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_BUDGET, f)
+        os.replace(tmp, BUDGET_PATH)
+    except Exception:
+        pass
+
+
+def budget_take(n: int = 1) -> bool:
+    """Trừ n lần gọi vào hạn mức hôm nay. False = đã hết (đừng gọi DART)."""
+    cap = daily_budget()
+    today = time.strftime("%Y%m%d")
+    with _gate:
+        if _BUDGET["day"] != today:
+            used = 0
+            try:
+                with open(BUDGET_PATH, encoding="utf-8") as f:
+                    saved = json.load(f)
+                if saved.get("day") == today:
+                    used = int(saved.get("used") or 0)
+            except Exception:
+                pass
+            _BUDGET.update(day=today, used=used)
+        if cap and _BUDGET["used"] + n > cap:
+            return False
+        _BUDGET["used"] += n
+        if _BUDGET["used"] % 20 == 0 or (cap and _BUDGET["used"] >= cap):
+            _budget_save()
+        return True
+
+
+def budget_used() -> int:
+    return int(_BUDGET["used"] or 0) if _BUDGET["day"] == time.strftime("%Y%m%d") else 0
+
+
+BUDGET_MSG = "đã dùng hết hạn mức gọi DART trong ngày của App — dùng số liệu đã lưu, thử lại ngày mai"
+
+
 def _throttle() -> None:
     with _gate:                                  # giữ khóa khi chờ → các luồng xếp hàng, mỗi lần gọi cách nhau MIN_GAP
         wait = _last_call[0] + MIN_GAP - time.time()
@@ -117,6 +184,10 @@ def fetch_statements(corp_code: str, year: int, reprt_code: str = "11011", fs_di
         raise DartError("DART đang từ chối kết nối — tạm ngừng gọi, thử lại sau khoảng 1–2 phút")
     last = "lỗi không rõ"
     for i in range(len(RETRY_WAITS) + 1):
+        if not budget_take():
+            with _gate:
+                STATS["errors"] += 1
+            raise DartError(BUDGET_MSG)
         _throttle()
         try:
             j = requests.get(f"{_BASE}/fnlttSinglAcntAll.json",
@@ -183,7 +254,7 @@ def _cache_fresh() -> bool:
 def _download_corp_map() -> dict:
     """Tải corpCode.xml (ZIP) từ DART, lọc DN có stock_code, lưu cache csv."""
     key = api_key()
-    if not key:
+    if not key or not budget_take():
         return {}
     r = requests.get(f"{_BASE}/corpCode.xml", params={"crtfc_key": key},
                      timeout=_TIMEOUT * 3)

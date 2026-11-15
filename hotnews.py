@@ -335,14 +335,19 @@ def dart_disclosures(days: int = 1, max_pages: int = 15) -> tuple[list[dict], Op
     end = _dt.date.today()
     bgn = end - _dt.timedelta(days=max(days - 1, 0))
     out, err = [], None
+    import dart_api as _D
     for page in range(1, max_pages + 1):
+        if not _D.budget_take():                    # hạn mức DART trong ngày của App
+            err = _D.BUDGET_MSG
+            break
         try:
             j = requests.get("https://opendart.fss.or.kr/api/list.json",
                              params={"crtfc_key": key, "bgn_de": f"{bgn:%Y%m%d}",
                                      "end_de": f"{end:%Y%m%d}", "page_count": 100,
                                      "page_no": page}, timeout=15).json()
         except Exception as ex:
-            err = str(ex)[:80]
+            import guard as _G
+            err = _G.redact(ex)[:80]              # URL lỗi của requests chứa nguyên khóa DART
             break
         if j.get("status") not in ("000",):
             if j.get("status") != "013":                  # 013 = không có dữ liệu

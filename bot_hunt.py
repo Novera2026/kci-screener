@@ -151,14 +151,25 @@ def state_of(picks: list[dict], at: _dt.datetime) -> dict:
 
 
 # ============================================================================ mạng
+def session_is_fresh(last_trade: str, now: _dt.datetime) -> bool:
+    """Phiên gần nhất có phải 'phiên của lần chạy này' không: là hôm nay, hoặc là hôm qua khi lần chạy rơi vào trước
+    09:00 giờ Hàn (lịch chạy bị GitHub kích hoạt trễ qua nửa đêm — rà soát 15/11: 4/4 lần chạy rơi sau 0 giờ nên bot
+    tưởng sàn nghỉ và thoát)."""
+    today = now.date()
+    if last_trade == today.isoformat():
+        return True
+    return now.hour < 9 and last_trade == (today - _dt.timedelta(days=1)).isoformat()
+
+
 def market_open_today(now: Optional[_dt.datetime] = None) -> Optional[bool]:
-    """KOSPI có phiên HÔM NAY (giờ Hàn) không — theo ngày giao dịch gần nhất của Naver. None nếu không kiểm được."""
+    """KOSPI có phiên mới để quét không (session_is_fresh) — theo ngày giao dịch gần nhất của Naver. None nếu không
+    kiểm được."""
     import requests
     now = now or _dt.datetime.now(KST)
     try:
         j = requests.get("https://m.stock.naver.com/api/index/KOSPI/price?pageSize=1&page=1",
                          headers={"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}, timeout=10).json()
-        return str(j[0]["localTradedAt"])[:10] == now.strftime("%Y-%m-%d")
+        return session_is_fresh(str(j[0]["localTradedAt"])[:10], now)
     except Exception:
         return None
 
@@ -312,5 +323,17 @@ def main(argv=None) -> int:
     return 0
 
 
+def _main_safe(argv=None) -> int:
+    """Chạy main(); lỗi không mong đợi được in ra SAU KHI che khóa / token (log GitHub Actions của repo công khai ai
+    cũng đọc được; URL lỗi của requests chứa khóa DART, đường dẫn Telegram chứa token)."""
+    try:
+        return main(argv)
+    except Exception as e:
+        import guard
+        import traceback
+        print(guard.redact("".join(traceback.format_exception(type(e), e, e.__traceback__))), file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main_safe())
