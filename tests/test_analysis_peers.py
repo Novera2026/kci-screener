@@ -190,3 +190,156 @@ def test_stage2_graham_and_valueup():
     assert SC.stage2_check({"Thanh toán hiện hành": None, "Có năm lỗ": False, "Ngành": "은행"}, "graham")[0]
     assert not SC.stage2_check({"Chất lượng TS": "B", "Nợ/VCSH": 3.0, "Ngành": "식품"}, "valueup")[0]
     assert SC.stage2_check({"Chất lượng TS": "B", "Nợ/VCSH": 3.0, "Ngành": "은행"}, "valueup")[0]
+
+
+# ================================================================ rà soát 15/11/2026 — đợt 1
+def _bs(nm, cur, prev=0.0, aid="-표준계정코드 미사용-"):
+    return {"sj_div": "BS", "account_id": aid, "account_nm": nm, "thstrm_amount": str(int(cur * 1e8)),
+            "frmtrm_amount": str(int(prev * 1e8))}
+
+
+def test_borrowings_read_by_line_name_when_ids_are_non_standard():
+    # KT&G: mọi dòng nợ vay ghi "-표준계정코드 미사용-" hoặc mã dart_ khác → đọc theo mã ra 0 dù trả lãi 732억
+    items = _items() + [_bs("단기차입금", 3330, 3000), _bs("유동성 사채", 3297), _bs("유동성장기차입금", 689),
+                        _bs("유동성전환사채", 237, aid="dart_CurrentPortionOfConvertibleBonds"), _bs("장기사채", 9074),
+                        _bs("장기차입금", 1064), _bs("장기전환사채", 169, aid="dart_ConvertibleBondsNet"),
+                        # không phải nợ vay: cho vay, phái sinh, thuê tài chính, nợ tài chính khác
+                        _bs("단기대여금", 500), _bs("유동파생상품금융부채", 40), _bs("리스부채", 300),
+                        _bs("기타유동금융부채", 900, aid="ifrs-full_OtherCurrentFinancialLiabilities")]
+    cur, prev = AN.parse_statements(items)
+    assert cur["borrowings"] == pytest.approx(3330 + 3297 + 689 + 237 + 9074 + 1064 + 169)
+    assert prev["borrowings"] == pytest.approx(3000)
+    assert "borrowings_alt" not in cur
+    # không dòng nào mang tên nợ vay → cách cũ: 금융부채 (HD한국조선해양)
+    cur2, _ = AN.parse_statements(_items() + [_bs("단기금융부채", 700, aid="ifrs-full_OtherCurrentFinancialLiabilities")])
+    assert cur2["borrowings"] == pytest.approx(700)
+
+
+def test_equity_method_income_from_split_or_named_lines():
+    def _is(nm, v, aid="-표준계정코드 미사용-"):
+        return {"sj_div": "IS", "account_id": aid, "account_nm": nm, "thstrm_amount": str(int(v * 1e8)), "frmtrm_amount": "0"}
+    split = _items() + [_is("지분법이익", 904, "dart_ProfitsOfAssociatesAndJointVenturesAccountedForUsingEquityMethod"),
+                        _is("지분법손실", 11, "dart_LossesOfAssociatesAndJointVenturesAccountedForUsingEquityMethod")]
+    assert AN.parse_statements(split)[0]["equity_income"] == pytest.approx(893)
+    named = _items() + [_is("공동기업 및 관계기업투자손익", 25101), _is("지분법이익잉여금", -3116)]
+    cur = AN.parse_statements(named)[0]
+    assert cur["equity_income"] == pytest.approx(25101) and "equity_gain" not in cur
+
+
+def _dart_ok(monkeypatch):
+    monkeypatch.setattr(AN.dart_api, "available", lambda: True)
+    monkeypatch.setattr(AN.dart_api, "corp_code_of", lambda t: "00000001")
+
+
+def test_fetch_full_never_caches_or_downgrades_after_dart_error(monkeypatch, tmp_path):
+    _dart_ok(monkeypatch)
+    seen = []
+
+    def fs(cc, y, rc="11011", fs_div="CFS", timeout=None):
+        seen.append(fs_div)
+        if fs_div == "CFS":
+            raise AN.dart_api.DartError("lỗi kết nối DART (ConnectionError)")
+        return _items(revenue=(787, 700))                                        # báo cáo RIÊNG LẺ: số nhỏ hơn hẳn
+    monkeypatch.setattr(AN.dart_api, "fetch_statements", fs)
+    errs = []
+    assert AN.fetch_full("005380", 2025, cache_dir=str(tmp_path), errors=errs) is None
+    assert seen == ["CFS"] and errs and not list(tmp_path.iterdir())             # không lùi OFS, không ghi cache
+    # DART xác nhận không có bản hợp nhất (None) → mới dùng bản riêng lẻ, và lúc đó mới lưu
+    monkeypatch.setattr(AN.dart_api, "fetch_statements",
+                        lambda cc, y, rc="11011", fs_div="CFS", timeout=None: None if fs_div == "CFS" else _items())
+    out = AN.fetch_full("005380", 2025, cache_dir=str(tmp_path))
+    assert out["fs_div"] == "OFS" and out["currency"] == "KRW" and out["_v"] == AN.FULL_V
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_fetch_full_refreshes_old_cache_and_keeps_it_on_error(monkeypatch, tmp_path):
+    import json
+    _dart_ok(monkeypatch)
+    fp = tmp_path / "00000001_2025.json"
+    fp.write_text(json.dumps({"year": 2025, "fs_div": "OFS", "cur": {"assets": 1.0, "revenue": 787.0}, "prev": {}}))
+    # cache đời cũ (có thể là OFS lưu nhầm) + DART đang lỗi → dùng tạm bản cũ nhưng báo lỗi, không ghi đè
+    def boom(*a, **k):
+        raise AN.dart_api.DartError("DART đang từ chối kết nối")
+    monkeypatch.setattr(AN.dart_api, "fetch_statements", boom)
+    errs = []
+    old = AN.fetch_full("005380", 2025, cache_dir=str(tmp_path), errors=errs)
+    assert old["cur"]["revenue"] == 787.0 and errs
+    # DART trả lời → thay bằng bản hợp nhất đúng
+    monkeypatch.setattr(AN.dart_api, "fetch_statements",
+                        lambda cc, y, rc="11011", fs_div="CFS", timeout=None: _items(revenue=(1862, 1700)))
+    new = AN.fetch_full("005380", 2025, cache_dir=str(tmp_path))
+    assert new["fs_div"] == "CFS" and new["cur"]["revenue"] == pytest.approx(1862)
+    assert json.loads(fp.read_text())["_v"] == AN.FULL_V
+
+
+def test_quality_skips_altman_when_market_cap_not_comparable():
+    q = AN.quality(_fs(), None, "Consumer/Retail")              # BCTC bằng USD → không truyền vốn hóa KRW
+    assert not any(c["Chỉ tiêu"] == "Altman Z" for c in q["checks"])
+
+
+# ---- một đường định giá cho mọi trang ----
+def test_peer_rows_batch_builds_canonical_set_once(monkeypatch):
+    import pandas as pd
+    import pipeline as P
+    import screener
+
+    class Reg:
+        df = pd.DataFrame({"ticker": ["000001", "000002", "000003", "000004", "000005"]})
+    monkeypatch.setattr(PR, "naver_domestic_peers", lambda tk: {"000001": ["000003", "999999"], "000002": []}[tk])
+    ranked_calls = []
+
+    def ranked(ik):
+        ranked_calls.append(ik)
+        return ["000001", "000002", "000004", "000005"]
+    monkeypatch.setattr(P, "_industry_ranked", ranked)
+    fetched = []
+
+    def fake_fetch_many(tks, registry=None, prefer=None):
+        fetched.extend(tks)
+        return [{"ticker": t, "per": 10.0, "pbr": 1.0} for t in tks], []
+    monkeypatch.setattr(screener, "fetch_many", fake_fetch_many)
+    have = {"000001": {"ticker": "000001", "per": 9.0}, "000002": {"ticker": "000002", "per": 8.0}}
+    out = PR.peer_rows_batch([("000001", "식품"), ("000002", "식품")], Reg(), have, n=3)
+    # gợi ý Naver trước, rồi top vốn hóa cùng ngành; bỏ chính mã và mã ngoài danh mục (999999)
+    assert [r["ticker"] for r in out["000001"]] == ["000003", "000002", "000004"]
+    assert [r["ticker"] for r in out["000002"]] == ["000001", "000004", "000005"]
+    assert out["000001"][1]["per"] == 8.0                           # dòng đã có trong lần chạy được dùng lại
+    assert sorted(fetched) == ["000003", "000004", "000005"]        # chỉ lấy mới các mã còn thiếu, một lượt
+    assert ranked_calls == ["식품"]                                  # danh sách ngành gọi đúng một lần
+
+
+def test_screening_uses_the_shared_valuation_path(monkeypatch):
+    """Sàng lọc/bot phải đi qua pipeline.assess với đúng bộ đối thủ được trao — không tự dựng phép neo riêng."""
+    import financials
+    import pipeline as P
+    import screen as SC
+    import screener
+    import valuation as V
+    seen = {}
+    real_assess = P.assess
+
+    def spy(tk, row, fin, a, peers, beta, **kw):
+        seen.update(tk=tk, peers=peers, beta=beta, kw=kw)
+        return real_assess(tk, row, fin, a, peers, beta, **kw)
+    monkeypatch.setattr(P, "assess", spy)
+    monkeypatch.setattr(financials, "fetch_financials", lambda tk: {"annual": [], "quarter": []})
+    monkeypatch.setattr(financials, "dart_api", None)
+    monkeypatch.setattr(screener, "fetch_weekly_closes", lambda s: [])
+    monkeypatch.setattr(AN, "fetch_full", lambda tk, errors=None: None)
+    monkeypatch.setattr(SC.DS, "save_section", lambda *a, **k: None)
+    row = {"ticker": "000001", "name": "T", "price": 10_000.0, "market_cap": 1e11, "eps": 1_000.0, "bps": 10_000.0,
+           "dps": 0.0, "per": 10.0, "pbr": 1.0, "industry_kr": "식품", "sector": None}
+    peers = [{"ticker": t, "per": pe, "pbr": pb} for t, pe, pb in (("a", 10, 1.0), ("b", 12, 1.2), ("c", 14, 1.4))]
+    feeds = {"rf": {"ok": False, "note": "Không lấy được Rf — dùng mặc định 3,2%"}}
+    out = SC.analyze_one("000001", row, [row], V.Assumptions(rf=0.032), None, [], save=False, peers=peers, feeds=feeds)
+    assert seen["tk"] == "000001" and seen["peers"] is peers and seen["kw"]["feeds"] is feeds
+    assert seen["beta"] is None
+    assert "Rf" in out["Cảnh báo dữ liệu"] and "Beta" in out["Cảnh báo dữ liệu"]      # lỗi nguồn hiện ra ở kết quả
+    assert out["Độ tin cậy"] in ("Low", "—")
+
+
+def test_bond_discount_lines_reduce_borrowings():
+    items = _items() + [_bs("사채", 1000), _bs("사채할인발행차금", -30), _bs("장기차입금", 200),
+                        _bs("현재가치할인차금", 5)]
+    # 현재가치할인차금 không gắn riêng với nợ vay (có thể thuộc khoản phải trả khác) → không tính vào nợ vay
+    assert AN.parse_statements(items)[0]["borrowings"] == pytest.approx(1000 - 30 + 200)

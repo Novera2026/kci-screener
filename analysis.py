@@ -15,9 +15,8 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import threading
 from typing import Optional
-
-import requests
 
 import dart_api
 
@@ -42,15 +41,20 @@ ACCOUNTS = [
     ("intangibles", {"BS"}, ["ifrs-full_IntangibleAssetsAndGoodwill", "ifrs-full_IntangibleAssetsOtherThanGoodwill"]),
     ("ppe", {"BS"}, ["ifrs-full_PropertyPlantAndEquipment"]),
     ("retained", {"BS"}, ["ifrs-full_RetainedEarnings"]),
-    ("equity_method", {"BS"}, ["ifrs-full_InvestmentAccountedForUsingEquityMethod"]),
+    ("equity_method", {"BS"}, ["ifrs-full_InvestmentAccountedForUsingEquityMethod",
+                               "ifrs-full_InvestmentsInSubsidiariesJointVenturesAndAssociates",
+                               "ifrs-full_InvestmentsInAssociatesAccountedForUsingEquityMethod",
+                               "ifrs-full_InvestmentsInAssociates"]),
     ("+borrowings", {"BS"}, ["ifrs-full_ShorttermBorrowings", "ifrs-full_CurrentPortionOfLongtermBorrowings",
                              "ifrs-full_LongtermBorrowings", "ifrs-full_NoncurrentPortionOfNoncurrentBondsIssued",
                              "ifrs-full_BondsIssued", "dart_ShortTermBorrowings", "dart_LongTermBorrowingsGross",
                              "ifrs-full_CurrentBondsIssuedAndCurrentPortionOfNoncurrentBondsIssued",
                              "ifrs-full_NoncurrentPortionOfNoncurrentLoansReceived", "ifrs-full_OtherBorrowings"]),
     # dự phòng khi DN không tách 차입금 (HD한국조선해양 ghi 단기/장기금융부채) — chỉ dùng nếu "+borrowings" = 0
+    # (LG Display 2025 ghi gộp "금융부채" với mã CurrentFinancialLiabilities / NoncurrentFinancialLiabilities)
     ("+borrowings_alt", {"BS"}, ["ifrs-full_OtherCurrentFinancialLiabilities",
-                                 "ifrs-full_OtherNoncurrentFinancialLiabilities"]),
+                                 "ifrs-full_OtherNoncurrentFinancialLiabilities",
+                                 "ifrs-full_CurrentFinancialLiabilities", "ifrs-full_NoncurrentFinancialLiabilities"]),
     ("revenue", {"IS", "CIS"}, ["ifrs-full_Revenue", "ifrs-full_RevenueFromInterest"]),   # ngân hàng: thu lãi
     ("cogs", {"IS", "CIS"}, ["ifrs-full_CostOfSales"]),
     ("gross", {"IS", "CIS"}, ["ifrs-full_GrossProfit"]),
@@ -58,7 +62,13 @@ ACCOUNTS = [
     ("fin_income", {"IS", "CIS"}, ["ifrs-full_FinanceIncome"]),
     ("fin_cost", {"IS", "CIS"}, ["ifrs-full_FinanceCosts"]),
     ("equity_income", {"IS", "CIS"},
-     ["ifrs-full_ShareOfProfitLossOfAssociatesAndJointVenturesAccountedForUsingEquityMethod"]),
+     ["ifrs-full_ShareOfProfitLossOfAssociatesAndJointVenturesAccountedForUsingEquityMethod",
+      "ifrs-full_ShareOfProfitLossOfAssociatesAccountedForUsingEquityMethod",
+      "ifrs-full_ShareOfProfitLossOfContinuingOperationsOfAssociatesAndJointVenturesAccountedForUsingEquityMethod",
+      "ifrs-full_AdjustmentsForUndistributedProfitsOfInvestmentsAccountedForUsingEquityMethod"]),
+    # DN chỉ ghi tách lãi / lỗ liên kết (mã dart_) → equity_income = lãi − lỗ (xem _fix_derived)
+    ("equity_gain", {"IS", "CIS"}, ["dart_ProfitsOfAssociatesAndJointVenturesAccountedForUsingEquityMethod"]),
+    ("equity_loss", {"IS", "CIS"}, ["dart_LossesOfAssociatesAndJointVenturesAccountedForUsingEquityMethod"]),
     ("pretax", {"IS", "CIS"}, ["ifrs-full_ProfitLossBeforeTax"]),
     ("tax", {"IS", "CIS"}, ["ifrs-full_IncomeTaxExpenseContinuingOperations"]),
     ("ni", {"IS", "CIS"}, ["ifrs-full_ProfitLoss"]),
@@ -80,6 +90,73 @@ def _n(s) -> Optional[float]:
         return float(str(s).replace(",", "")) / 1e8          # 원 → 억원
     except ValueError:
         return None
+
+
+# ---------------------------------------------------------------------------- nợ vay theo TÊN dòng (rà soát 15/11/2026)
+# Mã tài khoản IFRS không đủ: 141 báo cáo năm 2025 của các mã lớn có 50 dòng nợ vay ghi "-표준계정코드 미사용-" và
+# nhiều mã chuẩn khác nhau (CurrentBorrowingsAndCurrentPortion…, dart_CurrentPortionOfConvertibleBonds, …). Đọc theo
+# mã: KT&G và LG Display ra 0 dù trả lãi 732억 / 7.113억; Samsung 76.642 thay vì 187.525. Đọc theo tên dòng trên CĐKT
+# (차입 = vay, 사채 = trái phiếu kể cả chuyển đổi, 유동성장기부채 = nợ dài hạn đến hạn): lãi đã trả ÷ nợ vay trung vị
+# 3,9% (p10 1,5% – p90 8,8%) so với 5,6% (p90 20,4%) của cách cũ. Không dòng nào khớp → dùng cách cũ theo mã tài khoản.
+_BORROW_INC = ("차입", "사채", "유동성장기부채")
+_BORROW_EXC = ("대여", "자산", "파생", "리스", "이자", "충당", "금융부채", "비금융", "상환할증", "미지급")
+
+
+def _is_borrowing(name: Optional[str]) -> bool:
+    nm = "".join(str(name or "").split())
+    return any(k in nm for k in _BORROW_INC) and not any(k in nm for k in _BORROW_EXC)
+
+
+def _borrowings_by_name(items: list[dict], amount_key: str) -> Optional[float]:
+    """Tổng các dòng nợ vay trên CĐKT theo tên (억원). None nếu không dòng nào khớp. Dòng chiết khấu
+    (사채할인발행차금, 현재가치할인차금) là khoản TRỪ của trái phiếu/khoản vay — trừ đi, không cộng."""
+    total, hit = 0.0, False
+    for it in items:
+        if it.get("sj_div") != "BS" or not _is_borrowing(it.get("account_nm")):
+            continue
+        v = _n(it.get(amount_key))
+        if v is None:
+            continue
+        hit = True
+        total += -abs(v) if "할인" in "".join(str(it.get("account_nm") or "").split()) else abs(v)
+    return max(total, 0.0) if hit else None
+
+
+_EQINC_EXC = ("포괄", "잉여금", "자본변동", "재측정", "처분", "손상", "배당")
+
+
+def _equity_income_by_name(items: list[dict], amount_key) -> Optional[float]:
+    """Lãi/lỗ công ty liên kết trên KQKD theo TÊN dòng (DN không dùng mã chuẩn — Hyundai Motor ghi
+    '공동기업및관계기업투자손익' với mã '-표준계정코드 미사용-'). Chỉ lấy khi đúng MỘT dòng khớp.
+    amount_key: tên trường số tiền, hoặc tuple các tên — lấy trường đầu tiên có giá trị (frmtrm_q_amount → frmtrm_amount)."""
+    keys = (amount_key,) if isinstance(amount_key, str) else tuple(amount_key)
+    hits = []
+    for it in items:
+        if it.get("sj_div") not in ("IS", "CIS"):
+            continue
+        nm = "".join(str(it.get("account_nm") or "").split())
+        if (("지분법" in nm or "관계기업" in nm) and nm.endswith(("손익", "이익(손실)", "손익(손실)"))
+                and not any(k in nm for k in _EQINC_EXC)):
+            k = next((k for k in keys if it.get(k) not in (None, "")), None)
+            v = _n(it.get(k)) if k else None
+            if v is not None:
+                hits.append(v)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _fix_derived(d: dict, by_name: Optional[float], eq_by_name: Optional[float] = None) -> None:
+    """Hoàn thiện 1 kỳ sau khi đọc theo ACCOUNTS: nợ vay (tên dòng → mã tài khoản → 금융부채), lãi liên kết ròng
+    (mã chuẩn → lãi − lỗ theo mã dart_ → tên dòng)."""
+    alt = d.pop("borrowings_alt", None)
+    if by_name:
+        d["borrowings"] = by_name
+    elif not d.get("borrowings") and alt:
+        d["borrowings"] = alt
+    gain, loss = d.pop("equity_gain", None), d.pop("equity_loss", None)
+    if d.get("equity_income") is None and (gain is not None or loss is not None):
+        d["equity_income"] = (gain or 0.0) - abs(loss or 0.0)
+    if d.get("equity_income") is None and eq_by_name is not None:
+        d["equity_income"] = eq_by_name
 
 
 def parse_statements(items: list[dict]) -> tuple[dict, dict]:
@@ -105,16 +182,54 @@ def parse_statements(items: list[dict]) -> tuple[dict, dict]:
                 if p is not None:
                     prev[name] = p
                 break
-    for d in (cur, prev):
-        alt = d.pop("borrowings_alt", None)
-        if not d.get("borrowings") and alt:
-            d["borrowings"] = alt
+    for d, key in ((cur, "thstrm_amount"), (prev, "frmtrm_amount")):
+        _fix_derived(d, _borrowings_by_name(items, key), _equity_income_by_name(items, key))
     return cur, prev
 
 
-def fetch_full(ticker: str, year: Optional[int] = None, cache_dir: str = CACHE) -> Optional[dict]:
+FULL_V = 4      # phiên bản cách đọc (nợ vay theo tên dòng, lãi liên kết) + cách lùi CFS→OFS; cache cũ hơn được lấy lại
+
+
+def _write_json(fp: str, obj: dict) -> None:
+    tmp = f"{fp}.{os.getpid()}.{threading.get_ident()}.tmp"      # nhiều luồng ghi cùng file không đè file tạm của nhau
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, fp)
+
+
+def _read_json(fp: str) -> Optional[dict]:
+    if not os.path.exists(fp):
+        return None
+    try:
+        with open(fp, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _fetch_full_year(cc: str, y: int) -> Optional[dict]:
+    """1 năm từ DART: hợp nhất (CFS) trước; chỉ lùi sang riêng lẻ (OFS) khi DART xác nhận không có bản hợp nhất hoặc
+    bản hợp nhất thiếu tài khoản cốt lõi. Lỗi DART → DartError (nơi gọi KHÔNG được ghi cache)."""
+    for fs_div in ("CFS", "OFS"):
+        items = dart_api.fetch_statements(cc, y, "11011", fs_div, timeout=20)
+        if not items:
+            continue
+        cur, prev = parse_statements(items)
+        if not cur.get("assets") or (cur.get("revenue") is None and cur.get("op") is None):
+            continue
+        return {"year": y, "fs_div": fs_div, "cur": cur, "prev": prev,
+                "currency": dart_api.statement_currency(items), "_v": FULL_V}
+    return None
+
+
+def fetch_full(ticker: str, year: Optional[int] = None, cache_dir: str = CACHE,
+               errors: Optional[list] = None) -> Optional[dict]:
     """BCTC đầy đủ năm `year` (mặc định năm tài chính gần nhất đã nộp, lùi tối đa 2 năm).
-    Trả {year, fs_div, cur, prev} hoặc None (không key DART / không có báo cáo)."""
+    Trả {year, fs_div, cur, prev, currency} hoặc None (không key DART / không có báo cáo).
+
+    errors: list nhận thông báo khi DART lỗi — khi đó None KHÔNG có nghĩa là 'không có báo cáo' (và không ghi cache;
+    nếu còn bản cache đời cũ thì trả tạm bản đó). Trước 15/11/2026 lỗi mạng khi lấy bản hợp nhất làm hàm lùi sang báo
+    cáo riêng lẻ rồi LƯU VĨNH VIỄN (Hyundai Motor: doanh thu 787.668 thay vì 1.862.545) — cache đời cũ được lấy lại."""
     if not dart_api.available():
         return None
     cc = dart_api.corp_code_of(ticker)
@@ -123,28 +238,28 @@ def fetch_full(ticker: str, year: Optional[int] = None, cache_dir: str = CACHE) 
     today = _dt.date.today()
     years = [year] if year else [today.year - 1, today.year - 2, today.year - 3]
     os.makedirs(cache_dir, exist_ok=True)
+    offline = False                   # sau lỗi DART đầu tiên: chỉ đọc cache (kể cả bản đời cũ), không gọi thêm
     for y in years:
         fp = os.path.join(cache_dir, f"{cc}_{y}.json")
-        if os.path.exists(fp):
-            try:
-                return json.load(open(fp, encoding="utf-8"))
-            except Exception:
-                pass
-        for fs_div in ("CFS", "OFS"):
-            try:
-                j = requests.get(f"{dart_api._BASE}/fnlttSinglAcntAll.json",
-                                 params={"crtfc_key": dart_api.api_key(), "corp_code": cc, "bsns_year": str(y),
-                                         "reprt_code": "11011", "fs_div": fs_div}, timeout=20).json()
-            except Exception:
-                continue
-            if j.get("status") != "000":
-                continue
-            cur, prev = parse_statements(j.get("list", []))
-            if not cur.get("assets") or (cur.get("revenue") is None and cur.get("op") is None):
-                continue
-            out = {"year": y, "fs_div": fs_div, "cur": cur, "prev": prev}
-            json.dump(out, open(fp, "w", encoding="utf-8"), ensure_ascii=False)
+        cached = _read_json(fp)
+        if cached and (cached.get("_v") == FULL_V or offline):
+            return cached
+        if offline:
+            continue
+        try:
+            out = _fetch_full_year(cc, y)
+        except dart_api.DartError as e:
+            if errors is not None:
+                errors.append(str(e))
+            if cached:
+                return cached
+            offline = True            # năm mới nhất chưa nộp + DART lỗi: vẫn dùng năm trước đã lưu
+            continue
+        if out:
+            _write_json(fp, out)
             return out
+        if cached:
+            return cached
     return None
 
 
@@ -234,42 +349,51 @@ def parse_report(items: list[dict]) -> dict:
                 d[name] = d.get(name, 0.0) + abs(v) if add else v
             if not add:
                 break
-    for d in (pt, ytd, yoy):
-        alt = d.pop("borrowings_alt", None)
-        if not d.get("borrowings") and alt:
-            d["borrowings"] = alt
-    sj.pop("borrowings_alt", None)
+    _fix_derived(pt, _borrowings_by_name(items, "thstrm_amount"),        # CĐKT cuối kỳ; lãi liên kết của kỳ
+                 _equity_income_by_name(items, "thstrm_amount"))
+    # lũy kế và cùng kỳ năm trước cũng phải có lãi liên kết đọc theo tên: Q4 = cả năm − LŨY KẾ 9 tháng, thiếu thì phần
+    # này rơi vào "Khác" của Q4 (cảnh báo giả "khoản khác/một lần")
+    _fix_derived(ytd, None, _equity_income_by_name(items, "thstrm_add_amount"))
+    _fix_derived(yoy, None, _equity_income_by_name(items, ("frmtrm_q_amount", "frmtrm_amount")))
+    for k in ("borrowings_alt", "equity_gain", "equity_loss"):
+        sj.pop(k, None)
+    if "equity_income" in pt:
+        sj.setdefault("equity_income", "IS")
+    if "borrowings" in pt:              # nợ vay đọc theo tên dòng không qua vòng ACCOUNTS → phải tự ghi loại báo cáo,
+        sj["borrowings"] = "BS"         # nếu không quarter_series bỏ nó khỏi CĐKT quý (nợ ròng quý = −tiền)
     return {"pt": pt, "ytd": ytd, "yoy": yoy, "sj": sj}
 
 
-def _fetch_report(cc: str, year: int, rc: str, fs_div_pref: Optional[str], cache_dir: str) -> Optional[dict]:
+def _fetch_report(cc: str, year: int, rc: str, fs_div_pref: Optional[str], cache_dir: str,
+                  offline: bool = False) -> Optional[dict]:
+    """1 báo cáo quý/năm (có cache đĩa). Lỗi DART → DartError: không ghi cache, không lùi sang loại báo cáo khác.
+    offline=True (DART đang lỗi): chỉ đọc cache, kể cả bản đời cũ; không có thì None."""
     fp = os.path.join(cache_dir, f"{cc}_{year}_{rc}.json")
-    if os.path.exists(fp):
-        try:
-            return json.load(open(fp, encoding="utf-8"))
-        except Exception:
-            pass
+    cached = _read_json(fp)
+    if cached and (cached.get("_v") == FULL_V or offline):
+        return cached
+    if offline:
+        return None
     for fs_div in ([fs_div_pref] if fs_div_pref else []) + [d for d in ("CFS", "OFS") if d != fs_div_pref]:
-        try:
-            j = requests.get(f"{dart_api._BASE}/fnlttSinglAcntAll.json",
-                             params={"crtfc_key": dart_api.api_key(), "corp_code": cc, "bsns_year": str(year),
-                                     "reprt_code": rc, "fs_div": fs_div}, timeout=20).json()
-        except Exception:
+        items = dart_api.fetch_statements(cc, year, rc, fs_div, timeout=20)
+        if not items:
             continue
-        if j.get("status") != "000":
-            continue
-        rep = parse_report(j.get("list", []))
+        rep = parse_report(items)
         if not rep["pt"].get("assets"):
             continue
-        out = {"year": year, "rc": rc, "fs_div": fs_div, **rep}
-        json.dump(out, open(fp, "w", encoding="utf-8"), ensure_ascii=False)    # báo cáo đã nộp không đổi
+        out = {"year": year, "rc": rc, "fs_div": fs_div, "currency": dart_api.statement_currency(items),
+               "_v": FULL_V, **rep}
+        _write_json(fp, out)                                                    # báo cáo đã nộp không đổi
         return out
     return None
 
 
-def fetch_quarter_reports(ticker: str, years: int = 2, cache_dir: str = Q_CACHE) -> list[dict]:
+def fetch_quarter_reports(ticker: str, years: int = 2, cache_dir: str = Q_CACHE,
+                          errors: Optional[list] = None) -> list[dict]:
     """Báo cáo quý + năm của `years` năm gần nhất (+ năm trước đó để tính Q4/so cùng kỳ), cũ → mới.
-    Cùng loại hợp nhất/riêng với báo cáo đầu tiên lấy được. Không key DART → []."""
+    Cùng loại hợp nhất/riêng với báo cáo đầu tiên lấy được. Không key DART → [].
+    errors: list nhận thông báo khi DART lỗi giữa chừng. Sau lỗi đầu tiên hàm không gọi DART nữa mà đọc tiếp các kỳ đã
+    lưu trên đĩa (kết quả có thể thiếu các kỳ chưa từng lưu — không đầy đủ)."""
     if not dart_api.available():
         return []
     cc = dart_api.corp_code_of(ticker)
@@ -277,10 +401,16 @@ def fetch_quarter_reports(ticker: str, years: int = 2, cache_dir: str = Q_CACHE)
         return []
     os.makedirs(cache_dir, exist_ok=True)
     today = _dt.date.today()
-    out, fs_div = [], None
+    out, fs_div, offline = [], None, False
     for y in range(today.year - years, today.year + 1):
         for rc, _q in _RC_Q:
-            rep = _fetch_report(cc, y, rc, fs_div, cache_dir)
+            try:
+                rep = _fetch_report(cc, y, rc, fs_div, cache_dir, offline)
+            except dart_api.DartError as e:
+                if errors is not None:
+                    errors.append(str(e))
+                offline = True
+                rep = _fetch_report(cc, y, rc, fs_div, cache_dir, offline=True)
             if rep:
                 fs_div = fs_div or rep["fs_div"]
                 out.append(rep)
@@ -291,35 +421,91 @@ def _sub(a, b):
     return a - b if (a is not None and b is not None) else None
 
 
+RESTATE_TOL = 0.05        # doanh thu cùng quý mà báo cáo NĂM SAU ghi khác > 5% số đã nộp → năm đó đã điều chỉnh hồi tố
+Q4_BAND = (1 / 3, 3.0)    # doanh thu Q4 suy ra ÷ trung vị Q1–Q3 ngoài dải → phép trừ "năm − 9 tháng" không còn nghĩa
+
+
 def quarter_series(reports: list[dict]) -> list[dict]:
     """Báo cáo DART → từng QUÝ riêng: {label, year, q, flow (IS quý), cf (CF quý), bs (cuối quý), yoy (IS cùng quý
-    năm trước)}. Q4 = năm − 9 tháng; CF quý = lũy kế kỳ này − lũy kế kỳ trước cùng năm."""
+    năm trước), note}. Q4 = năm − 9 tháng; CF quý = lũy kế kỳ này − lũy kế kỳ trước cùng năm.
+
+    Điều chỉnh hồi tố (rà soát 15/11/2026): báo cáo NĂM có thể lập trên cơ sở khác các báo cáo quý đã nộp trong năm
+    (tách công ty, hoạt động ngừng). Samsung Biologics 2025: cả năm 45.570 (sau tách) − 9 tháng 42.484 (trước tách) →
+    'Q4' 3.086 với LN HĐ 3.781 > doanh thu. Nhận diện bằng số: báo cáo quý năm Y+1 ghi lại số CÙNG QUÝ năm Y; lệch
+    > 5% doanh thu ⇒ năm Y đã điều chỉnh. Khi đó Q1–Q3 dùng số đã điều chỉnh (nếu năm sau đã có báo cáo quý đó), Q4 =
+    cả năm − ba quý đã điều chỉnh, thiếu một quý thì KHÔNG tách Q4 (để trống + ghi chú). Thêm cổng số cho mọi Q4 suy
+    ra: doanh thu ≤ 0 hoặc ngoài [1/3; 3]× trung vị Q1–Q3 → để trống."""
     by = {(r["year"], dict(_RC_Q)[r["rc"]]): r for r in reports}
-    out = []
+    restated: dict = {}                 # (năm, quý) → số KQKD của quý đó theo cơ sở mới (lấy từ báo cáo năm sau)
+    for (y, q), r in by.items():
+        if q < 4 and (y - 1, q) in by:
+            old, new = by[(y - 1, q)]["pt"].get("revenue"), (r.get("yoy") or {}).get("revenue")
+            if old and new and abs(new / old - 1) > RESTATE_TOL:
+                restated[(y - 1, q)] = r["yoy"]
+    restated_years = {y for (y, _q) in restated}
+    out, flows = [], {}
     for (y, q) in sorted(by):
         r = by[(y, q)]
         sj = r.get("sj", {})
-        flow, cf, yoy = {}, {}, {}
+        flow, cf, yoy, note = {}, {}, {}, ""
         prev = by.get((y, q - 1)) if q > 1 else None
-        for k, v in r["pt"].items():
-            kind = sj.get(k)
-            if kind == "IS":
-                if q < 4:
-                    flow[k] = v
-                    if k in r.get("yoy", {}):
-                        yoy[k] = r["yoy"][k]
-                else:   # năm − lũy kế 9 tháng; cùng kỳ năm trước = năm trước − 9 tháng năm trước
-                    p3 = by.get((y, 3))
-                    flow[k] = _sub(v, (p3 or {}).get("ytd", {}).get(k))
-                    pfy, p3y = by.get((y - 1, 4)), by.get((y - 1, 3))
+        is_keys = [k for k in r["pt"] if sj.get(k) == "IS"]
+        q4_void = False
+        if q < 4:
+            new = restated.get((y, q))
+            for k in is_keys:
+                flow[k] = new[k] if (new is not None and k in new) else r["pt"][k]
+                if new is None and k in r.get("yoy", {}):       # số điều chỉnh không có 'cùng kỳ' cùng cơ sở → bỏ YoY
+                    yoy[k] = r["yoy"][k]
+            if new is not None:
+                note = "KQKD đã điều chỉnh hồi tố (theo báo cáo quý năm sau); dòng tiền vẫn theo số đã nộp"
+            elif y in restated_years:
+                note = "số đã nộp — CHƯA cùng cơ sở với báo cáo năm đã điều chỉnh hồi tố"
+        else:
+            if y in restated_years:
+                parts = [restated.get((y, i)) for i in (1, 2, 3)]
+                if all(p is not None for p in parts):
+                    for k in is_keys:
+                        vals = [p.get(k) for p in parts]
+                        flow[k] = (r["pt"][k] - sum(vals)) if all(v is not None for v in vals) else None
+                    note = "Q4 = cả năm − ba quý đã điều chỉnh hồi tố"
+                else:
+                    q4_void = True
+                    note = ("báo cáo năm đã điều chỉnh hồi tố / đổi phạm vi hợp nhất, chưa có đủ ba quý cùng cơ sở — "
+                            "không tách được Q4")
+            else:       # năm − lũy kế 9 tháng
+                p3 = by.get((y, 3))
+                for k in is_keys:
+                    flow[k] = _sub(r["pt"][k], (p3 or {}).get("ytd", {}).get(k))
+            # cùng kỳ năm trước = Q4 năm trước đã tách (cùng quy tắc); chưa tách được thì năm trước − 9 tháng năm trước
+            if (y - 1, 4) in flows:
+                yoy = dict(flows[(y - 1, 4)])
+            else:
+                pfy, p3y = by.get((y - 1, 4)), by.get((y - 1, 3))
+                for k in is_keys:
                     yoy[k] = _sub((pfy or {}).get("pt", {}).get(k), (p3y or {}).get("ytd", {}).get(k))
-            elif kind == "CF":
+            # cổng số cho Q4 suy ra
+            rev4 = flow.get("revenue")
+            q13 = sorted(v for v in ((flows.get((y, i)) or {}).get("revenue") for i in (1, 2, 3)) if v)
+            if not q4_void and rev4 is not None and len(q13) == 3:
+                med = q13[1]
+                if rev4 <= 0 or not Q4_BAND[0] <= rev4 / med <= Q4_BAND[1]:
+                    q4_void = True
+                    note = (f"Q4 suy ra phi lý (doanh thu {rev4:,.0f}억 so với trung vị Q1–Q3 {med:,.0f}억) — báo cáo năm "
+                            "khác cơ sở với 9 tháng đã nộp; không tách được Q4")
+            if q4_void:
+                flow = {}
+        for k, v in r["pt"].items():
+            if sj.get(k) == "CF":
                 cf[k] = v if q == 1 else _sub(v, (prev or {}).get("pt", {}).get(k))
+        if q == 4 and (q4_void or y in restated_years):      # LCTT năm cũng lập lại theo cơ sở mới → không trừ được
+            cf = {}
         flow = {k: v for k, v in flow.items() if v is not None}
+        flows[(y, q)] = flow
         out.append({"label": f"Q{q}.{str(y)[2:]}", "year": y, "q": q, "fs_div": r["fs_div"],
                     "flow": flow, "cf": {k: v for k, v in cf.items() if v is not None},
                     "bs": {k: v for k, v in r["pt"].items() if sj.get(k) == "BS"},
-                    "yoy": {k: v for k, v in yoy.items() if v is not None}})
+                    "yoy": {k: v for k, v in yoy.items() if v is not None}, "note": note})
     return out
 
 
@@ -353,7 +539,7 @@ def decompose_quarters(qs: list[dict], n: int = 6) -> list[dict]:
         fcf = _sub(cfo, capex)
         liquid = (bs.get("cash") or 0.0) + (bs.get("st_deposits") or 0.0)
         rows.append({
-            "Quý": qd["label"],
+            "Quý": qd["label"], "Ghi chú": qd.get("note") or "",
             "Doanh thu (억)": rev, "DT YoY %": _growth_pct(rev, yoy.get("revenue")),
             "DT QoQ %": _growth_pct(rev, prev_q.get("revenue")),
             "LN HĐ (억)": op, "LN HĐ YoY %": _growth_pct(op, yoy.get("op")),
@@ -379,6 +565,9 @@ def quarter_flags(rows: list[dict]) -> list[str]:
     L, c = [], rows[-1]
     p = rows[-2] if len(rows) > 1 else {}
     q = c["Quý"]
+    for r in rows:                                    # quý có số không cùng cơ sở / không tách được → nói rõ trước
+        if r.get("Ghi chú"):
+            L.append(f"⚠️ {r['Quý']}: {r['Ghi chú']}")
     if c.get("DT YoY %") is not None:
         L.append(f"{'📈' if c['DT YoY %'] >= 0 else '📉'} {q}: doanh thu {c['DT YoY %']:+.1f}% so cùng kỳ")
     if c.get("LN HĐ YoY %") is not None:

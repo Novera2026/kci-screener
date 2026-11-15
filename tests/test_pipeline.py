@@ -391,3 +391,189 @@ def test_run_forecast_starts_from_fiscal_year_end_book():
     r["bps"] = s[-1]["bps"] * 1.3                          # BPS Naver giữa năm, đã cộng LN nửa năm
     fc = P.run_forecast(s, r, [{"Năm": "2026", "Tăng trưởng DT %": 5, "Biên LN ròng %": 10, "Tỷ lệ cổ tức %": 0}])
     assert fc[0]["BPS đầu kỳ"] == pytest.approx(s[-1]["bps"])
+
+
+# ================================================================ rà soát 15/11/2026 — đợt 1
+def _series_ctrl(parent=1.0, shares=1e7, **kw):
+    """Chuỗi có tách LN cổ đông mẹ (như dữ liệu Naver thật): ctrl_net = LN × parent, EPS theo ctrl_net."""
+    s = _series(shares=shares, **kw)
+    for c in s:
+        c["ctrl_net"] = c["net_profit"] * parent
+        c["eps"] = c["ctrl_net"] * 1e8 / shares
+    return s
+
+
+def _quarters(year, n, np_q, ctrl_q, shares, rev_q=300.0):
+    return [{"period": f"{year}{m:02d}", "is_consensus": False, "revenue": rev_q, "op_profit": np_q * 1.2,
+             "net_profit": np_q, "ctrl_net": ctrl_q, "eps": ctrl_q * 1e8 / shares} for m in (3, 6, 9, 12)[:n]]
+
+
+def test_run_forecast_uses_parent_profit_and_current_shares():
+    """Năm trước cổ đông mẹ hưởng 45% LN trên 10 triệu cp; năm nay 32% trên 8 triệu cp (đã hủy cổ phiếu quỹ)."""
+    s = _series_ctrl(parent=0.45)
+    # LN quý đủ lớn để sai số làm tròn (1억, 1 KRW) của số cp suy ra < 2% — quý quá nhỏ bị bỏ, xem share_basis
+    q = _quarters(2026, 2, np_q=350.0, ctrl_q=350.0 * 0.32, shares=8e6, rev_q=3000.0)
+    r = _row(s)
+    fc = P.run_forecast(s, r, [{"Năm": "2026", "Tăng trưởng DT %": 0, "Biên LN ròng %": 10, "Tỷ lệ cổ tức %": 0},
+                               {"Năm": "2027", "Tăng trưởng DT %": 0, "Biên LN ròng %": 10, "Tỷ lệ cổ tức %": 0}], q)
+    np1 = s[-1]["revenue"] * 0.10
+    assert fc[0]["LN ròng (억)"] == pytest.approx(np1)
+    assert fc[0]["LN cổ đông mẹ (억)"] == pytest.approx(np1 * 0.32)
+    assert fc[0]["EPS"] == pytest.approx(np1 * 0.32 * 1e8 / 8e6)
+    assert fc[1]["EPS"] == pytest.approx(fc[0]["EPS"])
+    # không truyền quý (backtest / dữ liệu cũ) → tỷ lệ và số cp của năm thực gần nhất
+    old = P.run_forecast(s, r, [{"Năm": "2026", "Tăng trưởng DT %": 0, "Biên LN ròng %": 10, "Tỷ lệ cổ tức %": 0}])
+    assert old[0]["EPS"] == pytest.approx(np1 * 0.45 * 1e8 / 1e7)
+
+
+def test_data_quality_share_count_moved_warns_break_fails():
+    s = _series_ctrl()
+    today = dt.date(2026, 11, 9)
+    moved = _quarters(2026, 2, 30.0, 30.0, shares=0.8e7)             # −20%: hủy cổ phiếu quỹ → ⚠️, không chặn
+    r = _row(s, shares=0.8e7)
+    dq = P.data_quality(r, s, moved, beta=1.0, today=today)
+    row = next(c for c in dq["checks"] if c["Kiểm tra"] == "Số cổ phiếu (cơ sở EPS)")
+    assert row["Kết quả"] == P.WARN and not dq["share_break"]
+    merged = _quarters(2026, 2, 30.0, 30.0, shares=2.7e7)            # 2,7×: sáp nhập → ❌, chặn dự phóng mỗi cổ phiếu
+    dq = P.data_quality(_row(s, shares=2.7e7), s, merged, beta=1.0, today=today)
+    assert dq["share_break"] and dq["cap"] == "Low"
+
+
+def test_data_quality_parent_ratio_gate():
+    s = _series_ctrl(parent=0.9)
+    q = _quarters(2026, 2, np_q=30.0, ctrl_q=-10.0, shares=1e7)      # hợp nhất lãi, công ty mẹ lỗ
+    dq = P.data_quality(_row(s), s, q, beta=1.0, today=dt.date(2026, 11, 9))
+    assert dq["parent_break"]
+    drv = P.default_drivers(s, _row(s), A, years=3, quarters=q)
+    drv[0].pop("_basis", None)
+    D = {"row": dict(_row(s), beta=1.0), "series": s, "quarters": q, "extras": {}, "peers": [], "ticker": "000001"}
+    E = P.evaluate(D, A, drv, P.identify(_row(s)), dq, P.reported_evidence(s, q))
+    assert not E["fg"]["ok"] and any("LN cổ đông mẹ" in c["Kiểm tra"] for c in E["fg"]["checks"])
+
+
+def test_data_quality_reads_source_status():
+    today = dt.date(2026, 11, 9)
+
+    def dq_with(src):
+        s = _series()
+        for c in s:
+            c["_src"] = src
+        return P.data_quality(_row(s), s, [{"period": "202609", "is_consensus": False}], beta=1.0, today=today)
+    ok = dq_with({"dart": "ok", "note": "", "gaps": []})
+    assert ok["n_fail"] == 0 and not ok["source_break"]
+    err = dq_with({"dart": "error", "note": "lỗi kết nối DART (ConnectionError)", "gaps": []})
+    assert err["cap"] == "Low" and not err["source_break"]           # lỗi mạng: hạ Low, không chặn mô hình
+    mm = dq_with({"dart": "mismatch", "note": "năm 2025: doanh thu DART 162 vs Naver 1.200억", "gaps": []})
+    assert mm["source_break"] and mm["cap"] == "Low"
+    cur = dq_with({"dart": "currency", "note": "BCTC DART lập bằng USD", "gaps": []})
+    assert not cur["source_break"] and cur["n_fail"] == 0            # nguyên nhân đã rõ, số Naver dùng được → ⚠️
+    rest = dq_with({"dart": "ok", "note": "", "gaps": [{"year": "2024", "field": "revenue", "dart": 1430.0,
+                                                        "naver": 1100.0, "ratio": 1.3}]})
+    assert any(c["Kiểm tra"].startswith("Điều chỉnh hồi tố") and c["Kết quả"] == P.WARN for c in rest["checks"])
+
+
+def test_source_break_blocks_forecast_models():
+    s = _series()
+    for c in s:
+        c["_src"] = {"dart": "mismatch", "note": "x", "gaps": []}
+    r = _row(s)
+    dq = P.data_quality(r, s, [], beta=1.0, today=dt.date(2026, 11, 9))
+    drv = P.default_drivers(s, r, A, years=3)
+    drv[0].pop("_basis", None)
+    D = {"row": dict(r, beta=1.0), "series": s, "quarters": [], "extras": {}, "peers": [], "ticker": "000001"}
+    E = P.evaluate(D, A, drv, P.identify(r), dq, None)
+    rim = next(x for x in E["rec"]["rows"] if x["name"].startswith("RIM tường minh"))
+    assert not rim["pass"] and "cổng dự phóng" in rim["why"]
+
+
+def test_missing_beta_or_rf_caps_confidence_low():
+    s = _series()
+    q = [{"period": "202609", "is_consensus": False}]
+    today = dt.date(2026, 11, 9)
+    assert P.data_quality(_row(s), s, q, beta=None, today=today)["cap"] == "Low"
+    dq = P.data_quality(_row(s), s, q, beta=1.0, today=today,
+                        feeds={"rf": {"ok": False, "note": "Không lấy được Rf — dùng mặc định 3,2%"}})
+    assert dq["cap"] == "Low" and any("Rf" in c["Kiểm tra"] for c in dq["checks"])
+    assert P.data_quality(_row(s), s, q, beta=1.0, today=today, feeds={"rf": {"ok": True}})["cap"] is None
+
+
+def test_confidence_needs_independent_confirmation():
+    two = [{"name": "a", "value": 10_000, "role": "primary"}, {"name": "b", "value": 10_500, "role": "primary"}]
+    one = [{"name": "a", "value": 10_000, "role": "primary"},
+           {"name": "b", "value": 3_000, "role": "primary"},          # 0,3× giá → bị cổng chặn
+           {"name": "x", "value": 9_500, "role": "cross"}]
+    # hai mô hình chính đồng ý nhưng KHÔNG có phép neo peer → không được High
+    assert P.reconcile(10_000, two, anchor=None, caps=[])["confidence"] == "Medium"
+    assert P.reconcile(10_000, two, anchor=10_200, caps=[])["confidence"] == "High"
+    # chỉ một mô hình chính qua cổng: mô hình đối chiếu không cứu được; phép neo peer xác nhận thì Medium
+    assert P.reconcile(10_000, one, anchor=None, caps=[])["confidence"] == "Low"
+    assert P.reconcile(10_000, one, anchor=30_000, caps=[])["confidence"] == "Low"
+    assert P.reconcile(10_000, one, anchor=11_000, caps=[])["confidence"] == "Medium"
+
+
+def test_fs_mismatch_gates_full_statements():
+    s = _series()
+    fs = {"year": 2025, "currency": "KRW", "cur": {"revenue": s[-1]["revenue"]}}
+    assert P.fs_mismatch(fs, s) is None
+    assert "USD" in P.fs_mismatch({**fs, "currency": "USD"}, s)
+    assert "doanh thu" in P.fs_mismatch({**fs, "cur": {"revenue": s[-1]["revenue"] * 0.135}}, s)
+    assert P.fs_mismatch(None, s) is None
+
+
+def test_prepare_assess_is_the_single_valuation_path(monkeypatch):
+    """prepare() dựng đúng những gì evaluate() cần; assess() = prepare + evaluate — trang nào gọi cũng ra một số."""
+    s = _series()
+    r = _row(s, price=s[-1]["bps"] * 1.2)
+    peers = [{"ticker": t, "per": pe, "pbr": pb} for t, pe, pb in (("a", 10, 1.0), ("b", 12, 1.2), ("c", 14, 1.4))]
+    ctx = P.assess("000001", r, {"annual": [], "quarter": []}, A, peers, 1.0, series=s, today=dt.date(2026, 11, 9))
+    # cùng kết quả với cách ghép tay từng bước
+    row = dict(r, beta=1.0)
+    idn = P.identify(row)
+    dq = P.data_quality(row, s, [], 1.0, today=dt.date(2026, 11, 9))
+    drv = P.default_drivers(s, row, A, years=5)
+    drv[0].pop("_basis", None)
+    E = P.evaluate({"row": row, "series": s, "quarters": [], "extras": {}, "peers": peers, "ticker": "000001"},
+                   A, drv, idn, dq, None)
+    assert ctx["rec"]["fair"] == pytest.approx(E["rec"]["fair"]) and ctx["rec"]["confidence"] == E["rec"]["confidence"]
+    assert ctx["drivers"] == drv and ctx["D"]["peers"] is peers
+    # BCTC đầy đủ không cùng đơn vị → không vào FCFF, có ⚠️ trong bảng kiểm tra; ngành tài chính thì không xét
+    fs_usd = {"year": 2025, "currency": "USD", "fs_div": "CFS", "cur": {"revenue": 1.0}, "prev": {}}
+    c2 = P.prepare("000001", r, {}, A, peers, 1.0, series=s, fs_full=fs_usd, today=dt.date(2026, 11, 9))
+    assert c2["D"]["fs_full"] is None and c2["fs_note"]
+    assert any("FCFF" in c["Kiểm tra"] and c["Kết quả"] == P.WARN for c in c2["dq"]["checks"])
+    bank = dict(r, industry_kr="은행")
+    c3 = P.prepare("000001", bank, {}, A, peers, 1.0, series=s, fs_full=fs_usd, today=dt.date(2026, 11, 9))
+    assert c3["fs_note"] is None
+
+
+def test_industry_peers_cache_is_per_run_and_skips_failures(monkeypatch):
+    calls = []
+
+    def ranked(ik):
+        calls.append(ik)
+        return None if ik == "lỗi" else ["000001", "000002", "000003"]
+    monkeypatch.setattr(P, "_industry_ranked", ranked)
+    cache = {}
+    assert P.industry_peers("식품", "000002", 2, cache=cache) == ["000001", "000003"]
+    assert P.industry_peers("식품", "000001", 2, cache=cache) == ["000002", "000003"]
+    assert calls == ["식품"]                                           # ngành chỉ gọi một lần trong một lần chạy
+    assert P.industry_peers("lỗi", None, 2, cache=cache) == [] and "lỗi" not in cache
+
+
+def test_share_basis_ignores_periods_with_large_rounding_error_and_never_double_counts_minorities():
+    import financials as F
+    # quý LN cổ đông mẹ 3억 (làm tròn từ 3,4억), EPS 113 → số cp suy ra lệch 12% → bỏ, dùng năm
+    reals = [{"period": "202512", "is_consensus": False, "net_profit": 100.0, "ctrl_net": 60.0, "eps": 2000.0}]
+    q = [{"period": "202606", "is_consensus": False, "net_profit": 5.0, "ctrl_net": 3.0, "eps": 113.0}]
+    assert F.share_basis(reals, q, None, None)["source"] == "năm 2025"
+    assert F.share_basis(reals, q, None, None)["shares"] == pytest.approx(60e8 / 2000)      # theo LN cổ đông MẸ
+    # không kỳ nào đủ chính xác → số cp niêm yết; KHÔNG lùi về LN hợp nhất ÷ EPS (phồng theo cổ đông thiểu số)
+    tiny = [{"period": "202512", "is_consensus": False, "net_profit": 10.0, "ctrl_net": 6.0, "eps": 60.0}]
+    sb = F.share_basis(tiny, [], market_cap=1e7 * 5_000, price=5_000)
+    assert sb["source"] == "vốn hóa ÷ giá" and sb["shares"] == pytest.approx(1e7)
+    # năm mới nhất chỉ THIẾU số cổ đông mẹ (không phải trái dấu) → dùng tỷ lệ của năm gần nhất có số, vẫn tin được
+    ys = [{"period": "202412", "is_consensus": False, "net_profit": 100.0, "ctrl_net": 95.0, "eps": 950.0},
+          {"period": "202512", "is_consensus": False, "net_profit": 120.0, "ctrl_net": None, "eps": None}]
+    pr = F.parent_ratio(ys)
+    assert pr["reliable"] and pr["rest"] == pytest.approx(0.95)
+

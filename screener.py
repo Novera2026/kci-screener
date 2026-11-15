@@ -668,27 +668,29 @@ def fetch_kgb10y_detail() -> dict:
     bình THÁNG và trễ 1–2 tháng (11/2026: FRED còn tháng 9 = 4,454% trong khi thị trường 3,87% → Ke cao hơn thực tế
     0,58 điểm, giá trị hợp lý bị đánh thấp ~11%). Lỗi cả hai → {}."""
     import requests
-    try:
-        j = requests.get("https://api.stock.naver.com/marketindex/bond/KR10YT=RR",
-                         headers={"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"},
-                         timeout=10).json()
-        v = float(str(j.get("closePrice")).replace(",", ""))
-        if 0.0 < v < 20.0:
-            out = {"value": v / 100.0, "source": "Naver 국고채 10년 (thời gian thực)",
-                   "asof": str(j.get("localTradedAt") or "")[:16].replace("T", " ")}
-            RF_LAST.clear(); RF_LAST.update(out)
-            return out
-    except Exception:
-        pass
+    import time as _time
+    for attempt in range(2):                         # thử lại 1 lần trước khi coi là lỗi nguồn
+        try:
+            j = requests.get("https://api.stock.naver.com/marketindex/bond/KR10YT=RR",
+                             headers={"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"},
+                             timeout=10).json()
+            v = float(str(j.get("closePrice")).replace(",", ""))
+            if 0.0 < v < 20.0:
+                out = {"value": v / 100.0, "source": "Naver 국고채 10년 (thời gian thực)",
+                       "asof": str(j.get("localTradedAt") or "")[:16].replace("T", " "), "live": True}
+                RF_LAST.clear(); RF_LAST.update(out)
+                return dict(out)
+        except Exception:
+            pass
+        if attempt == 0:
+            _time.sleep(0.6)
     try:
         r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=IRLTLT01KRM156N", timeout=10)
         r.raise_for_status()
         vals = [ln.split(",") for ln in r.text.strip().splitlines()[1:]]
         last = [v for v in vals if len(v) == 2 and v[1] not in (".", "")][-1]
-        out = {"value": float(last[1]) / 100.0, "source": "FRED (trung bình tháng, có độ trễ)",
-               "asof": last[0][:7]}
-        RF_LAST.clear(); RF_LAST.update(out)
-        return out
+        return {"value": float(last[1]) / 100.0, "source": "FRED (trung bình tháng, có độ trễ)",
+                "asof": last[0][:7], "live": False}
     except Exception:
         return {}
 
@@ -698,20 +700,53 @@ def fetch_kgb10y() -> Optional[float]:
     return fetch_kgb10y_detail().get("value")
 
 
+RF_HARD_DEFAULT = 0.032
+
+
+def rf_for_valuation() -> dict:
+    """Rf để ĐỊNH GIÁ kèm tình trạng nguồn: {value, source, asof, live, note}.
+
+    live = True chỉ khi vừa lấy được từ nguồn thời gian thực (Naver). Mọi trường hợp khác vẫn trả một giá trị để tính,
+    nhưng live = False để data_quality gắn ❌ (kết quả không được quá Low) — trước 15/11/2026 App lặng lẽ dùng 3,2% cố
+    định (thực tế 3,99% → KB +12%, KT&G +15%). Thứ tự dự phòng: lần lấy Naver gần nhất của chính tiến trình này (ghi rõ
+    thời điểm) → FRED (trung bình tháng, trễ 1–2 tháng) → 3,2% cố định."""
+    last_live = dict(RF_LAST) if RF_LAST.get("live") else None
+    d = fetch_kgb10y_detail()
+    for x in (d, last_live):          # mọi trang dùng CÙNG một Rf: làm tròn 0,01 điểm % như ô nhập ở giao diện
+        if x and x.get("value"):
+            x["value"] = round(x["value"], 4)
+    if d.get("live"):
+        return {**d, "note": ""}
+    if last_live:
+        return {**last_live, "live": False,
+                "note": f"Không lấy được Rf lúc này — dùng lần lấy gần nhất {last_live['value'] * 100:.2f}% "
+                        f"(lúc {last_live.get('asof') or '?'})"}
+    if d.get("value"):
+        return {**d, "live": False,
+                "note": f"Nguồn thời gian thực lỗi — dùng FRED {d['value'] * 100:.2f}% (trung bình tháng {d.get('asof')}, "
+                        "trễ 1–2 tháng)"}
+    return {"value": RF_HARD_DEFAULT, "source": "mặc định cố định", "asof": "", "live": False,
+            "note": f"Không lấy được Rf từ nguồn nào — dùng mặc định {RF_HARD_DEFAULT * 100:.1f}%"}
+
+
 def fetch_weekly_closes(symbol: str) -> list[float]:
     """Giá đóng cửa TUẦN ~1.5 năm từ Naver chart (symbol mã hoặc 'KOSPI'). [] nếu lỗi."""
-    try:
-        import requests
-        import json as _json
-        s, e = _last_n_days(540)
-        u = (f"https://api.finance.naver.com/siseJson.naver?symbol={symbol}"
-             f"&requestType=1&startTime={s}&endTime={e}&timeframe=week")
-        r = requests.get(u, headers={"User-Agent": "Mozilla/5.0",
-                                     "Referer": "https://finance.naver.com/"}, timeout=10)
-        rows = _json.loads(r.text.replace("'", '"'))
-        return [float(x[4]) for x in rows[1:] if x and x[4] not in (None, "")]
-    except Exception:
-        return []
+    import requests
+    import json as _json
+    import time as _time
+    s, e = _last_n_days(540)
+    u = (f"https://api.finance.naver.com/siseJson.naver?symbol={symbol}"
+         f"&requestType=1&startTime={s}&endTime={e}&timeframe=week")
+    for attempt in range(2):                         # lỗi mạng → thử lại 1 lần (thiếu beta làm Ke nhảy ~1,5 điểm %)
+        try:
+            r = requests.get(u, headers={"User-Agent": "Mozilla/5.0",
+                                         "Referer": "https://finance.naver.com/"}, timeout=10)
+            rows = _json.loads(r.text.replace("'", '"'))
+            return [float(x[4]) for x in rows[1:] if x and x[4] not in (None, "")]
+        except Exception:
+            if attempt == 0:
+                _time.sleep(0.5)
+    return []
 
 
 def beta_vs_market(stock_closes: list[float], market_closes: list[float],

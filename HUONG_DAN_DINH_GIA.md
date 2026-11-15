@@ -96,11 +96,12 @@ Trang riêng cho **1 mã**, đi theo thứ tự (logic ở `pipeline.py`):
    Chỉ số quý thực công bố mới nới được dải năm 1. Vi phạm → RIM/DDM tường minh bị loại khỏi kết luận.
 5. **Chi phí vốn** — Rf, β (Blume), ERP, Ke, Kd, WACC (nợ vay DART).
 6. **Định giá** — lõi KCI (như bảng chính) + **RIM tường minh** và **DDM tường minh** trên dự phóng + P/E, P/B × trung vị
-   peer (top vốn hóa cùng ngành KRX, bỏ chính mã) + FCFF (DART).
+   peer (bộ đối thủ chuẩn: gợi ý Naver ∪ top vốn hóa cùng ngành KRX, bỏ chính mã) + FCFF (DART).
 
 **Kết luận:** mỗi mô hình phải nằm trong 0,4–2,5× giá và 0,25–4× phép neo peer. Giá trị hợp lý = trung vị các mô
 hình **chính** qua cổng; khoảng = min–max mọi mô hình qua cổng. **High** chỉ khi ≥ 2 mô hình chính lệch nhau ≤ ±20%
-và nằm trong 0,67–1,5× phép neo peer. Tải báo cáo `.md` và bảng tính `.xlsx` ở tab cuối.
+**và có** phép neo peer, giá trị trong 0,67–1,5× phép neo. Chỉ một mô hình chính qua cổng → **Low**, trừ khi phép neo
+peer xác nhận (→ Medium). (Quy tắc siết ngày 15/11/2026 — xem mục cuối.) Tải báo cáo `.md` và bảng tính `.xlsx` ở tab cuối.
 
 ### Giai đoạn 2 (10/11/2026): kịch bản, độ nhạy, football field, nhật ký, báo cáo in PDF
 
@@ -246,7 +247,29 @@ Rf cũ cao hơn thực tế 0,58 điểm, làm giá trị hợp lý trung vị *
 
 Giờ cột **Giá trị hợp lý / Chênh % / Độ tin cậy / Trạng thái** là kết luận của **quy trình định giá** (cùng công thức
 trang 🧮, IC +0,106), với đối thủ = top 8 vốn hóa cùng ngành, lấy giá mới mỗi lần chạy. Kết quả: 26/30 mã công bố
-(trước 22). Lõi KCI vẫn hiện ở cột "tham khảo".
+(trước 22). Lõi KCI vẫn hiện ở cột "tham khảo". (Từ 15/11/2026 đối thủ là **bộ chuẩn của trang 🧮** — xem mục cuối.)
 
 **Còn lại, chưa đổi:** "DCF earnings" dùng tăng trưởng 8%/năm × 5 năm cho mọi mã. Đây là số tự đặt, nhưng nằm trong lõi
 của quy trình đã backtest, nên muốn đổi phải backtest trước.
+
+---
+
+## Rà soát 15/11/2026 — đợt 1: sửa các lỗi làm sai con số
+
+Chi tiết và bằng chứng: `RA_SOAT_2026-11-15.md`. Tóm tắt những gì đã đổi trong cách tính:
+
+| Việc | Trước | Nay |
+|---|---|---|
+| **Một giá trị hợp lý cho mọi trang** | Mỗi trang tự dựng bộ đối thủ → Samsung ra 183.820 / 147.796 / 90.690 / 119.277 tùy trang | Mọi trang gọi `pipeline.prepare()` → `evaluate()` với **bộ đối thủ chuẩn** (`peers.domestic_candidates`: gợi ý Naver ∪ top 12 vốn hóa cùng ngành KRX). "Chi tiết 1 mã" hiện kết luận của quy trình; lõi KCI chỉ là tham khảo |
+| **Số cổ phiếu của dự phóng** | LN hợp nhất năm trước ÷ EPS năm trước, dùng cho mọi năm | LN cổ đông mẹ ÷ EPS của **quý thực gần nhất** (`financials.share_basis`). Đổi > 10% so với BCTC năm → ⚠️; ngoài 0,5–1,5× → ❌ chặn mô hình dự phóng |
+| **EPS dự phóng** | LN hợp nhất × tỷ lệ cổ đông mẹ ngầm định của năm trước | LN hợp nhất × tỷ lệ cổ đông mẹ theo các **quý đã công bố** (`financials.parent_ratio`); tỷ lệ trái dấu / ngoài 0,05–1,5 → ❌ chặn mô hình dự phóng |
+| **DART ↔ Naver** | DART ghi đè vô điều kiện; lỗi bị nuốt | Báo cáo không phải KRW → không dùng DART. Năm gần nhất lệch (doanh thu ngoài ±10%, LN ngoài 0,8–1,25×) → ❌ chặn mô hình dự phóng. Năm cũ lệch > 5% → giữ số Naver (đã điều chỉnh hồi tố), ⚠️ |
+| **Đọc tài khoản DART** | Theo tên dòng | Mã tài khoản chuẩn → tên (đúng loại báo cáo) → tên (bất kỳ). Nợ vay đọc theo **tên dòng** (차입금, 사채…) |
+| **Lỗi nguồn dữ liệu** | DART lỗi → lặng lẽ dùng 3 năm Naver hoặc báo cáo riêng lẻ (lưu vĩnh viễn); thiếu beta → β = 1; thiếu Rf → 3,2% | Thử lại, giãn nhịp, ngắt mạch khi DART chặn. Lỗi → ❌ ở bảng kiểm tra số liệu (trần **Low**) và hiện cảnh báo; không lưu cache sau lỗi; chỉ lùi sang báo cáo riêng lẻ khi DART xác nhận không có bản hợp nhất |
+| **Cầu nối FCFF / EV-EBIT** | Chia cho số cp thường; thiếu nợ vay; bỏ công ty liên kết | Chia cho số cp cơ sở EPS (gồm ưu đãi); cộng giá trị sổ sách công ty liên kết khi lãi của chúng nằm **ngoài** LN hoạt động (kiểm bằng số) |
+| **Độ tin cậy** | High không cần phép neo peer; một mô hình chính vẫn Medium | High cần phép neo peer; một mô hình chính → Low (Medium nếu phép neo xác nhận) |
+| **Bóc tách quý** | Q4 = năm − 9 tháng kể cả khi báo cáo năm đã điều chỉnh hồi tố | Nhận diện điều chỉnh hồi tố qua báo cáo quý năm sau; không tách được thì để trống và ghi chú |
+
+Backtest point-in-time 2021–25 sau thay đổi: IC +0,123 (78 mã, t 3,1) / +0,095 (top 200, t 1,9) — không đổi đáng kể so với
+trước (+0,117 / +0,094): các sửa đổi này làm con số **đúng và nhất quán** hơn, không làm tăng sức dự báo.
+

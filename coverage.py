@@ -113,6 +113,9 @@ def assess_coverage(ticker: str, sector: Optional[str] = None) -> dict:
         note = ("Gần như không có dữ liệu lịch sử → chỉ định giá tương đối theo peer + "
                 "số trong bản cáo bạch IPO. Nêu rõ là ước lượng sơ bộ. Trần Low.")
 
+    if dart.get("coverage") == "error":     # DART lỗi kết nối: chỉ đánh giá được theo Naver → tạm chặn Low, nói rõ
+        cap = "Low"
+        note += " ⚠️ " + str(dart.get("note") or "DART lỗi kết nối.")
     return {
         "ticker": ticker, "real_years": real_years,
         "source_mix": " + ".join(source_mix) or "không có",

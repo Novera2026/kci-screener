@@ -21,6 +21,7 @@ import valuation as V
 S2C_BAND = (0.3, 5.0)          # doanh thu / vốn đầu tư — kẹp để một năm méo không làm hỏng tái đầu tư
 RONIC_CAP = 0.30               # lợi suất vốn đầu tư mới dài hạn tối đa
 EV_EBIT_BAND = (0.0, 40.0)     # bội số đối thủ ngoài dải bị loại khỏi trung vị
+ASSOC_TOL = 0.35               # LNTT − LN HĐ − tài chính ròng trong ±35% lãi liên kết → lãi liên kết nằm ngoài LN HĐ
 
 
 def _n(x):
@@ -67,11 +68,14 @@ def quarter_forecast(quarters: list[dict], fc: list[dict], shares: Optional[floa
                for k, k2, k3 in (("rev", "Doanh thu (억)", "revenue"), ("op", "LN HĐ (억)", "op_profit"),
                                  ("np", "LN ròng (억)", "net_profit"))}
         wsum = sum(w[m] for m in rest)
+        # EPS quý dự phóng: LN ròng (hợp nhất) × tỷ lệ cổ đông mẹ của chính năm đó trong bảng dự phóng năm
+        np_y, par_y = _n(f.get("LN ròng (억)")), _n(f.get("LN cổ đông mẹ (억)"))
+        rho = (par_y / np_y) if (par_y is not None and np_y) else 1.0
         for m in rest:
             s = w[m] / wsum
             out.append({"Quý": f"{y}.{m}", "Loại": "Dự phóng", "DT (억)": rem["rev"] * s,
                         "LN HĐ (억)": rem["op"] * s if f.get("LN HĐ (억)") is not None else None,
-                        "LN ròng (억)": rem["np"] * s, "EPS": rem["np"] * s * 1e8 / shares})
+                        "LN ròng (억)": rem["np"] * s, "EPS": rem["np"] * s * rho * 1e8 / shares})
     return out
 
 
@@ -87,14 +91,34 @@ def invested_capital(c: dict) -> Optional[float]:
     return ic if ic > 0 else None
 
 
+def associates_outside_ebit(c: dict) -> bool:
+    """Lãi công ty liên kết có nằm NGOÀI LN hoạt động không (kiểm bằng số của chính báo cáo).
+
+    x = LN trước thuế − LN HĐ − tài chính ròng. Lãi liên kết nằm dưới LN HĐ → x ≈ lãi liên kết (+ khoản khác);
+    đã nằm trong LN HĐ (công ty holding ghi vào doanh thu: LG Corp, SK Square) → x ≈ khoản khác. Kết luận 'ngoài'
+    chỉ khi x nằm trong ±35% lãi liên kết (Hyundai Mobis: x 15.068 vs 14.000; Kia 4.409 vs 4.150; LG Corp 3.511 vs
+    1.339 → không kết luận). Thiếu số liệu / không rõ → False: không cộng (thận trọng — giá trị thấp hơn)."""
+    eq_inc, pre, op = _n(c.get("equity_income")), _n(c.get("pretax")), _n(c.get("op"))
+    if eq_inc is None or pre is None or op is None or eq_inc == 0:
+        return False
+    # chi phí tài chính có DN ghi số âm, có DN ghi số dương → luôn trừ theo trị tuyệt đối
+    x = pre - op - (abs(_n(c.get("fin_income")) or 0.0) - abs(_n(c.get("fin_cost")) or 0.0))
+    return abs(x - eq_inc) <= ASSOC_TOL * abs(eq_inc)
+
+
 def bridge(fs: dict) -> dict:
-    """Cầu nối EV → vốn chủ từ BCTC DART (억): nợ vay, tiền, nợ ròng, lợi ích cổ đông thiểu số."""
+    """Cầu nối EV → vốn chủ từ BCTC DART (억): nợ vay, tiền, nợ ròng, lợi ích cổ đông thiểu số, công ty liên kết.
+
+    associates = giá trị SỔ SÁCH các khoản đầu tư theo phương pháp vốn chủ, chỉ khi lãi của chúng nằm NGOÀI LN hoạt
+    động (associates_outside_ebit): khi đó EBIT/FCFF không chứa phần giá trị này nên phải cộng vào vốn chủ (và trừ
+    khỏi EV khi tính bội số EV/EBIT). Trước 15/11/2026 bỏ sót hoàn toàn: Hyundai Mobis 74% vốn hóa, Kia 68%."""
     c = fs["cur"]
     debt = _n(c.get("borrowings")) or 0.0
     cash = (_n(c.get("cash")) or 0.0) + (_n(c.get("st_deposits")) or 0.0)
     eq, eqp = _n(c.get("equity")), _n(c.get("equity_parent"))
     minority = max((eq - eqp), 0.0) if (eq is not None and eqp is not None) else 0.0
-    return {"debt": debt, "cash": cash, "net_debt": debt - cash, "minority": minority}
+    assoc = (_n(c.get("equity_method")) or 0.0) if associates_outside_ebit(c) else 0.0
+    return {"debt": debt, "cash": cash, "net_debt": debt - cash, "minority": minority, "associates": max(assoc, 0.0)}
 
 
 def wacc_of(ke: float, rf: float, market_cap_eok: float, debt_eok: float, tax: float) -> float:
@@ -150,13 +174,15 @@ def fcff_dcf(fc: list[dict], fs: dict, ke: float, rf: float, g: float, market_ca
     tv = fcff_tv / (wacc - g)
     pv_tv = tv / (1 + wacc) ** n
     ev = pv_sum + pv_tv
-    equity = ev - br["net_debt"] - br["minority"]
+    equity = ev - br["net_debt"] - br["minority"] + br["associates"]
     value = equity * 1e8 / shares if equity > 0 else None
     return {"value": value, "rows": rows,
             "bridge": [{"Khoản mục": k, "억원": v} for k, v in (
                 ("Σ PV FCFF", pv_sum), ("PV giá trị cuối kỳ", pv_tv), ("= Giá trị doanh nghiệp (EV)", ev),
                 ("− Nợ vay", br["debt"]), ("+ Tiền & tiền gửi ngắn hạn", br["cash"]),
-                ("− Lợi ích cổ đông thiểu số", br["minority"]), ("= Giá trị vốn chủ", equity))],
+                ("− Lợi ích cổ đông thiểu số", br["minority"]),
+                ("+ Đầu tư công ty liên kết (sổ sách, lãi nằm ngoài LN HĐ)", br["associates"]),
+                ("= Giá trị vốn chủ", equity)) if not (k.startswith("+ Đầu tư") and not v)],
             "assumptions": {"WACC %": wacc * 100, "Ke %": ke * 100, "g dài hạn %": g * 100, "Thuế %": tax * 100,
                             "Doanh thu / vốn đầu tư": s2c, "Vốn đầu tư gốc (억)": ic0,
                             "RONIC dài hạn %": ronic * 100, "Tỷ lệ tái đầu tư cuối kỳ %": reinv_rate * 100,
@@ -170,7 +196,7 @@ def ev_ebit_of(market_cap: Optional[float], ebit_eok: Optional[float], fs: Optio
     if not market_cap or not ebit_eok or ebit_eok <= 0 or not fs:
         return None
     br = bridge(fs)
-    ev = market_cap / 1e8 + br["net_debt"] + br["minority"]
+    ev = market_cap / 1e8 + br["net_debt"] + br["minority"] - br["associates"]     # EV của phần tạo ra EBIT
     return ev / ebit_eok if ev > 0 else None
 
 
@@ -197,9 +223,10 @@ def ev_ebit_ttm(ebit_ttm: Optional[float], fs: dict, peer_multiples: list[dict],
         return None
     br = bridge(fs)
     ev = med * ebit1
-    equity = ev - br["net_debt"] - br["minority"]
+    equity = ev - br["net_debt"] - br["minority"] + br["associates"]
     return {"value": equity * 1e8 / shares if equity > 0 else None, "median": med, "n": len(ok),
             "rows": [{"Khoản mục": k, "Giá trị": v} for k, v in (
                 ("EBIT 4 quý gần nhất (억)", ebit1), ("× EV/EBIT (4 quý) trung vị đối thủ", med),
                 ("= EV (억)", ev), ("− Nợ ròng (억)", br["net_debt"]), ("− Thiểu số (억)", br["minority"]),
-                ("= Vốn chủ (억)", equity))]}
+                ("+ Công ty liên kết, sổ sách (억)", br["associates"]),
+                ("= Vốn chủ (억)", equity)) if not (k.startswith("+ Công ty liên kết") and not v)]}

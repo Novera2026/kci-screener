@@ -21,8 +21,8 @@ import math
 from typing import Optional
 
 import valuation as V
-from financials import (_shares_estimate, _trend_value, _ytd_run_rate, conversion_ratio, one_off_core,
-                        project_forecast)
+from financials import (PARENT_RATIO_BAND, _has_parent_profit, _trend_value, _ytd_run_rate, conversion_ratio,
+                        one_off_core, parent_ratio, project_forecast, share_basis)
 
 # ---------------------------------------------------------------------------- hằng số cổng
 FC_GROWTH_BAND = (-0.30, 0.40)    # tăng trưởng doanh thu 1 năm ngoài dải → ❌
@@ -70,10 +70,14 @@ def _reals(series: list[dict]) -> list[dict]:
 
 
 def data_quality(row: dict, series: list[dict], quarters: Optional[list[dict]] = None,
-                 beta: Optional[float] = None, today: Optional[_dt.date] = None) -> dict:
-    """Kiểm dữ liệu bằng số. Trả {checks, cap, n_fail, n_warn}.
+                 beta: Optional[float] = None, today: Optional[_dt.date] = None,
+                 feeds: Optional[dict] = None) -> dict:
+    """Kiểm dữ liệu bằng số. Trả {checks, cap, n_fail, n_warn, share_break, parent_break, source_break}.
 
-    cap: trần độ tin cậy — có ❌ → 'Low'; ≥2 ⚠️ → 'Medium'; còn lại None (không chặn)."""
+    cap: trần độ tin cậy — có ❌ → 'Low'; ≥2 ⚠️ → 'Medium'; còn lại None (không chặn).
+    feeds: tình trạng các nguồn số liệu thị trường của lần chạy, vd {"rf": {"ok": False, "note": "..."}} — nguồn lỗi
+    là ❌ (kết quả vẫn tính trên giá trị dự phòng nhưng không được quá Low). Lỗi DART / lệch DART–Naver đọc từ `_src`
+    của chuỗi năm (financials._merge_dart)."""
     today = today or _dt.date.today()
     reals = _reals(series)
     checks: list[dict] = []
@@ -85,8 +89,31 @@ def data_quality(row: dict, series: list[dict], quarters: Optional[list[dict]] =
                          OK if n >= 5 else WARN if n >= 3 else FAIL,
                          "≥5 năm mới trọn một chu kỳ" if n < 5 else ""))
     dart_n = sum(1 for c in reals if c.get("_dart"))
-    checks.append(_check("Số năm có số gốc DART", dart_n, OK if dart_n >= 3 else WARN,
-                         "" if dart_n >= 3 else "Thiếu DART → dùng số Naver (đã làm tròn, 3–4 năm)"))
+    src = (reals[-1].get("_src") if reals else None) or {}
+    src_state = src.get("dart")
+    source_break = src_state == "mismatch"
+    if src_state == "error":
+        checks.append(_check("Số năm có số gốc DART", dart_n, FAIL,
+                             f"DART không trả đủ dữ liệu ({src.get('note')}) — chuỗi năm KHÔNG ĐẦY ĐỦ, kết quả sẽ đổi khi "
+                             "DART trả lời lại. Thử lại sau ít phút"))
+    elif src_state == "mismatch":
+        checks.append(_check("Đối chiếu DART ↔ Naver", src.get("note"), FAIL,
+                             "Hai nguồn không khớp ở năm gần nhất (đơn vị tiền, định nghĩa doanh thu hoặc đọc sai tài "
+                             "khoản) → chỉ dùng số Naver và chặn mô hình dựa trên dự phóng"))
+    elif src_state == "currency":
+        checks.append(_check("Số năm có số gốc DART", 0, WARN, src.get("note")))
+    elif src_state == "cached":
+        checks.append(_check("Số năm có số gốc DART", dart_n, WARN, src.get("note")))
+    else:
+        checks.append(_check("Số năm có số gốc DART", dart_n, OK if dart_n >= 3 else WARN,
+                             "" if dart_n >= 3 else "Thiếu DART → dùng số Naver (đã làm tròn, 3–4 năm)"))
+    restated = [g for g in (src.get("gaps") or []) if g["field"] == "revenue" and not source_break
+                and not (g["ratio"] and 0.9 <= g["ratio"] <= 1.1)]
+    if restated:
+        checks.append(_check("Điều chỉnh hồi tố / đổi phạm vi hợp nhất",
+                             "; ".join(f"{g['year']}: DART gốc {g['dart']:,.0f} → {g['naver']:,.0f}억" for g in restated),
+                             WARN, "Dùng số đã điều chỉnh (Naver) cho các năm này; các năm trước đó khác phạm vi nên tăng "
+                                   "trưởng và biên lịch sử kém chắc"))
     checks.append(_check("Giá & vốn hóa", f"{price:,.0f}" if price else "—",
                          OK if (price and mc) else FAIL,
                          "" if (price and mc) else "Không có giá → không kiểm được vùng tin cậy"))
@@ -95,26 +122,58 @@ def data_quality(row: dict, series: list[dict], quarters: Optional[list[dict]] =
                          "" if (bps and bps > 0) else "Vốn chủ âm/thiếu → mô hình sổ sách không dùng được"))
 
     last = reals[-1] if reals else {}
-    shares = (mc / price) if (mc and price) else None
-    # EPS × số cp so với LN công ty mẹ (hoặc LN thuần) năm gần nhất
-    np_ref = _num(last.get("ctrl_net")) if last.get("ctrl_net") is not None else _num(last.get("net_profit"))
     eps_last = _num(last.get("eps")) or eps
+    # Số cổ phiếu của dự phóng = cơ sở EPS mới nhất (financials.share_basis). So chéo với (a) cơ sở của BCTC năm gần
+    # nhất và (b) số cp niêm yết (vốn hóa ÷ giá). Ngoài [0,5; 1,5]: sáp nhập / tách / niêm yết mới → BPS đầu kỳ và lịch
+    # sử không còn cùng gốc với số cp hiện tại (HD건설기계 2,7× sau sáp nhập 2026) → chặn mô hình dựa trên dự phóng mỗi
+    # cổ phiếu. Trong dải nhưng đã đổi > 10% (Samsung Biologics 0,69×, KT&G 0,88×): EPS dự phóng dùng số cp mới, chỉ ⚠️.
+    sb = share_basis(reals, quarters, mc, price)
+    s_now, s_prev, listed = sb["shares"], sb["prev"], sb["listed"]
     share_break = False
-    if shares and eps_last and np_ref and np_ref > 0 and eps_last > 0:
-        r = eps_last * shares / 1e8 / np_ref
-        # ngoài [0,5; 1,5]: số cp hiện tại ≠ số cp của BCTC năm (sáp nhập, tách/niêm yết mới, phát hành lớn) →
-        # mọi số MỖI CỔ PHIẾU của dự phóng sai theo đúng tỷ lệ này (HD건설기계 2,69× sau sáp nhập 2026 → RIM 5,3× giá)
-        share_break = not SHARE_BREAK_BAND[0] <= r <= SHARE_BREAK_BAND[1]
-        checks.append(_check("EPS × số cp ÷ LN năm gần nhất", f"{r:.2f}×",
-                             OK if 0.7 <= r <= 1.3 else FAIL if share_break else WARN,
-                             "" if 0.7 <= r <= 1.3 else
-                             "Số cp đổi mạnh so với BCTC năm (sáp nhập/tách/phát hành) — chặn mô hình dựa trên dự phóng "
-                             "mỗi cổ phiếu" if share_break else
-                             "Lệch >30%: số cp thay đổi (phát hành/mua lại) hoặc EPS và LN khác kỳ"))
-    # BPS × số cp so với VCSH (DART — có cả cổ đông thiểu số nên chỉ cảnh báo)
+    if s_now and listed:
+        r_list = listed / s_now
+        r_prev = (s_now / s_prev) if s_prev else None
+        lo_b, hi_b = SHARE_BREAK_BAND
+        share_break = (not lo_b <= r_list <= hi_b) or (r_prev is not None and not lo_b <= r_prev <= hi_b)
+        moved = r_prev is not None and not 0.9 <= r_prev <= 1.1
+        off_list = not 0.7 <= r_list <= 1.3
+        val = (f"{s_now / 1e6:,.1f} triệu ({sb['source']})"
+               + (f" · năm trước {s_prev / 1e6:,.1f}" if (s_prev and abs(r_prev - 1) > 0.005) else "")
+               + f" · niêm yết {listed / 1e6:,.1f}")
+        note = ("Số cp đổi mạnh so với BCTC năm (sáp nhập/tách/phát hành) — chặn mô hình dựa trên dự phóng mỗi cổ phiếu"
+                if share_break else
+                f"Số cp đã đổi {(r_prev - 1) * 100:+.0f}% so với BCTC năm (mua lại/hủy/phát hành) — EPS dự phóng tính trên "
+                "số cp mới" if moved else
+                "Số cp niêm yết lệch > 30% so với cơ sở EPS (cổ phiếu ưu đãi / cổ phiếu quỹ) — số mỗi cổ phiếu tính trên "
+                "cơ sở EPS" if off_list else "")
+        checks.append(_check("Số cổ phiếu (cơ sở EPS)", val, FAIL if share_break else WARN if (moved or off_list) else OK,
+                             note))
+    # Tỷ lệ LN cổ đông mẹ ÷ LN hợp nhất dùng để đổi LN dự phóng → EPS (chỉ khi dữ liệu có tách cổ đông mẹ)
+    parent_break = False
+    if _has_parent_profit(reals, quarters):
+        pr = parent_ratio(reals, _ytd_run_rate(reals, quarters))
+        parent_break = not pr["reliable"]
+        dev = (pr["rest"] / pr["last"] - 1) if (pr["reliable"] and pr["last"] and pr["last"] > 0) else None
+        unstable = dev is not None and abs(dev) > 0.25
+        checks.append(_check("LN cổ đông mẹ ÷ LN hợp nhất",
+                             f"{pr['rest']:.2f} ({pr['source']})"
+                             + (f" · năm trước {pr['last']:.2f}" if pr["last"] is not None else ""),
+                             FAIL if parent_break else WARN if unstable else OK,
+                             "LN hợp nhất và LN cổ đông mẹ trái dấu hoặc tỷ lệ ngoài "
+                             f"[{PARENT_RATIO_BAND[0]}; {PARENT_RATIO_BAND[1]}] — không đổi được LN dự phóng sang EPS → chặn "
+                             "mô hình dựa trên dự phóng mỗi cổ phiếu" if parent_break else
+                             "Tỷ lệ đổi > 25% so với năm trước: phần của cổ đông thiểu số biến động, EPS các năm sau kém "
+                             "chắc" if unstable else ""))
+    # BPS × số cp so với VCSH (DART — có cả cổ đông thiểu số nên chỉ cảnh báo). So CÙNG KỲ: BPS cuối năm tài chính ×
+    # số cp cơ sở EPS của chính năm đó ↔ VCSH cuối năm. (BPS ở row là của quý gần nhất: đem so với VCSH cuối năm
+    # trước sẽ báo động giả khi lợi nhuận trong năm lớn — Samsung nửa đầu 2026.) Chuỗi không tách cổ đông mẹ: cách cũ.
     eq = _num(last.get("equity"))
-    if shares and bps and eq and eq > 0:
-        r = bps * shares / 1e8 / eq
+    if _has_parent_profit(reals, quarters):
+        bps_chk, shares = _num(last.get("bps")) or bps, (s_prev or s_now or listed)
+    else:
+        bps_chk, shares = bps, listed
+    if shares and bps_chk and eq and eq > 0:
+        r = bps_chk * shares / 1e8 / eq
         checks.append(_check("BPS × số cp ÷ VCSH", f"{r:.2f}×",
                              OK if 0.6 <= r <= 1.3 else WARN,
                              "" if 0.6 <= r <= 1.3 else "Lệch lớn: cổ đông thiểu số lớn hoặc BPS khác kỳ"))
@@ -153,13 +212,23 @@ def data_quality(row: dict, series: list[dict], quarters: Optional[list[dict]] =
                              WARN if odd else OK,
                              f"LN thuần/LN HĐ lệch xa tỷ lệ thường của mã ({ratio:.2f}) — số công bố giữ nguyên, "
                              "nhưng KHÔNG ngoại suy cho các quý chưa công bố" if odd else ""))
+    # Không có beta riêng → Ke tính với β = 1 (cao hơn ~1,5 điểm % so với β chạm sàn: KT&G −21%, KB −18%). Đó là giả
+    # định thay cho số liệu nên kết quả không được quá Low (trước 15/11/2026 chỉ là ⚠️ và có mã còn LÊN High).
     checks.append(_check("Beta riêng mã (52 tuần)", f"{beta:.2f}" if beta else "—",
-                         OK if beta else WARN, "" if beta else "Dùng β = 1"))
+                         OK if beta else FAIL,
+                         "" if beta else "Không lấy được giá tuần (lỗi mạng hoặc niêm yết < 30 tuần) → dùng β = 1"))
+    for name, f in (feeds or {}).items():
+        if f and not f.get("ok", True):
+            level = f.get("level") or FAIL
+            checks.append(_check({"rf": "Lãi suất phi rủi ro (Rf)"}.get(name, name),
+                                 "không lấy được trực tiếp" if level == FAIL else "không dùng được", level,
+                                 str(f.get("note") or "Đang dùng giá trị dự phòng")))
 
     n_fail = sum(1 for c in checks if c["Kết quả"] == FAIL)
     n_warn = sum(1 for c in checks if c["Kết quả"] == WARN)
     cap = "Low" if n_fail else ("Medium" if n_warn >= 2 else None)
-    return {"checks": checks, "cap": cap, "n_fail": n_fail, "n_warn": n_warn, "share_break": share_break}
+    return {"checks": checks, "cap": cap, "n_fail": n_fail, "n_warn": n_warn, "share_break": share_break,
+            "parent_break": parent_break, "source_break": source_break}
 
 
 # ============================================================================ Bước 3 — phân tích
@@ -305,13 +374,20 @@ def default_drivers(series: list[dict], row: dict, a: V.Assumptions, years: int 
     return out
 
 
-def run_forecast(series: list[dict], row: dict, drivers: list[dict]) -> list[dict]:
-    """Áp giả định → DT, LN, EPS, DPS, BPS, ROE từng năm. EPS = LN × 1e8 / số cp (suy như financials)."""
+def run_forecast(series: list[dict], row: dict, drivers: list[dict],
+                 quarters: Optional[list[dict]] = None) -> list[dict]:
+    """Áp giả định → DT, LN, EPS, DPS, BPS, ROE từng năm.
+
+    EPS = LN ròng (hợp nhất) × tỷ lệ cổ đông mẹ × 1e8 ÷ số cp, với số cp = cơ sở EPS MỚI NHẤT và tỷ lệ cổ đông mẹ theo
+    các quý thực đã công bố (financials.share_basis / parent_ratio — cùng cơ sở với project_forecast). Trước 15/11/2026
+    dùng LN hợp nhất năm trước ÷ EPS năm trước cho mọi năm: sai khi số cp đổi (Samsung Biologics: EPS 2026 dự phóng
+    26.570 trong khi nửa đầu năm đã đạt 19.278) hoặc phần cổ đông thiểu số đổi (SK Inc +39%, Doosan −51%)."""
     reals = _reals(series)
     if not reals or not drivers:
         return []
     mc, price = _num(row.get("market_cap")), _num(row.get("price"))
-    shares = _shares_estimate(reals, mc, price)
+    shares = share_basis(reals, quarters, mc, price)["shares"]
+    rho = parent_ratio(reals, _ytd_run_rate(reals, quarters))
     rev = _num(reals[-1].get("revenue"))
     # B0 = BPS CUỐI NĂM TÀI CHÍNH gần nhất: năm 1 dự phóng là CẢ năm sau đó. BPS Naver ở row là cuối QUÝ gần nhất (đã
     # gồm LN các quý của năm 1) → cộng EPS cả năm lên đó đếm hai lần (005930: 63.997 cuối 2025 vs 86.052 Q2/2026)
@@ -320,7 +396,7 @@ def run_forecast(series: list[dict], row: dict, drivers: list[dict]) -> list[dic
         return []
     conv = conversion_ratio(reals)
     out = []
-    for d in drivers:
+    for i, d in enumerate(drivers):
         g = (_num(d.get("Tăng trưởng DT %")) or 0.0) / 100
         m = (_num(d.get("Biên LN ròng %")) or 0.0) / 100
         po = min(max((_num(d.get("Tỷ lệ cổ tức %")) or 0.0) / 100, 0.0), 1.0)
@@ -329,10 +405,12 @@ def run_forecast(series: list[dict], row: dict, drivers: list[dict]) -> list[dic
         bps_open = bps
         rev = rev * (1 + g)
         np_ = rev * m
-        eps = np_ * 1e8 / shares
+        np_parent = np_ * (rho["y1"] if i == 0 else rho["rest"])
+        eps = np_parent * 1e8 / shares
         dps = max(eps * po, 0.0)
         bps = bps + eps - dps
         out.append({"Năm": d.get("Năm"), "Doanh thu (억)": rev, "LN HĐ (억)": rev * opm, "LN ròng (억)": np_,
+                    "LN cổ đông mẹ (억)": np_parent,
                     "Tăng trưởng DT %": g * 100, "Biên LN HĐ %": opm * 100, "Biên LN ròng %": m * 100,
                     "EPS": eps, "DPS": dps, "BPS đầu kỳ": bps_open, "BPS cuối kỳ": bps,
                     "ROE %": eps / bps_open * 100 if bps_open and bps_open > 0 else None})
@@ -465,8 +543,8 @@ _IND_API = "https://m.stock.naver.com/api/stocks/industry"
 _H = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
 
 
-def industry_peers(industry_kr: str, exclude: Optional[str] = None, n: int = 12) -> list[str]:
-    """Top-n mã cùng ngành KRX (업종 Naver) theo vốn hóa, bỏ ETF và chính mã. [] nếu lỗi mạng."""
+def _industry_ranked(industry_kr: str) -> Optional[list[str]]:
+    """Mọi cổ phiếu của ngành KRX (업종 Naver) xếp vốn hóa giảm dần. None nếu lỗi mạng."""
     import requests
     try:
         groups = requests.get(_IND_API, params={"page": 1, "pageSize": 100}, headers=_H, timeout=10).json()
@@ -483,12 +561,25 @@ def industry_peers(industry_kr: str, exclude: Optional[str] = None, n: int = 12)
                 break
             page += 1
     except Exception:
-        return []
+        return None
     rows = [(str(s.get("itemCode", "")).zfill(6), float(s.get("marketValueRaw") or 0)) for s in stocks
             if s.get("stockEndType") == "stock"]
-    rows = [r for r in rows if r[0] != exclude]
     rows.sort(key=lambda r: -r[1])
-    return [r[0] for r in rows[:n]]
+    return [r[0] for r in rows]
+
+
+def industry_peers(industry_kr: str, exclude: Optional[str] = None, n: int = 12,
+                   cache: Optional[dict] = None) -> list[str]:
+    """Top-n mã cùng ngành KRX (업종 Naver) theo vốn hóa, bỏ ETF và chính mã. [] nếu lỗi mạng.
+    cache: dict của MỘT lần chạy (không giữ qua các lần — thứ hạng vốn hóa là số liệu thị trường) để nhiều mã cùng
+    ngành không gọi lại danh sách ngành."""
+    if cache is not None and industry_kr in cache:
+        ranked = cache[industry_kr]
+    else:
+        ranked = _industry_ranked(industry_kr)
+        if cache is not None and ranked is not None:      # lỗi mạng không được nhớ
+            cache[industry_kr] = ranked
+    return [t for t in (ranked or []) if t != exclude][:n]
 
 
 # ============================================================================ Kết luận
@@ -536,9 +627,13 @@ def reconcile(price: Optional[float], candidates: list[dict], anchor: Optional[f
 
     Mỗi ứng viên qua cổng số (_gate). Giá trị hợp lý = trung vị các mô hình CHÍNH qua cổng;
     khoảng = min–max của mọi ứng viên qua cổng. Không mô hình chính nào qua → không công bố.
-    Độ tin cậy: High chỉ khi ≥2 mô hình chính qua cổng, cùng nằm trong ±20% trung vị VÀ giá trị hợp lý
-    trong [0,67; 1,5]× phép neo peer (nếu có — hai mô hình cùng họ sổ sách đồng ý với nhau chưa đủ);
-    rồi áp các trần (chất lượng dữ liệu, độ tin cậy lõi KCI)."""
+    Độ tin cậy (siết 15/11/2026 — rà soát 200 mã: cả 4 mã High đều KHÔNG có phép neo peer; 46 mã công bố trên một mô
+    hình chính trong khi mô hình kia bị chặn, lệch nhau trung vị 2,3×, mà 41 mã vẫn Medium):
+      • High   : ≥ 2 mô hình chính qua cổng, cùng trong ±20% trung vị VÀ CÓ phép neo peer, giá trị hợp lý trong
+                 [0,67; 1,5]× phép neo (hai mô hình cùng họ sổ sách đồng ý với nhau chưa đủ — cần một phép đo độc lập).
+      • Medium : ≥ 2 mô hình chính qua cổng; hoặc chỉ 1 mô hình chính nhưng phép neo peer xác nhận (cùng dải trên).
+      • Low    : chỉ 1 mô hình chính qua cổng và không có phép neo peer xác nhận.
+    Rồi áp các trần (chất lượng dữ liệu, độ tin cậy lõi KCI)."""
     rows = []
     for c in candidates:
         if c.get("blocked"):
@@ -552,13 +647,13 @@ def reconcile(price: Optional[float], candidates: list[dict], anchor: Optional[f
         return {"fair": None, "low": None, "high": None, "upside": None, "confidence": "Low",
                 "status": "⚪ không công bố — " + unpublished_reason(rows, price), "rows": rows}
     fair = V._median(prim)
-    near_anchor = anchor is None or HIGH_ANCHOR_BAND[0] <= fair / anchor <= HIGH_ANCHOR_BAND[1]
+    near_anchor = bool(anchor) and HIGH_ANCHOR_BAND[0] <= fair / anchor <= HIGH_ANCHOR_BAND[1]
     if len(prim) >= 2 and all(abs(v / fair - 1) <= AGREE_BAND for v in prim) and near_anchor:
         conf = "High"
-    elif len(prim) >= 2:
+    elif len(prim) >= 2 or near_anchor:
         conf = "Medium"
     else:
-        conf = "Medium" if len(allv) >= 2 else "Low"
+        conf = "Low"
     for cap in caps:
         conf = V._cap_conf(conf, cap)
     up = (fair / price - 1) * 100 if price else None
@@ -732,13 +827,21 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
     coc = cost_of_capital(a, _num(row.get("beta")), mc, extras)
     ke, w = coc["ke"], a.persistence
     pm = peer_medians(D.get("peers") or [], exclude=D.get("ticker"))
-    fc = run_forecast(series, row, drivers)
+    fc = run_forecast(series, row, drivers, D.get("quarters"))
     fg = forecast_gates(series, fc, financial=idn["financial"], evidence=evidence)
-    if (dq or {}).get("share_break") and fc:
-        fg = {**fg, "ok": False, "n_fail": fg["n_fail"] + 1,
-              "checks": [c for c in fg["checks"] if c["Kết quả"] != OK]
-              + [_check("Số cổ phiếu", "đổi mạnh so với BCTC năm", FAIL,
-                        "EPS/BPS dự phóng không cùng gốc số cổ phiếu hiện tại")]}
+    per_share = []                 # cổng số của cơ sở mỗi cổ phiếu (data_quality) → chặn mô hình dựa trên dự phóng
+    if (dq or {}).get("share_break"):
+        per_share.append(_check("Số cổ phiếu", "đổi mạnh so với BCTC năm", FAIL,
+                                "EPS/BPS dự phóng không cùng gốc số cổ phiếu hiện tại"))
+    if (dq or {}).get("parent_break"):
+        per_share.append(_check("LN cổ đông mẹ ÷ LN hợp nhất", "không suy được từ số liệu", FAIL,
+                                "LN dự phóng (hợp nhất) không đổi được sang EPS"))
+    if (dq or {}).get("source_break"):
+        per_share.append(_check("Nguồn số liệu", "DART ≠ Naver ở năm gần nhất", FAIL,
+                                "Doanh thu/LN của hai nguồn không khớp — dự phóng không có gốc tin cậy"))
+    if per_share and fc:
+        fg = {**fg, "ok": False, "n_fail": fg["n_fail"] + len(per_share),
+              "checks": [c for c in fg["checks"] if c["Kết quả"] != OK] + per_share}
     r_fwd = dict(row)
     if fc and fg["ok"]:          # dự phóng bị cổng chặn không được nuôi P/E forward → phép neo peer (rà soát 10/11)
         r_fwd["fwd_eps"] = fc[0]["EPS"]
@@ -761,9 +864,11 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
         {"name": "P/B × trung vị peer", "value": base.methods.get("P/B vs median ngành"), "role": "cross"},
     ]
     fs = D.get("fs_full")
-    # EV → vốn chủ MỖI CỔ PHIẾU: số cp thực (vốn hóa ÷ giá). LN/EPS (gồm cổ đông thiểu số) thổi phồng số cp → trừ
-    # thiểu số hai lần (bridge đã trừ) — rà soát 10/11/2026
-    shares = (mc / price) if (mc and price) else (_shares_estimate(reals, mc, price) if reals else None)
+    # EV → vốn chủ MỖI CỔ PHIẾU: chia cho số cp cơ sở EPS mới nhất (LN cổ đông MẸ ÷ EPS — gồm cổ phiếu ưu đãi, không gồm
+    # phần cổ đông thiểu số mà bridge đã trừ). Bản 10/11/2026 chia cho vốn hóa ÷ giá = chỉ cổ phiếu THƯỜNG → giá trị/cp
+    # cao hơn thực ở mã có cổ phiếu ưu đãi (Samsung +15%, Hyundai Motor +31%) — rà soát 15/11/2026
+    shares = (share_basis(reals, D.get("quarters"), mc, price)["shares"] if reals else None) or (
+        (mc / price) if (mc and price) else None)
     fcff_m = evm = None
     if fs and not idn["financial"] and fc and shares and mc:
         import dcf as _dcf
@@ -780,7 +885,7 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
                           "role": "cross"})
     if not fcff_m and extras.get("cfo") is not None and mc and price:
         fcff = V.fcff_value(extras.get("cfo"), extras.get("capex"), extras.get("debt"), extras.get("net_debt"),
-                            mc / price, ke, coc["kd"], coc["tax"], a.g_high, a.years_high, coc["g_term"],
+                            shares or mc / price, ke, coc["kd"], coc["tax"], a.g_high, a.years_high, coc["g_term"],
                             mc / 1e8)
         cands.append({"name": "FCFF-DCF (DART, tăng trưởng phẳng)", "value": fcff, "role": "cross"})
     # mô hình chuyên ngành (sector_models): hàm(coc) → ứng viên, để độ nhạy Ke dịch cả rNPV / EV-GWh
@@ -795,6 +900,82 @@ def evaluate(D: dict, a: V.Assumptions, drivers: list[dict], idn: Optional[dict]
             "fcff": fcff_m, "ev_ebit": evm, "shares": shares,
             "coc": coc, "pm": pm, "fc_model": fc_model["value"] if fc_model else None,
             "fc_model_name": "DDM tường minh" if idn["dividend_model"] else "RIM tường minh"}
+
+
+# ---------------------------------------------------------------------------- MỘT đường định giá cho mọi trang
+# Rà soát 15/11/2026: cùng một mã, cùng lúc, mỗi trang một giá trị hợp lý (Samsung ở giá 209.000: trang 🧮 183.820,
+# bảng Định giá tổng hợp 147.796, Sàng lọc/bot 119.277) vì mỗi trang tự dựng bộ đối thủ và dữ liệu phụ riêng. Nay
+# mọi trang gọi prepare() → evaluate() với CÙNG bộ đối thủ chuẩn (peers.domestic_candidates: gợi ý Naver ∪ top vốn
+# hóa cùng ngành KRX, PEER_N mã) — khác nhau chỉ còn khi người dùng tự sửa giả định ở trang 🧮.
+PEER_N = 12          # số đối thủ trong nước của bộ chuẩn
+FC_YEARS_MAX = 5     # số năm dự phóng tối đa
+
+
+def fs_mismatch(fs_full: Optional[dict], series: list[dict]) -> Optional[str]:
+    """BCTC đầy đủ DART (dùng cho FCFF-DCF, EV/EBIT) có cùng đơn vị và cùng phạm vi với chuỗi năm không.
+    Trả LÝ DO không dùng được, hoặc None nếu dùng được. Kiểm bằng số: đơn vị tiền phải là KRW; doanh thu cùng năm
+    phải trong ±10% so với chuỗi (Doosan Bobcat nộp USD: 0,07%; SK Square: 13,5% do Naver tính cả lãi liên kết)."""
+    if not fs_full:
+        return None
+    cur = str(fs_full.get("currency") or "KRW")
+    if cur != "KRW":
+        return f"BCTC đầy đủ DART lập bằng {cur}, không cùng đơn vị với vốn hóa (KRW)"
+    reals = _reals(series)
+    src = (reals[-1].get("_src") if reals else None) or {}
+    if src.get("dart") in ("currency", "mismatch"):
+        return f"DART không khớp chuỗi năm ({src.get('note')})"
+    y = str(fs_full.get("year"))
+    c = next((x for x in reals if str(x.get("period", ""))[:4] == y), None)
+    r_fs, r_ser = _num((fs_full.get("cur") or {}).get("revenue")), _num(c.get("revenue")) if c else None
+    if r_fs and r_ser and r_ser > 0 and not 0.9 <= r_fs / r_ser <= 1.1:
+        return f"doanh thu {y} của BCTC đầy đủ {r_fs:,.0f}억 ≠ chuỗi năm {r_ser:,.0f}억"
+    return None
+
+
+def prepare(tk: str, row: dict, fin: Optional[dict], a: V.Assumptions, peers: Optional[list[dict]],
+            beta: Optional[float], *, series: Optional[list[dict]] = None, extras: Optional[dict] = None,
+            fs_full: Optional[dict] = None, peer_ev: Optional[list] = None, extra: Optional[list] = None,
+            years: Optional[int] = None, feeds: Optional[dict] = None, today: Optional[_dt.date] = None) -> dict:
+    """Dựng đầu vào định giá của 1 mã theo MỘT cách duy nhất.
+
+    row: dòng thị trường mới (giá, vốn hóa, EPS, BPS…); fin: {'annual', 'quarter'} của Naver; peers: dòng thị trường
+    của bộ đối thủ chuẩn; beta: beta 52 tuần (None = không lấy được). series: chuỗi năm đã dựng sẵn (không truyền thì
+    dựng từ fin + DART). Trả {row, series, quarters, idn, dq, evidence, drivers (mặc định), basis, D, fs_note}."""
+    from financials import build_annual_series
+    fin = fin or {}
+    row = dict(row)
+    row["beta"] = beta
+    quarters = fin.get("quarter") or []
+    if series is None:
+        series = build_annual_series(tk, fin.get("annual") or [], row.get("market_cap"), row.get("price"),
+                                     years=6, quarters=quarters)
+    idn = identify(row)
+    # ngành tài chính không dùng FCFF/EV-EBIT (và 'doanh thu' DART của họ là thu lãi, khác định nghĩa Naver) → không xét
+    fs_note = None if idn["financial"] else fs_mismatch(fs_full, series)
+    feeds = dict(feeds or {})
+    if fs_note:
+        feeds["BCTC đầy đủ DART (FCFF, EV/EBIT)"] = {"ok": False, "level": WARN,
+                                                    "note": fs_note + " → không tính FCFF-DCF / EV-EBIT"}
+    dq = data_quality(row, series, quarters, beta, today=today, feeds=feeds)
+    evidence = reported_evidence(series, quarters)
+    n = min(years or a.years_high, FC_YEARS_MAX)
+    drivers = default_drivers(series, row, a, years=n, quarters=quarters, cyclical=idn["cyclical"],
+                              financial=idn["financial"])
+    basis = drivers[0].pop("_basis", "") if drivers else ""
+    D = {"row": row, "series": series, "quarters": quarters, "extras": extras or {}, "peers": peers or [],
+         "ticker": tk, "fs_full": None if fs_note else fs_full, "peer_ev": peer_ev or [],
+         "extra": extra if extra is not None else []}
+    return {"row": row, "series": series, "quarters": quarters, "idn": idn, "dq": dq, "evidence": evidence,
+            "drivers": drivers, "basis": basis, "D": D, "fs_note": fs_note}
+
+
+def assess(tk: str, row: dict, fin: Optional[dict], a: V.Assumptions, peers: Optional[list[dict]],
+           beta: Optional[float], **kw) -> dict:
+    """prepare() + evaluate() với giả định mặc định — con số mà bảng tổng hợp, Sàng lọc và bot công bố."""
+    ctx = prepare(tk, row, fin, a, peers, beta, **kw)
+    ctx["E"] = evaluate(ctx["D"], a, ctx["drivers"], ctx["idn"], ctx["dq"], ctx["evidence"])
+    ctx["rec"] = ctx["E"]["rec"]
+    return ctx
 
 
 def fair_same_set(rec: dict, names: list[str]) -> Optional[float]:

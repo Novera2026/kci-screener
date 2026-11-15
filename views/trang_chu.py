@@ -236,6 +236,15 @@ if hunt:
     _meta = hunt["meta"]
     st.caption(f"Kết quả săn lúc **{_meta['at']:%H:%M %d/%m/%Y}** KST · {_meta.get('scope', '')} · "
                f"{_meta['universe']} mã · định giá sâu {_meta['n_deep']} mã.")
+    # nguồn dữ liệu lỗi phải hiện ra (rà soát 15/11/2026): Rf dự phòng, DART không trả lời, hai nguồn lệch nhau…
+    if _meta.get("rf_live") is False:
+        st.warning(f"⚠️ {_meta.get('rf_note') or 'Không lấy được Rf trực tiếp'}. Mọi kết quả lần săn này tin cậy Thấp — "
+                   "bấm săn lại sau ít phút.")
+    _res_all = hunt.get("results") or {}
+    _n_dw = sum(1 for r in _res_all.values() if r.get("Cảnh báo dữ liệu"))
+    if _n_dw:
+        st.warning(f"⚠️ {_n_dw}/{len(_res_all)} mã định giá sâu có **lỗi dữ liệu** (DART không trả lời, hai nguồn lệch "
+                   "nhau, thiếu beta…). Các mã đó tin cậy Thấp và kết quả có thể đổi khi chạy lại.")
     picks = hunt["picks"]
     if not picks:
         st.info("Không mã nào qua đủ 2 tầng trong phạm vi này. Thử mở rộng phạm vi hoặc thêm bộ tiêu chuẩn.")
@@ -244,7 +253,8 @@ if hunt:
             "Mã": p["ticker"], "Tên": p["name"], "Sàn": _mkt_of.get(p["ticker"], "—"),
             "Ngành": p.get("industry") or _ind_of.get(p["ticker"]) or "—",
             "Kết luận": p["verdict"] or "—", "Giá": p["price"], "Giá trị hợp lý": p["fair"],
-            "Chênh %": p["upside"], "Chất lượng TS": p.get("quality") or "—", "Số bộ đạt": len(p["presets"]),
+            "Chênh %": p["upside"], "Độ tin cậy": (_res_all.get(p["ticker"]) or {}).get("Độ tin cậy") or "—",
+            "Chất lượng TS": p.get("quality") or "—", "Số bộ đạt": len(p["presets"]),
             "Bộ tiêu chuẩn": ", ".join(SC.PRESETS[k]["name"].split(" — ")[0] for k in p["presets"]),
         } for p in picks])
         f1, f2 = st.columns(2)

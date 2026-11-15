@@ -193,6 +193,120 @@ def _shares_estimate(reals: list[dict], market_cap: Optional[float],
     return None
 
 
+# ---------------------------------------------------------------------------
+# Cơ sở MỖI CỔ PHIẾU của dự phóng (rà soát 15/11/2026).
+# Trước đây số cp = LN HỢP NHẤT năm trước ÷ EPS năm trước, dùng cho mọi năm dự phóng → ngầm giả định (a) số cp
+# không đổi từ năm trước và (b) phần của cổ đông mẹ trong LN hợp nhất không đổi. Đo trên 200 mã lớn: (a) sai > 5% ở
+# 29 mã (Samsung Biologics sau tách công ty 67,7 → 46,7 triệu cp; KT&G hủy cổ phiếu quỹ 121,5 → 106,5 triệu),
+# (b) sai > 10% ở 37 mã (SK Inc 0,45 → 0,32; Doosan 0,30 → 0,62). Nay tách hai việc:
+#   • share_basis : số cp quy đổi theo EPS = LN cổ đông mẹ ÷ EPS của QUÝ thực gần nhất (gồm cổ phiếu ưu đãi, đúng cơ
+#                   sở EPS/BPS của Naver; giữa hai quý liên tiếp lệch trung vị 0,1%).
+#   • parent_ratio: LN cổ đông mẹ ÷ LN hợp nhất — năm 1 theo các quý thực đã công bố, năm 2+ theo số lõi của các quý đó.
+# Chuỗi KHÔNG có LN cổ đông mẹ (backtest point-in-time, dữ liệu thử) → số cp và tỷ lệ tính như cũ (LN ÷ EPS của năm có
+# lãi gần nhất, tỷ lệ = 1): EPS dự phóng không đổi. (Riêng cổng "số cổ phiếu" của pipeline.data_quality nay kiểm cả khi
+# năm gần nhất lỗ — trước đây bỏ qua trường hợp đó dù dự phóng vẫn dùng số cp của một năm cũ hơn.)
+# ---------------------------------------------------------------------------
+# LN của Naver làm tròn tới 1억, EPS tới 1 KRW → số cp suy ra có sai số tối đa 0,5/|LN| + 0,5/|EPS|. Kỳ nào sai số này
+# > 2% thì không dùng (quý LN 3억 hiển thị từ 3,4억: lệch 12%; EPS 3 KRW: lệch 17%).
+SHARE_BASIS_MAX_ERR = 0.02
+PARENT_RATIO_BAND = (0.05, 1.5)  # tỷ lệ cổ đông mẹ dùng cho năm 2+ phải nằm trong dải này mới coi là suy được từ số liệu
+
+
+def _q_reals(quarters: Optional[list[dict]]) -> list[dict]:
+    """Các quý THỰC (bỏ cột đồng thuận), cũ → mới."""
+    return sorted((c for c in (quarters or []) if not c.get("is_consensus")
+                   and str(c.get("period", ""))[:6].isdigit()), key=lambda c: str(c["period"]))
+
+
+def _implied_shares(c: dict, field: str = "ctrl_net", max_err: Optional[float] = None) -> Optional[float]:
+    """Số cp ngầm định của 1 kỳ = LN (억) × 1e8 ÷ EPS. Cần LN và EPS khác 0, cùng dấu (kỳ lỗ vẫn dùng được).
+    max_err: bỏ kỳ có sai số làm tròn (0,5/|LN| + 0,5/|EPS|) vượt ngưỡng này."""
+    v, eps = c.get(field), c.get("eps")
+    if not v or not eps or (v > 0) != (eps > 0):
+        return None
+    if max_err is not None and 0.5 / abs(v) + 0.5 / abs(eps) > max_err:
+        return None
+    return v * 1e8 / eps
+
+
+def _has_parent_profit(reals: list[dict], quarters: Optional[list[dict]] = None) -> bool:
+    return any(c.get("ctrl_net") is not None for c in list(reals) + list(quarters or []))
+
+
+def share_basis(reals: list[dict], quarters: Optional[list[dict]] = None,
+                market_cap: Optional[float] = None, price: Optional[float] = None) -> dict:
+    """Số cổ phiếu dùng để đổi LN cổ đông mẹ ↔ EPS, MỚI NHẤT có thể.
+
+    Thứ tự (chuỗi có LN cổ đông mẹ): quý thực gần nhất có sai số làm tròn ≤ 2% → năm thực gần nhất (cùng điều kiện) →
+    vốn hóa ÷ giá → LN cổ đông mẹ ÷ EPS bất kể sai số. KHÔNG bao giờ lùi về LN HỢP NHẤT ÷ EPS: số cp đó đã phồng theo
+    phần cổ đông thiểu số, nhân thêm tỷ lệ cổ đông mẹ (parent_ratio) là trừ thiểu số hai lần.
+    Trả {shares, source, prev (cơ sở của năm thực gần nhất), listed (vốn hóa ÷ giá — chỉ cổ phiếu thường)}; prev và
+    listed để data_quality so chéo, không dùng để tính."""
+    reals = [c for c in reals if not c.get("is_consensus")]
+    listed = market_cap / price if (market_cap and price and price > 0) else None
+    if not _has_parent_profit(reals, quarters):                 # không tách cổ đông mẹ → cách cũ
+        s = _shares_estimate(reals, market_cap, price)
+        from_eps = any(c.get("net_profit") and c.get("eps") and c["net_profit"] > 0 and c["eps"] > 0 for c in reals)
+        return {"shares": s, "source": "LN ròng ÷ EPS năm" if from_eps else "vốn hóa ÷ giá",
+                "prev": s if from_eps else None, "listed": listed}
+    prev, prev_y = None, None
+    for c in reversed(reals):
+        prev = _implied_shares(c, "ctrl_net", SHARE_BASIS_MAX_ERR)
+        if prev:
+            prev_y = str(c.get("period", ""))[:4]
+            break
+    qs = _q_reals(quarters)[-4:]
+    for q in reversed(qs):
+        s = _implied_shares(q, "ctrl_net", SHARE_BASIS_MAX_ERR)
+        if s:
+            p = str(q["period"])
+            return {"shares": s, "source": f"quý {p[:4]}.{p[4:6]}", "prev": prev, "listed": listed}
+    if prev:
+        return {"shares": prev, "source": f"năm {prev_y}", "prev": prev, "listed": listed}
+    if listed:
+        return {"shares": listed, "source": "vốn hóa ÷ giá", "prev": None, "listed": listed}
+    for c in list(reversed(qs)) + list(reversed(reals)):        # không có giá: chấp nhận sai số làm tròn lớn
+        s = _implied_shares(c, "ctrl_net")
+        if s:
+            return {"shares": s, "source": "LN cổ đông mẹ ÷ EPS (sai số làm tròn lớn)", "prev": None, "listed": None}
+    return {"shares": None, "source": "không xác định được", "prev": None, "listed": None}
+
+
+def parent_ratio(reals: list[dict], ytd: Optional[dict] = None) -> dict:
+    """Tỷ lệ LN cổ đông công ty mẹ ÷ LN hợp nhất, để đổi LN ròng dự phóng (hợp nhất) → EPS.
+
+      • y1   — năm dự phóng đầu: theo các quý THỰC đã công bố (ytd = _ytd_run_rate) nếu có. Đây là số công bố nên
+               giữ nguyên kể cả khi trái dấu (LN hợp nhất dương nhưng công ty mẹ lỗ).
+      • rest — các năm sau: theo số LÕI của chính các quý đó (bỏ lãi/lỗ một lần); không có thì = y1.
+      • Không có quý: tỷ lệ của năm thực gần nhất CÓ số cổ đông mẹ (năm mới nhất chỉ thiếu số này — cột sơ bộ của
+        Naver, năm chỉ có ở DART — không phải là 'trái dấu'); năm đó trái dấu/ngoài dải → trung vị các năm hợp lệ → 1.
+    reliable = False khi tỷ lệ cho năm 2+ KHÔNG suy được từ số liệu (trái dấu hoặc ngoài PARENT_RATIO_BAND) — cổng số
+    của pipeline chặn các mô hình dựa trên dự phóng mỗi cổ phiếu. Chuỗi không có LN cổ đông mẹ → 1 (cách cũ)."""
+    reals = [c for c in reals if not c.get("is_consensus")]
+    lo, hi = PARENT_RATIO_BAND
+
+    def ratio(c_, n_):
+        return c_ / n_ if (c_ is not None and n_ and (c_ > 0) == (n_ > 0) and c_ != 0) else None
+
+    def ok(x):
+        return x is not None and lo <= x <= hi
+    known = [c for c in reals if c.get("ctrl_net") is not None and c.get("net_profit") is not None]
+    hist = [r for r in (ratio(c["ctrl_net"], c["net_profit"]) for c in known) if ok(r)]
+    last = ratio(known[-1]["ctrl_net"], known[-1]["net_profit"]) if known else None
+    fallback = last if ok(last) else (_median(hist) if hist else 1.0)
+    if ytd and ytd.get("ctrl_net") is not None and ytd.get("net_profit"):
+        y1 = ytd["ctrl_net"] / ytd["net_profit"]
+        core = ratio(ytd.get("ctrl_net_core"), ytd.get("net_profit_core"))
+        rest = core if core is not None else ratio(ytd["ctrl_net"], ytd["net_profit"])
+        good = ok(rest)
+        return {"y1": y1, "rest": rest if good else fallback, "last": last, "reliable": good,
+                "source": f"{ytd.get('k')} quý thực"}
+    if not known:
+        return {"y1": 1.0, "rest": 1.0, "last": None, "reliable": True, "source": "LN ròng (không tách cổ đông mẹ)"}
+    return {"y1": fallback, "rest": fallback, "last": last, "reliable": ok(last),
+            "source": "năm thực gần nhất" if ok(last) else "trung vị các năm (năm gần nhất không dùng được)"}
+
+
 def _next_label(reals: list[dict]) -> str:
     if reals:
         try:
@@ -297,7 +411,8 @@ def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
       • Có `quarters` và năm dự phóng đã có quý thực công bố → DT/LN = lũy kế quý thực
         + quý còn lại theo run-rate 2 quý gần nhất (_ytd_run_rate) thay cho CAGR/biên
         (vd tháng 10 đã có 2-3 quý của năm: không được bỏ qua số thực đó)
-      • EPS: LN thuần dự phóng / số cp (suy từ LN/EPS cùng kỳ)
+      • EPS: LN của CỔ ĐÔNG MẸ dự phóng ÷ số cp cơ sở EPS mới nhất (share_basis / parent_ratio — quý thực gần nhất;
+        chuỗi không tách cổ đông mẹ thì LN thuần ÷ số cp suy từ LN/EPS năm gần nhất như trước)
       • BPS: BPS(t) + EPS dự phóng − cổ tức/cp(t)   (lợi nhuận giữ lại)
       • ROE: EPS/BPS dự phóng
 
@@ -330,15 +445,14 @@ def project_forecast(reals: list[dict], market_cap: Optional[float] = None,
         npm = net_fc / rev_fc if (net_fc is not None and rev_fc) else npm
         basis = (f"{ytd['k']} quý thực đã công bố"
                  + (f" + {4 - ytd['k']} quý ước theo TB 2 quý gần nhất" if ytd["k"] < 4 else ""))
-    shares = _shares_estimate(reals, market_cap, price)
+    # EPS là của cổ đông công ty mẹ, trên số cp MỚI NHẤT (share_basis / parent_ratio — cùng cơ sở với bảng dự phóng
+    # nhiều năm của pipeline.run_forecast, để cả App chỉ có MỘT EPS dự phóng năm 1)
+    shares = share_basis(reals, quarters, market_cap, price)["shares"]
     last = reals[-1]
-    eps_fc = net_fc * 1e8 / shares if (net_fc is not None and shares) else None
-    # EPS là của cổ đông công ty mẹ: có LN 지배주주 lũy kế quý → dùng nó (tập đoàn có cổ
-    # đông thiểu số lớn như LG Chem/SK: LN hợp nhất và LN công ty mẹ có thể trái dấu)
-    if ytd and ytd.get("ctrl_net") is not None:
-        sh_c = _shares_estimate(reals, None, None, field="ctrl_net")
-        if sh_c:
-            eps_fc = ytd["ctrl_net"] * 1e8 / sh_c
+    rho = parent_ratio(reals, ytd)
+    eps_fc = net_fc * rho["y1"] * 1e8 / shares if (net_fc is not None and shares) else None
+    if ytd and ytd.get("ctrl_net") is not None and shares:      # số công bố: dùng thẳng LN cổ đông mẹ lũy kế quý
+        eps_fc = ytd["ctrl_net"] * 1e8 / shares
     dps = last.get("dps") or 0
     bps_last = last.get("bps")
     bps_fc = (bps_last + eps_fc - dps) if (bps_last is not None and eps_fc is not None) \
@@ -442,33 +556,116 @@ def build_quarter_series(quarters: list[dict], market_cap: Optional[float] = Non
     return reals + ([fc] if fc else [])
 
 
+# ---------------------------------------------------------------------------
+# Đối chiếu DART ↔ Naver cho CÙNG một năm (rà soát 15/11/2026). Trước đây DART ghi đè Naver vô điều kiện và mọi lỗi
+# DART bị nuốt (`except: pass`). Đo 377 cặp (mã, năm) của 147 mã lớn: 97% khớp trong ±2%; phần lệch là
+#   • báo cáo bằng USD đọc như KRW  — Doosan Bobcat: DART = 0,07% Naver → tăng trưởng năm 1 ra +150.878%;
+#   • định nghĩa doanh thu khác     — SK Square: DART 14.115 vs Naver 104.556 (Naver gồm lãi công ty liên kết);
+#   • điều chỉnh hồi tố / đổi phạm vi — Samsung Biologics 2024: DART gốc 45.473 vs Naver đã điều chỉnh 34.971.
+# Quy tắc (bằng số, không có đường giải trình):
+#   1. Báo cáo DART không phải KRW        → không dùng DART (Naver đã quy KRW), ghi rõ.
+#   2. Năm thực GẦN NHẤT lệch ngoài dải   → hai nguồn không cùng nói về một con số: bỏ toàn bộ DART, cổng số chặn mô
+#      hình dựa trên dự phóng (pipeline.data_quality → source_break).
+#   3. Năm cũ hơn lệch > ±5%              → giữ số Naver của năm đó (đã điều chỉnh hồi tố, cùng cơ sở với năm gần nhất
+#      và với EPS/BPS/quý), cảnh báo.
+#   4. DART lỗi kết nối / hạn mức         → ghi rõ là KHÔNG ĐẦY ĐỦ (không còn lặng lẽ thành "chỉ có 3 năm Naver").
+# Trạng thái gắn vào khóa `_src` của MỌI năm thực (cùng một dict) để data_quality đọc.
+# ---------------------------------------------------------------------------
+SRC_SAME = 0.05                   # |DART ÷ Naver − 1| ≤ 5%: coi là cùng một số → dùng số gốc DART
+SRC_BREAK_REV = (0.9, 1.1)        # năm gần nhất: doanh thu DART ÷ Naver ngoài dải → mâu thuẫn nguồn
+SRC_BREAK_NP = (0.8, 1.25)        # năm gần nhất: LN thuần DART ÷ Naver ngoài dải (hoặc trái dấu) → mâu thuẫn nguồn
+SRC_NP_MIN_SHARE = 0.01           # chỉ so LN thuần khi |LN| ≥ 1% doanh thu (LN gần 0 thì tỷ lệ vô nghĩa)
+
+
+def _src_ratio(d, n) -> Optional[float]:
+    return d / n if (d is not None and n not in (None, 0) and (d > 0) == (n > 0)) else None
+
+
+def _source_gaps(base: dict, rows: list[dict]) -> list[dict]:
+    """Các năm trùng mà DART lệch Naver > SRC_SAME ở doanh thu / LN HĐ / LN thuần. [{year, field, dart, naver, ratio}]"""
+    gaps = []
+    for d in rows:
+        y = d["period"][:4]
+        n = base.get(y)
+        if not n:
+            continue
+        for k in ("revenue", "op_profit", "net_profit"):
+            dv, nv = d.get(k), n.get(k)
+            if dv is None or nv is None:
+                continue
+            if k != "revenue" and n.get("revenue") and abs(nv) < SRC_NP_MIN_SHARE * abs(n["revenue"]) \
+                    and abs(dv) < SRC_NP_MIN_SHARE * abs(n["revenue"]):
+                continue                                   # cả hai đều ~0 so với doanh thu
+            if abs(dv - nv) <= 1.0:                        # lệch ≤ 1억: Naver làm tròn tới 억
+                continue
+            r = _src_ratio(dv, nv)
+            if r is None or abs(r - 1) > SRC_SAME:
+                gaps.append({"year": y, "field": k, "dart": dv, "naver": nv, "ratio": r})
+    return gaps
+
+
 def _merge_dart(naver_annual: list[dict], ticker: str) -> list[dict]:
     """Gộp số THỰC từ DART (4-6 năm, có 자산총계/부채총계) lên khung Naver (theo năm).
-    DART là số gốc nộp cơ quan QL nên ghi đè doanh thu/LN/cân đối; giữ lại các tỉ số
-    thị trường (EPS/BPS/PER/PBR/ROE) của Naver cho năm trùng."""
+
+    Năm trùng: DART khớp Naver (±5%) → dùng số gốc DART; lệch → giữ số Naver và ghi nhận. Luôn giữ các tỉ số thị
+    trường (EPS/BPS/PER/PBR/ROE) của Naver. Mỗi năm thực mang `_src` = {dart: ok | none | error | currency | mismatch,
+    note, gaps} — xem khối chú thích phía trên."""
     base = {c["period"][:4]: dict(c) for c in naver_annual
             if not c.get("is_consensus")}
+    src = {"dart": "none", "note": "", "gaps": []}
     if dart_api is not None and dart_api.available():
+        errs: list = []
         try:
-            for d in dart_api.annual_financials(ticker, years=6):
-                y = d["period"][:4]
-                tgt = base.get(y) or {"period": d["period"], "label": y,
-                                      "is_consensus": False}
-                for k in ("revenue", "op_profit", "net_profit", "assets",
-                          "liabilities", "equity", "debt_ratio"):
-                    if d.get(k) is not None:
-                        tgt[k] = d[k]
-                if tgt.get("revenue"):
-                    if tgt.get("net_profit") is not None:
-                        tgt["net_margin"] = round(tgt["net_profit"] / tgt["revenue"] * 100, 2)
-                    if tgt.get("op_profit") is not None:
-                        tgt["op_margin"] = round(tgt["op_profit"] / tgt["revenue"] * 100, 2)
-                tgt["is_consensus"] = False
-                tgt["_dart"] = True
-                base[y] = tgt
-        except Exception:
-            pass
-    return [base[y] for y in sorted(base.keys())]
+            rows = dart_api.annual_financials(ticker, years=6, errors=errs)
+        except Exception as e:                       # lỗi ngoài dự kiến cũng phải lộ ra, không nuốt
+            rows, errs = [], [f"lỗi đọc DART ({type(e).__name__})"]
+        if errs and rows and (not base or max(r["period"][:4] for r in rows) >= max(base)):
+            # DART lỗi khi hỏi năm MỚI HƠN chuỗi Naver nhưng các năm đã lưu phủ tới năm thực gần nhất → chuỗi đủ như lúc
+            # DART hoạt động; ghi nhận (⚠️), không coi là thiếu dữ liệu
+            errs, cached_note = [], f"DART đang lỗi ({errs[0]}) — dùng BCTC năm đã lưu (đủ tới năm gần nhất)"
+        else:
+            cached_note = ""
+        foreign = sorted({str(r.get("currency")) for r in rows if r.get("currency") and r.get("currency") != "KRW"})
+        gaps = [] if foreign else _source_gaps(base, rows)
+        last_y = max(base) if base else None
+        last_gap = [g for g in gaps if g["year"] == last_y and (
+            (g["field"] == "revenue" and not (g["ratio"] and SRC_BREAK_REV[0] <= g["ratio"] <= SRC_BREAK_REV[1]))
+            or (g["field"] == "net_profit" and not (g["ratio"] and SRC_BREAK_NP[0] <= g["ratio"] <= SRC_BREAK_NP[1])))]
+        if foreign:
+            src = {"dart": "currency", "gaps": [],
+                   "note": f"BCTC DART lập bằng {', '.join(foreign)} — không trộn với số KRW, dùng số Naver (đã quy KRW)"}
+            rows = []
+        elif last_gap:
+            g = last_gap[0]
+            lbl = {"revenue": "doanh thu", "net_profit": "LN thuần"}[g["field"]]
+            src = {"dart": "mismatch", "gaps": gaps,
+                   "note": f"năm {g['year']}: {lbl} DART {g['dart']:,.0f} vs Naver {g['naver']:,.0f}억 "
+                           + (f"({g['ratio']:.2f}×)" if g["ratio"] else "(trái dấu)")}
+            rows = []
+        else:
+            src = {"dart": "error" if errs else ("cached" if cached_note else "ok" if rows else "none"), "gaps": gaps,
+                   "note": errs[0] if errs else cached_note}
+        off = {(g["year"], g["field"]) for g in gaps}
+        for d in rows:
+            y = d["period"][:4]
+            tgt = base.get(y) or {"period": d["period"], "label": y,
+                                  "is_consensus": False}
+            for k in ("revenue", "op_profit", "net_profit", "assets",
+                      "liabilities", "equity", "debt_ratio"):
+                if d.get(k) is not None and (y, k) not in off:
+                    tgt[k] = d[k]
+            if tgt.get("revenue"):
+                if tgt.get("net_profit") is not None:
+                    tgt["net_margin"] = round(tgt["net_profit"] / tgt["revenue"] * 100, 2)
+                if tgt.get("op_profit") is not None:
+                    tgt["op_margin"] = round(tgt["op_profit"] / tgt["revenue"] * 100, 2)
+            tgt["is_consensus"] = False
+            tgt["_dart"] = True
+            base[y] = tgt
+    out = [base[y] for y in sorted(base.keys())]
+    for c in out:
+        c["_src"] = src
+    return out
 
 
 def build_annual_series(ticker: str, naver_annual: list[dict],

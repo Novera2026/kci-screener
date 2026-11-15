@@ -69,6 +69,7 @@ def aggregate(results: dict, hits: dict) -> list[dict]:
         picks.append({"ticker": tk, "name": r.get("Tên") or tk, "industry": r.get("Ngành"),
                       "price": r.get("Giá"), "fair": r.get("Giá trị hợp lý"), "upside": up,
                       "quality": r.get("Chất lượng TS"), "verdict": r.get("Kết luận") or "",
+                      "confidence": r.get("Độ tin cậy"), "data_warn": r.get("Cảnh báo dữ liệu") or "",
                       "presets": sorted(presets, key=lambda k: list(SC.PRESETS).index(k))})
     picks.sort(key=lambda p: -p["upside"])
     return picks
@@ -91,9 +92,15 @@ def _short(p: dict) -> str:
 
 def _line(p: dict, preset_names: dict) -> str:
     sets = ", ".join(preset_names.get(k, k) for k in p["presets"])
+    # ⚠️: kết luận tin cậy Thấp (chỉ một mô hình chính, hoặc lỗi dữ liệu) — phải thấy ngay trong danh sách (15/11/2026)
+    low = ""
+    if p.get("data_warn"):
+        low = f" · ⚠️ lỗi dữ liệu: {html.escape(str(p['data_warn']))}"
+    elif p.get("confidence") == "Low":
+        low = " · ⚠️ tin cậy Thấp"
     return (f"{_short(p)} <b>{html.escape(str(p['name']))}</b> ({p['ticker']}) · "
             f"{p['price']:,.0f} → <b>{p['fair']:,.0f}</b> ({p['upside']:+.0f}%) · TS {p.get('quality') or '—'} · "
-            f"{len(p['presets'])} bộ: {html.escape(sets)}")
+            f"{len(p['presets'])} bộ: {html.escape(sets)}{low}")
 
 
 def format_message(picks: list[dict], d: dict, meta: dict, top: int = 12) -> list[str]:
@@ -104,6 +111,8 @@ def format_message(picks: list[dict], d: dict, meta: dict, top: int = 12) -> lis
          f"Danh sách gốc top {meta['universe']} · {len(meta['presets'])} bộ tiêu chuẩn · định giá sâu {meta['n_deep']} mã · "
          f"Rf {meta['rf'] * 100:.2f}%" if meta.get("rf") else
          f"Danh sách gốc top {meta['universe']} · {len(meta['presets'])} bộ tiêu chuẩn · định giá sâu {meta['n_deep']} mã", ""]
+    if meta.get("rf_live") is False:
+        L[-1:-1] = [f"⚠️ {html.escape(str(meta.get('rf_note') or 'Không lấy được Rf trực tiếp'))} — kết quả lần này tin cậy Thấp"]
     if d["first_run"]:
         L.append("Lần chạy đầu — chưa có lần trước để so.")
     else:
@@ -118,7 +127,8 @@ def format_message(picks: list[dict], d: dict, meta: dict, top: int = 12) -> lis
             L += [f"{html.escape(str(x.get('name', x['ticker'])))} ({x['ticker']})" for x in d["dropped"]]
     L += ["", f"📋 <b>Danh sách săn ({len(picks)} mã) — top {min(top, len(picks))}</b>"]
     L += [_line(p, names) for p in picks[:top]] or ["— không mã nào đạt chuẩn hôm nay"]
-    L += ["", "🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm (chất lượng/ngành tài chính) · TS = hạng chất lượng tài sản.",
+    L += ["", "🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm (chất lượng/ngành tài chính) · TS = hạng chất lượng tài sản · "
+                "⚠️ = kết luận tin cậy Thấp (chỉ một mô hình chính hoặc lỗi dữ liệu).",
           "Xếp theo chênh lệch định giá. Backtest 2021–25 (top 200): định giá xếp hạng có tín hiệu yếu (IC +0,08); "
           "danh sách kiểu này CHƯA thắng trung bình thị trường (top 12 ≈ +0,4%/năm, không ý nghĩa thống kê). "
           "Để nghiên cứu tiếp, không phải danh mục mua.",
@@ -161,7 +171,7 @@ def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=p
     Truyền `tickers` để săn trong danh sách riêng (ngành, chủ đề, mega trend…), tối đa 400 mã."""
     import screen as SC
     import valuation as V
-    from screener import TickerRegistry, fetch_kgb10y_detail, fetch_many
+    from screener import TickerRegistry, fetch_many, rf_for_valuation
     reg = TickerRegistry()
     at = _dt.datetime.now(KST)
     if tickers:
@@ -176,16 +186,22 @@ def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=p
     stage1 = {k: [r["Mã"] for r in SC.apply_preset(rows, k) if r["Qua lọc"]][:max_deep] for k in presets}
     union = list(dict.fromkeys(t for k in presets for t in stage1[k]))
     progress(f"② Tầng 1: {', '.join(f'{k} {len(v)}' for k, v in stage1.items())} → định giá sâu {len(union)} mã…")
-    rf = fetch_kgb10y_detail()
-    a = V.Assumptions(rf=rf.get("value") or 0.032)
-    res = SC.deep_stage(union, {r["ticker"]: r for r in rows}, rows, a, reg,
+    # Rf không lấy được trực tiếp → vẫn tính trên giá trị dự phòng nhưng nói rõ và mọi kết quả bị hạ xuống Low
+    # (trước 15/11/2026: lặng lẽ dùng 3,2%)
+    rf = rf_for_valuation()
+    a = V.Assumptions(rf=rf["value"])
+    feeds = {} if rf["live"] else {"rf": {"ok": False, "note": rf["note"]}}
+    if not rf["live"]:
+        progress(f"⚠️ {rf['note']} — độ tin cậy của mọi kết quả lần này bị hạ xuống Low")
+    res = SC.deep_stage(union, {r["ticker"]: r for r in rows}, rows, a, reg, feeds=feeds,
                         progress=lambda d, n: progress(f"   định giá {d}/{n}") if d % 5 == 0 or d == n else None)
     results = {r["Mã"]: r for r in res}
     hits = {k: [t for t in stage1[k] if t in results and SC.stage2_check(results[t], k)[0]] for k in presets}
     progress("③ Tầng 2: " + ", ".join(f"{k} {len(v)}" for k, v in hits.items()))
     picks = aggregate(results, hits)
     return {"picks": picks, "results": results, "hits": hits, "rows": rows,
-            "meta": {"at": at, "universe": len(rows), "scope": scope, "presets": presets, "n_deep": len(union), "rf": rf.get("value")}}
+            "meta": {"at": at, "universe": len(rows), "scope": scope, "presets": presets, "n_deep": len(union),
+                     "rf": rf["value"], "rf_live": rf["live"], "rf_note": rf["note"]}}
 
 
 def excel_bytes(out: dict) -> bytes:
@@ -226,7 +242,7 @@ def tg_chat_ids(token: str) -> list[dict]:
 
 
 _EXPORT_FIELDS = ("Điểm chất lượng", "F-score", "Nợ/VCSH", "Thanh toán hiện hành", "Có năm lỗ", "Tổng quan",
-                  "Độ tin cậy", "Trạng thái", "Nhóm")
+                  "Độ tin cậy", "Trạng thái", "Nhóm", "Cảnh báo dữ liệu")
 
 
 def export_payload(out: dict, d: dict, registry=None) -> dict:
@@ -246,7 +262,8 @@ def export_payload(out: dict, d: dict, registry=None) -> dict:
                      **{k: r.get(k) for k in _EXPORT_FIELDS}})
     m = out["meta"]
     return {"at": m["at"].strftime("%d/%m/%Y %H:%M"), "scope": m.get("scope"), "universe": m["universe"],
-            "n_deep": m["n_deep"], "rf": m.get("rf"), "presets": [names.get(k, k) for k in m["presets"]],
+            "n_deep": m["n_deep"], "rf": m.get("rf"), "rf_live": m.get("rf_live", True), "rf_note": m.get("rf_note") or "",
+            "presets": [names.get(k, k) for k in m["presets"]],
             "picks": rows,
             "vs_previous": {"first_run": d["first_run"], "new": [p["ticker"] for p in d["new"]],
                             "dropped": [{"ticker": x["ticker"], "name": x.get("name")} for x in d["dropped"]],

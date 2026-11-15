@@ -20,8 +20,10 @@ from __future__ import annotations
 import io
 import os
 import csv
+import json
 import time
 import zipfile
+import threading
 import xml.etree.ElementTree as ET
 from typing import Optional
 import requests
@@ -62,6 +64,94 @@ def api_key() -> Optional[str]:
 
 def available() -> bool:
     return bool(api_key())
+
+
+# ---------------------------------------------------------------------------
+# Gọi fnlttSinglAcntAll — MỘT cửa cho mọi module (rà soát 15/11/2026).
+# Trước đây mỗi nơi tự gọi requests rồi `except: continue`: lỗi mạng bị coi như "không có báo cáo" → App lặng lẽ
+# lùi sang báo cáo riêng lẻ (OFS) hoặc số Naver 3 năm và vẫn công bố (Hyundai Motor: doanh thu 787.668 thay vì
+# 1.862.545; Samsung +19%). DART còn ĐÓNG KẾT NỐI khi bị gọi dồn dập (15/11: 53/200 mã mất hết số DART giữa một lượt
+# quét 5 luồng). Nay:
+#   • phân biệt "DART xác nhận không có báo cáo" (mã 013 → None) với "không lấy được" (lỗi mạng / hạn mức / khóa →
+#     DartError sau khi thử lại) — chỉ trường hợp đầu mới được lùi CFS → OFS;
+#   • giãn nhịp toàn tiến trình (≤ ~6 lần gọi/giây) và ngắt mạch ~90 giây sau 3 lần hỏng liên tiếp để không nã tiếp
+#     vào máy chủ đang chặn.
+# ---------------------------------------------------------------------------
+class DartError(RuntimeError):
+    """DART không trả được dữ liệu (KHÁC với 'không có báo cáo')."""
+
+
+NO_DATA = "013"                # 조회된 데이타가 없습니다
+MIN_GAP = 0.15                 # giây tối thiểu giữa hai lần gọi (toàn tiến trình)
+RETRY_WAITS = (0.8, 2.4)       # chờ trước lần thử lại 1, 2
+BREAKER_AFTER = 3              # số lần hỏng LIÊN TIẾP (đã gồm thử lại) thì ngắt mạch
+BREAKER_SECS = 90
+STATS = {"ok": 0, "nodata": 0, "errors": 0, "streak": 0, "open_until": 0.0, "last_error": ""}
+_gate = threading.Lock()
+_last_call = [0.0]
+
+
+def _throttle() -> None:
+    with _gate:                                  # giữ khóa khi chờ → các luồng xếp hàng, mỗi lần gọi cách nhau MIN_GAP
+        wait = _last_call[0] + MIN_GAP - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _last_call[0] = time.time()
+
+
+def error_count() -> int:
+    """Số lần gọi DART hỏng từ đầu tiến trình — nơi gọi so trước/sau để biết lượt lấy của mình có đầy đủ không."""
+    return STATS["errors"]
+
+
+def fetch_statements(corp_code: str, year: int, reprt_code: str = "11011", fs_div: str = "CFS",
+                     timeout: Optional[float] = None) -> Optional[list]:
+    """Danh sách tài khoản của 1 báo cáo (fnlttSinglAcntAll).
+
+    Trả list (có thể rỗng) khi DART trả dữ liệu; None khi DART XÁC NHẬN không có báo cáo đó (mã 013).
+    Lỗi mạng, bị đóng kết nối, vượt hạn mức (020), khóa sai… → thử lại rồi ném DartError — không bao giờ coi lỗi là
+    'không có'. Thông báo lỗi không chứa URL (URL có khóa API)."""
+    if time.time() < STATS["open_until"]:
+        with _gate:
+            STATS["errors"] += 1
+        raise DartError("DART đang từ chối kết nối — tạm ngừng gọi, thử lại sau khoảng 1–2 phút")
+    last = "lỗi không rõ"
+    for i in range(len(RETRY_WAITS) + 1):
+        _throttle()
+        try:
+            j = requests.get(f"{_BASE}/fnlttSinglAcntAll.json",
+                             params={"crtfc_key": api_key(), "corp_code": corp_code, "bsns_year": str(year),
+                                     "reprt_code": reprt_code, "fs_div": fs_div},
+                             timeout=timeout or _TIMEOUT).json()
+        except Exception as e:                    # không ghi str(e): chứa URL kèm khóa API
+            last = f"lỗi kết nối DART ({type(e).__name__})"
+        else:
+            if not isinstance(j, dict):
+                j = {"status": "bad-body"}
+            st = str(j.get("status"))
+            if st == "000":
+                with _gate:
+                    STATS["ok"] += 1
+                    STATS["streak"] = 0
+                return j.get("list") or []
+            if st == NO_DATA:
+                with _gate:
+                    STATS["nodata"] += 1
+                    STATS["streak"] = 0
+                return None
+            last = ("DART trả dữ liệu không đúng dạng" if st == "bad-body" else
+                    f"DART trả mã lỗi {st}" + (" (vượt hạn mức gọi trong ngày)" if st == "020" else ""))
+            if st not in ("800", "900", "bad-body"):     # hạn mức / khóa: thử lại ngay cũng vô ích
+                break
+        if i < len(RETRY_WAITS):
+            time.sleep(RETRY_WAITS[i])
+    with _gate:
+        STATS["errors"] += 1
+        STATS["streak"] += 1
+        STATS["last_error"] = last
+        if STATS["streak"] >= BREAKER_AFTER:
+            STATS["open_until"] = time.time() + BREAKER_SECS
+    raise DartError(last)
 
 
 # ---------------------------------------------------------------------------
@@ -151,61 +241,125 @@ def _num(x) -> Optional[float]:
 # Chỉ nhớ kết quả CÓ số (năm chưa nộp báo cáo vẫn được hỏi lại).
 _YEAR_CACHE: dict = {}
 _YEAR_TTL = 12 * 3600
+# Báo cáo năm ĐÃ NỘP không đổi → nhớ thêm trên đĩa (như .cache/dart_full của analysis): lần chạy sau không gọi lại
+# DART (mỗi mã ~7 lần gọi/lượt — nguyên nhân chính làm DART đóng kết nối). Đổi cách đọc tài khoản → tăng _YEAR_V.
+YEAR_CACHE_DIR = os.path.join(_HERE, ".cache", "dart_year")
+_YEAR_V = 4
 
 
-def _fetch_year(corp_code: str, year: int) -> Optional[dict]:
-    """Lấy các tài khoản chính của 1 năm (사업보고서), có nhớ đệm (_YEAR_CACHE)."""
+def _fetch_year(corp_code: str, year: int, offline: bool = False) -> Optional[dict]:
+    """Các tài khoản chính của 1 năm (사업보고서): bộ nhớ tiến trình → cache đĩa → DART. Chỉ nhớ kết quả CÓ số.
+    Lỗi DART (khác 'chưa nộp') → DartError. offline=True (DART đang lỗi): chỉ đọc cache, kể cả bản đời cũ."""
     hit = _YEAR_CACHE.get((corp_code, year))
     if hit and time.time() - hit[0] < _YEAR_TTL:
         return dict(hit[1])
-    rec = _fetch_year_raw(corp_code, year)
+    fp = os.path.join(YEAR_CACHE_DIR, f"{corp_code}_{year}.json")
+    rec = None
+    if os.path.exists(fp):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                rec = json.load(f)
+            rec = rec if (isinstance(rec, dict) and rec.get("period") and (rec.get("_v") == _YEAR_V or offline)) else None
+        except Exception:
+            rec = None
+    if rec is None and offline:
+        return None
+    if rec is None:
+        rec = _fetch_year_raw(corp_code, year)
+        if rec:
+            try:
+                os.makedirs(YEAR_CACHE_DIR, exist_ok=True)
+                tmp = f"{fp}.{os.getpid()}.{threading.get_ident()}"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({**rec, "_v": _YEAR_V}, f, ensure_ascii=False)
+                os.replace(tmp, fp)
+            except Exception:
+                pass
     if rec:
+        rec.pop("_v", None)
         _YEAR_CACHE[(corp_code, year)] = (time.time(), dict(rec))
     return rec
 
 
+# Mã tài khoản chuẩn của 6 chỉ tiêu chính + loại báo cáo chứa chúng. Đọc theo bậc: (1) mã chuẩn, đúng loại báo cáo
+# → (2) tên, đúng loại báo cáo → (riêng LN thuần) phần cổ đông mẹ + phần thiểu số → (3) tên ở báo cáo khác, TRỪ báo
+# cáo thay đổi vốn chủ (SCE). Chỉ đọc theo tên bỏ sót 125 giá trị trên 748 báo cáo năm của các mã lớn; còn đọc tên ở
+# SCE thì lấy nhầm cột cổ đông thiểu số (펌텍코리아 2025: 56 thay vì 401) — rà soát 15/11/2026.
+_STD_IDS = {"revenue": ("ifrs-full_Revenue",), "op_profit": ("dart_OperatingIncomeLoss",),
+            "net_profit": ("ifrs-full_ProfitLoss",), "assets": ("ifrs-full_Assets",),
+            "liabilities": ("ifrs-full_Liabilities",), "equity": ("ifrs-full_Equity",)}
+_BS_FIELDS = {"assets", "liabilities", "equity"}
+
+
+def main_accounts(items: list) -> dict:
+    """6 chỉ tiêu chính của 1 báo cáo (억원): revenue, op_profit, net_profit, assets, liabilities, equity."""
+    out = {}
+    for field, names in _ACCOUNTS_NORM.items():
+        sjs = {"BS"} if field in _BS_FIELDS else {"IS", "CIS"}
+        def first(ok):
+            return next((x for x in (_num(it.get("thstrm_amount")) for it in items if ok(it)) if x is not None), None)
+        v = first(lambda it: it.get("sj_div") in sjs and it.get("account_id") in _STD_IDS[field])
+        if v is None:
+            v = first(lambda it: it.get("sj_div") in sjs and _norm(it.get("account_nm")) in names)
+        if v is None and field == "net_profit":
+            par = first(lambda it: it.get("sj_div") in sjs
+                        and it.get("account_id") == "ifrs-full_ProfitLossAttributableToOwnersOfParent")
+            nci = first(lambda it: it.get("sj_div") in sjs
+                        and it.get("account_id") == "ifrs-full_ProfitLossAttributableToNoncontrollingInterests")
+            v = (par + (nci or 0.0)) if par is not None else None
+        if v is None:
+            v = first(lambda it: it.get("sj_div") != "SCE" and _norm(it.get("account_nm")) in names)
+        if v is not None:
+            out[field] = v / 1e8                   # 원 -> 억원
+    return out
+
+
+def _parse_year(items: list, year: int, fs_div: str) -> Optional[dict]:
+    """Danh sách tài khoản 1 báo cáo năm → {revenue, op_profit, net_profit, assets, liabilities, equity} (억원)."""
+    rec = {"period": f"{year}12", "label": str(year), "is_consensus": False, "fs_div": fs_div}
+    acc = main_accounts(items)
+    if not acc:
+        return None
+    rec.update(acc)
+    rec["currency"] = statement_currency(items)
+    # nợ/vốn chủ thực từ bảng cân đối
+    if rec.get("liabilities") is not None and rec.get("equity"):
+        rec["debt_ratio"] = round(rec["liabilities"] / rec["equity"] * 100, 1)
+    return rec
+
+
+def statement_currency(items: list) -> str:
+    """Đơn vị tiền của báo cáo (trường `currency` của DART). Doosan Bobcat, Kolon TissueGene… nộp bằng USD — số đó
+    KHÔNG được đọc như KRW. Thiếu trường → 'KRW'."""
+    seen: dict = {}
+    for it in items:
+        c = str(it.get("currency") or "").strip().upper()
+        if c:
+            seen[c] = seen.get(c, 0) + 1
+    return max(seen, key=seen.get) if seen else "KRW"
+
+
 def _fetch_year_raw(corp_code: str, year: int) -> Optional[dict]:
-    """Lấy các tài khoản chính của 1 năm (사업보고서). Ưu tiên 연결(CFS), fallback 별도(OFS)."""
-    key = api_key()
+    """Các tài khoản chính của 1 năm (사업보고서). Ưu tiên 연결(CFS); chỉ lùi sang 별도(OFS) khi DART xác nhận không có
+    bản hợp nhất hoặc bản hợp nhất không có tài khoản chính nào. Lỗi DART → DartError (không lùi OFS)."""
     for fs_div in ("CFS", "OFS"):
-        try:
-            r = requests.get(
-                f"{_BASE}/fnlttSinglAcntAll.json",
-                params={"crtfc_key": key, "corp_code": corp_code,
-                        "bsns_year": str(year), "reprt_code": "11011",
-                        "fs_div": fs_div},
-                timeout=_TIMEOUT)
-            j = r.json()
-        except Exception:
+        items = fetch_statements(corp_code, year, "11011", fs_div)
+        if not items:
             continue
-        if j.get("status") != "000":
-            continue
-        rec = {"period": f"{year}12", "label": str(year),
-               "is_consensus": False, "fs_div": fs_div}
-        found = False
-        for item in j.get("list", []):
-            nm = _norm(item.get("account_nm"))       # bỏ dấu cách → khớp bền
-            for field, names in _ACCOUNTS_NORM.items():
-                if nm in names and rec.get(field) is None:
-                    v = _num(item.get("thstrm_amount"))
-                    if v is not None:
-                        rec[field] = v / 1e8           # 원 -> 억원
-                        found = True
-        if not found:
-            continue
-        # nợ/vốn chủ thực từ bảng cân đối
-        if rec.get("liabilities") is not None and rec.get("equity"):
-            rec["debt_ratio"] = round(rec["liabilities"] / rec["equity"] * 100, 1)
-        return rec
+        rec = _parse_year(items, year, fs_div)
+        if rec:
+            return rec
     return None
 
 
 def annual_financials(ticker: str, years: int = 4,
-                      end_year: Optional[int] = None) -> list[dict]:
+                      end_year: Optional[int] = None, errors: Optional[list] = None) -> list[dict]:
     """4 năm THỰC gần nhất từ DART (mới→: trả theo thứ tự tăng dần).
 
     Mỗi phần tử: {period 'YYYY12', revenue, op_profit, net_profit, assets,
-    liabilities, equity, debt_ratio} đơn vị 억원. [] nếu không có key/không match.
+    liabilities, equity, debt_ratio, currency} đơn vị 억원 (theo `currency` — thường KRW). [] nếu không có key/không match.
+    errors: truyền một list để NHẬN thông báo khi DART lỗi giữa chừng. Sau lỗi đầu tiên hàm KHÔNG gọi DART nữa mà đọc
+    tiếp các năm đã lưu trên đĩa (tháng 2: năm vừa kết thúc chưa nộp + DART lỗi không được làm mất 5 năm đã có).
     """
     if not available():
         return []
@@ -214,10 +368,16 @@ def annual_financials(ticker: str, years: int = 4,
         return []
     if end_year is None:
         end_year = time.localtime().tm_year - 1     # năm tài chính gần nhất đã nộp
-    out, y, miss = [], end_year, 0
+    out, y, miss, offline = [], end_year, 0, False
     # dò ngược: bỏ qua tối đa 2 năm trống (báo cáo năm nay có thể chưa nộp)
     while len(out) < years and miss < 3 and y > end_year - years - 3:
-        rec = _fetch_year(cc, y)
+        try:
+            rec = _fetch_year(cc, y, offline=offline)
+        except DartError as e:
+            if errors is not None:
+                errors.append(str(e))
+            offline = True
+            rec = _fetch_year(cc, y, offline=True)
         if rec:
             out.append(rec)
             miss = 0
@@ -250,11 +410,12 @@ _FIELDS = [
 _FIELDS_NORM = [(f, sj, {_norm(x) for x in names}) for f, sj, names in _FIELDS]
 
 
-def valuation_extras(ticker: str, year: Optional[int] = None) -> dict:
+def valuation_extras(ticker: str, year: Optional[int] = None, errors: Optional[list] = None) -> dict:
     """Lấy số (억원) cho EV/EBIT + FCFF từ DART trong 1 lần gọi/năm gần nhất.
 
-    Trả {year, ebit, cash, debt, net_debt, cfo, capex, finance_cost, tax_rate, ...}
+    Trả {year, ebit, cash, debt, net_debt, cfo, capex, finance_cost, tax_rate, currency, ...}
     hoặc {} nếu không có key / không đủ dữ liệu. Đơn vị: 억원; tax_rate dạng thập phân.
+    errors: list nhận thông báo khi DART lỗi (khi đó {} KHÔNG có nghĩa là 'không có dữ liệu').
     """
     if not available():
         return {}
@@ -265,17 +426,15 @@ def valuation_extras(ticker: str, year: Optional[int] = None) -> dict:
     for y in yrs:
         for fs_div in ("CFS", "OFS"):
             try:
-                j = requests.get(
-                    f"{_BASE}/fnlttSinglAcntAll.json",
-                    params={"crtfc_key": api_key(), "corp_code": cc, "bsns_year": str(y),
-                            "reprt_code": "11011", "fs_div": fs_div},
-                    timeout=_TIMEOUT).json()
-            except Exception:
+                items = fetch_statements(cc, y, "11011", fs_div)
+            except DartError as e:
+                if errors is not None:
+                    errors.append(str(e))
+                return {}
+            if not items:
                 continue
-            if j.get("status") != "000":
-                continue
-            out = {"year": y, "fs_div": fs_div, "debt": 0.0, "capex": 0.0}
-            for it in j.get("list", []):
+            out = {"year": y, "fs_div": fs_div, "debt": 0.0, "capex": 0.0, "currency": statement_currency(items)}
+            for it in items:
                 sj = it.get("sj_div")
                 nm = _norm(it.get("account_nm"))
                 v = _num(it.get("thstrm_amount"))
@@ -311,33 +470,20 @@ _REPRT = {"11013": "Q1", "11012": "반기", "11014": "Q3", "11011": "년"}
 def _fetch_report(corp_code: str, year: int, reprt_code: str) -> Optional[dict]:
     """Như _fetch_year nhưng cho reprt_code bất kỳ (quý/bán niên/năm).
     11011=년(사업보고서) · 11012=반기 · 11013=1분기 · 11014=3분기."""
-    key = api_key()
     for fs_div in ("CFS", "OFS"):
         try:
-            r = requests.get(
-                f"{_BASE}/fnlttSinglAcntAll.json",
-                params={"crtfc_key": key, "corp_code": corp_code,
-                        "bsns_year": str(year), "reprt_code": reprt_code,
-                        "fs_div": fs_div}, timeout=_TIMEOUT)
-            j = r.json()
-        except Exception:
-            continue
-        if j.get("status") != "000":
+            items = fetch_statements(corp_code, year, reprt_code, fs_div)
+        except DartError:
+            return None
+        if not items:
             continue
         rec = {"period": f"{year}-{_REPRT.get(reprt_code, reprt_code)}",
                "year": year, "reprt_code": reprt_code,
                "is_consensus": False, "fs_div": fs_div}
-        found = False
-        for item in j.get("list", []):
-            nm = _norm(item.get("account_nm"))       # bỏ dấu cách → khớp bền
-            for field, names in _ACCOUNTS_NORM.items():
-                if nm in names and rec.get(field) is None:
-                    v = _num(item.get("thstrm_amount"))
-                    if v is not None:
-                        rec[field] = v / 1e8           # 원 -> 억원
-                        found = True
-        if not found:
+        acc = main_accounts(items)
+        if not acc:
             continue
+        rec.update(acc)
         if rec.get("liabilities") is not None and rec.get("equity"):
             rec["debt_ratio"] = round(rec["liabilities"] / rec["equity"] * 100, 1)
         return rec
@@ -387,8 +533,13 @@ def data_status(ticker: str) -> dict:
                 "is_new_listing": None, "suggested_mode": "peer_only",
                 "confidence_cap": "Low",
                 "note": "Không có corp_code — chưa map hoặc chưa hiện diện trên DART."}
-    annual = annual_financials(ticker, years=6)
+    errs: list = []
+    annual = annual_financials(ticker, years=6, errors=errs)
     n = len(annual)
+    if errs:        # DART lỗi ≠ "chưa có báo cáo": không được kết luận 'mới niêm yết' từ một lần gọi hỏng
+        return {"available": True, "corp_code": cc, "dart_annual_years": n, "has_quarterly": False,
+                "coverage": "error", "is_new_listing": None, "suggested_mode": None, "confidence_cap": "Low",
+                "note": f"DART chưa trả được dữ liệu ({errs[0]}) — độ phủ chưa đánh giá được, thử lại sau."}
     q = quarterly_financials(ticker) if n < 2 else []
     if n >= 3:
         cov, new, mode, cap = "full", False, "intrinsic_ok", None

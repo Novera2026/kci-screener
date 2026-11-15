@@ -39,9 +39,9 @@ def _reg():
     return TickerRegistry()
 
 
-def _rf():                       # không cache: mỗi lần chạy sàng lọc lấy Rf mới
-    from screener import fetch_kgb10y
-    return fetch_kgb10y()
+def _rf() -> dict:               # không cache: mỗi lần chạy sàng lọc lấy Rf mới (kèm tình trạng nguồn)
+    from screener import rf_for_valuation
+    return rf_for_valuation()
 
 
 def _rows(tickers: tuple) -> list:
@@ -142,14 +142,17 @@ if st.button("▶️ Chạy sàng lọc", type="primary"):
     deep = []
     if passed:
         bar = st.progress(0.0, text="② Định giá sâu…")
-        a = V.Assumptions(rf=_rf() or 0.032)
+        _rfd = _rf()
+        a = V.Assumptions(rf=_rfd["value"])
         deep = SC.deep_stage([r["Mã"] for r in passed], {r["ticker"]: r for r in rows}, rows, a, reg,
                              progress=lambda d, n: bar.progress(d / n, text=f"② Định giá sâu {d}/{n} mã"),
-                             preset=key, overrides2=ov2)
+                             preset=key, overrides2=ov2,
+                             feeds={} if _rfd["live"] else {"rf": {"ok": False, "note": _rfd["note"]}})
         bar.empty()
     import datetime as _dt
     st.session_state["sc"] = {"key": key, "st1": st1, "deep": deep, "n_univ": len(rows),
-                              "n_pass": sum(1 for r in st1 if r["Qua lọc"]), "at": _dt.datetime.now()}
+                              "n_pass": sum(1 for r in st1 if r["Qua lọc"]), "at": _dt.datetime.now(),
+                              "rf_note": "" if (not passed or _rfd["live"]) else _rfd["note"]}
 
 res = st.session_state.get("sc")
 if not res:
@@ -161,6 +164,13 @@ deep = res["deep"]
 if res.get("at"):
     st.caption(f"🕒 Kết quả tính lúc **{res['at']:%H:%M:%S %d/%m}** với giá, beta, Rf tại thời điểm đó. Bấm "
                "**▶️ Chạy sàng lọc** để tính lại với số liệu mới — kết quả cũ không được dùng lại cho định giá.")
+if res.get("rf_note"):
+    st.error(f"⚠️ {res['rf_note']}. Kết quả bên dưới tính trên giá trị dự phòng nên **độ tin cậy bị hạ xuống Low** — "
+             "bấm **▶️ Chạy sàng lọc** lại sau ít phút.")
+_n_dw = sum(1 for r in deep if r.get("Cảnh báo dữ liệu"))
+if _n_dw:
+    st.warning(f"⚠️ {_n_dw}/{len(deep)} mã có **lỗi dữ liệu** (DART không trả lời, hai nguồn lệch nhau, thiếu beta…) — xem cột "
+               "*Cảnh báo dữ liệu*; các mã này tin cậy Thấp và kết quả có thể đổi khi chạy lại.")
 n_ok = sum(1 for r in deep if r.get("Đạt tiêu chuẩn") == "✅")
 n_g = sum(1 for r in deep if str(r.get("Kết luận", "")).startswith("🟢") and r.get("Đạt tiêu chuẩn") == "✅")
 c1, c2, c3, c4 = st.columns(4)
@@ -174,8 +184,8 @@ if not deep:
     st.warning("Không mã nào qua tầng 1 — thử danh sách gốc lớn hơn hoặc bộ tiêu chuẩn khác.")
 else:
     ddf = pd.DataFrame(deep)
-    cols = ["Đạt tiêu chuẩn", "Mã", "Tên", "Ngành", "Giá", "Giá trị hợp lý", "Chênh %", "Chất lượng TS", "F-score",
-            "Tổng quan", "Kết luận", "Lý do chưa đạt"]
+    cols = ["Đạt tiêu chuẩn", "Mã", "Tên", "Ngành", "Giá", "Giá trị hợp lý", "Chênh %", "Độ tin cậy", "Chất lượng TS",
+            "F-score", "Tổng quan", "Kết luận", "Lý do chưa đạt", "Cảnh báo dữ liệu"]
     ddf = ddf[[c for c in cols if c in ddf.columns]]
 
     def _c(v):

@@ -51,41 +51,64 @@ def _reg():
 #  • TĨNH (BCTC Naver/DART, danh sách đối thủ): chỉ đổi khi DN nộp báo cáo → cache để nhanh.
 #  • THỊ TRƯỜNG (giá, vốn hóa, P/E–P/B đối thủ, beta, Rf): KHÔNG cache, KHÔNG dùng lại kết quả cũ — lấy mới mỗi lần
 #    bấm "Bắt đầu" (hoặc 🔄). Trong MỘT lần phân tích (sửa giả định, đổi bước) giữ nguyên ảnh chụp đó cho nhất quán.
-def _fresh_rf():
-    from screener import fetch_kgb10y
+def _fresh_rf() -> dict:
+    """Rf mới + tình trạng nguồn {value, live, note, source, asof} (screener.rf_for_valuation)."""
+    from screener import RF_HARD_DEFAULT, rf_for_valuation
     try:
-        return fetch_kgb10y()
+        return rf_for_valuation()
     except Exception:
-        return None
+        return {"value": RF_HARD_DEFAULT, "live": False, "source": "mặc định cố định", "asof": "",
+                "note": f"Không lấy được Rf — dùng mặc định {RF_HARD_DEFAULT * 100:.1f}%"}
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _load_static(tk: str, industry_kr: str, n_peers: int) -> dict:
-    """BCTC của mã + danh sách đối thủ trong nước và BCTC của họ (không có giá/vốn hóa/beta)."""
+def _sync_rf(force: bool = False) -> None:
+    """Lấy Rf mới khi mở trang hoặc khi bắt đầu một lần phân tích mới (Bắt đầu / 🔄 / 'Mở trong 🧮' từ trang khác).
+    Ô Rf theo giá trị mới nếu người dùng chưa tự sửa. Gọi TRƯỚC khi dựng ô nhập (sau đó không sửa được as_rf)."""
+    if not force and "_rf_auto" in st.session_state and "_rf_stat" in st.session_state:
+        return                            # (phiên mở trước bản 15/11 chưa có _rf_stat → lấy lại một lần)
+    d = _fresh_rf()
+    new = round(d["value"] * 100, 2)
+    if st.session_state.get("as_rf") == st.session_state.get("_rf_auto"):
+        st.session_state["as_rf"] = new
+    st.session_state["_rf_auto"], st.session_state["_rf_stat"] = new, d
+
+
+class _Incomplete(Exception):
+    """Lượt lấy dữ liệu tĩnh bị thiếu do lỗi nguồn — mang theo kết quả để dùng tạm, KHÔNG được lưu cache."""
+
+
+def _load_static_raw(tk: str, industry_kr: str, n_peers: int) -> dict:
+    """BCTC của mã + danh sách đối thủ trong nước và BCTC của họ (không có giá/vốn hóa/beta).
+    dart_errors / peer_errors: thông báo khi DART lỗi (khác 'không có báo cáo') — kết quả khi đó không đầy đủ."""
     from financials import fetch_financials
     import concurrent.futures as _cf
     reg = _reg()
     fin = fetch_financials(tk)
+    errs: list = []
     extras = {}
     try:
         import dart_api
-        extras = dart_api.valuation_extras(tk) or {}
+        extras = dart_api.valuation_extras(tk, errors=errs) or {}
     except Exception:
-        pass
+        errs.append("lỗi đọc số liệu DART cho EV/FCFF")
     try:
-        fs_full = AN.fetch_full(tk)
+        fs_full = AN.fetch_full(tk, errors=errs)
     except Exception:
         fs_full = None
+        errs.append("lỗi đọc BCTC đầy đủ DART")
     try:
-        fs_q = AN.quarter_series(AN.fetch_quarter_reports(tk))       # BCTC quý DART (đã nộp → cache)
+        fs_q = AN.quarter_series(AN.fetch_quarter_reports(tk, errors=errs))       # BCTC quý DART (đã nộp → cache)
     except Exception:
         fs_q = []
+        errs.append("lỗi đọc BCTC quý DART")
     ptk = PR.domestic_candidates(tk, industry_kr, reg, n=n_peers)
+    peer_errs: list = []
 
     def _pfs(t):
         try:
-            return AN.fetch_full(t)
+            return AN.fetch_full(t, errors=peer_errs)
         except Exception:
+            peer_errs.append("lỗi đọc BCTC đối thủ")
             return None
     peer_fins, peer_fs = {}, {}
     if ptk:
@@ -93,7 +116,36 @@ def _load_static(tk: str, industry_kr: str, n_peers: int) -> dict:
             peer_fins = dict(zip(ptk, ex.map(fetch_financials, ptk)))
             peer_fs = dict(zip(ptk, ex.map(_pfs, ptk)))
     return {"annual": fin.get("annual", []), "quarters": fin.get("quarter", []), "extras": extras,
-            "fs_full": fs_full, "fs_q": fs_q, "ptk": ptk, "peer_fins": peer_fins, "peer_fs": peer_fs}
+            "fs_full": fs_full, "fs_q": fs_q, "ptk": ptk, "peer_fins": peer_fins, "peer_fs": peer_fs,
+            "dart_errors": list(dict.fromkeys(errs)), "peer_errors": len(peer_errs),
+            "naver_empty": not (fin.get("annual") or fin.get("quarter"))}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _load_static_ok(tk: str, industry_kr: str, n_peers: int) -> dict:
+    d = _load_static_raw(tk, industry_kr, n_peers)
+    if d["dart_errors"] or d["peer_errors"] or d["naver_empty"]:
+        raise _Incomplete(d)            # ngoại lệ không được st.cache_data lưu → lần chạy sau tự lấy lại
+    return d
+
+
+def _load_static(tk: str, industry_kr: str, n_peers: int) -> dict:
+    """Dữ liệu tĩnh, cache 6 giờ CHỈ KHI lấy đủ. Trước 15/11/2026 một lượt lấy lỗi (DART từ chối kết nối) bị giữ 6
+    giờ và nút 🔄 không xóa được — Samsung ra 141.607 thay vì 183.820 ở cùng mức giá.
+
+    Lượt lấy THIẾU được giữ trong phiên của người dùng (không dùng chung, không quá một lần phân tích) để mỗi lần bấm
+    một nút không gọi lại ~30 lượt Naver/DART; chỉ lấy lại khi bắt đầu phân tích mới hoặc bấm 🔄 (vp_force)."""
+    key = (tk, industry_kr, n_peers)
+    tmp = st.session_state.get("vp_static_tmp")
+    if tmp and tmp[0] == key and not st.session_state.get("vp_force"):
+        return tmp[1]
+    try:
+        d = _load_static_ok(tk, industry_kr, n_peers)
+        st.session_state.pop("vp_static_tmp", None)
+        return d
+    except _Incomplete as e:
+        st.session_state["vp_static_tmp"] = (key, e.args[0])
+        return e.args[0]
 
 
 def _load_market(tk: str, ptk: tuple, fcodes: tuple) -> dict:
@@ -108,14 +160,14 @@ def _load_market(tk: str, ptk: tuple, fcodes: tuple) -> dict:
         f_kospi = ex.submit(fetch_weekly_closes, "KOSPI")
         f_peers = ex.submit(lambda: fetch_many(list(ptk), registry=reg, prefer="naver")[0] if ptk else [])
         f_for = ex.submit(lambda: PR.fetch_foreign(list(fcodes)) if fcodes else [])
-        f_rf = ex.submit(_fresh_rf)
         row = f_row.result()
         try:
             beta = beta_vs_market(f_st.result(), f_kospi.result())
         except Exception:
             beta = None
+        # Rf của lần phân tích này đã lấy ở _sync_rf (đầu trang) — ảnh chụp chỉ ghi lại để hiển thị
         return {"row": row, "beta": beta, "peers": f_peers.result(), "foreign": f_for.result(),
-                "rf": f_rf.result(), "at": _dt.datetime.now()}
+                "rf": dict(st.session_state.get("_rf_stat") or {}), "at": _dt.datetime.now()}
 
 
 
@@ -130,9 +182,9 @@ _POS = [(x, None) for x in STEPS[:3]] + [(STEPS[3], x) for x in SUB4] + [(STEPS[
 NAV = st.sidebar.container()          # điều hướng 5 bước — trên cùng thanh bên
 SUMMARY = st.sidebar.container()      # giá trị hợp lý + kết luận — luôn hiện, điền ở cuối trang
 
-if "_rf_auto" not in st.session_state:          # Rf live lúc mở trang (không cache dùng chung)
-    st.session_state["_rf_auto"] = round((_fresh_rf() or 0.032) * 100, 2)
-_rf = st.session_state["_rf_auto"] / 100
+# Rf: lấy khi mở trang và lấy LẠI mỗi lần bắt đầu một phân tích mới (vp_force: Bắt đầu / 🔄 / "Mở trong 🧮")
+_sync_rf(force=bool(st.session_state.get("vp_force")))
+_rf_stat = st.session_state.get("_rf_stat") or {}
 DEF = {"as_rf": st.session_state["_rf_auto"], "as_erp": 4.87, "as_g": 2.0, "as_w": 0.9, "as_years": 5}
 
 
@@ -149,8 +201,11 @@ with st.sidebar:
     ASSUMP_HDR = st.empty()
     with st.expander("⚙️ Giả định chi phí vốn & dự phóng", expanded=bool(_changed)):
         rf = st.number_input("Rf — TPCP Hàn 10 năm (%)", 0.0, 10.0, step=0.05, key="as_rf",
-                             help="Mặc định = lợi suất TPCP Hàn 10 năm thời gian thực (Naver), dự phòng FRED"
-                             if _rf else "Không lấy được Rf → 3,2%") / 100
+                             help="Mặc định = lợi suất TPCP Hàn 10 năm thời gian thực (Naver)"
+                             if _rf_stat.get("live") else str(_rf_stat.get("note") or "Không lấy được Rf trực tiếp")) / 100
+        if not _rf_stat.get("live"):
+            st.caption(f"⚠️ {_rf_stat.get('note') or 'Không lấy được Rf trực tiếp'}. Sửa ô Rf nếu anh có số đúng; còn "
+                       "dùng giá trị dự phòng thì độ tin cậy bị hạ xuống **Low**.")
         erp = st.number_input("ERP (%)", 2.0, 10.0, step=0.05, key="as_erp", help="Damodaran, Hàn Quốc 01/2026") / 100
         g_term = st.number_input("g dài hạn (%)", 0.0, 2.5, step=0.1, key="as_g", help="Trần 2,5% và ≤ Rf") / 100
         w = st.select_slider("w — độ bền siêu lợi nhuận (RIM)", [0.8, 0.85, 0.9, 0.95, 1.0], key="as_w")
@@ -160,14 +215,6 @@ with st.sidebar:
 A = V.Assumptions(rf=rf, erp=erp, g_terminal=g_term, persistence=w, years_high=years)
 
 # ---------------------------------------------------------------------------- chọn mã
-def _refresh_rf():
-    """Lấy Rf mới; nếu người dùng chưa tự sửa Rf thì ô Rf theo giá trị mới."""
-    new = round((_fresh_rf() or 0.032) * 100, 2)
-    if st.session_state.get("as_rf") == st.session_state.get("_rf_auto"):
-        st.session_state["as_rf"] = new
-    st.session_state["_rf_auto"] = new
-
-
 def _start():
     q_ = (st.session_state.get("vp_query_box") or "").strip()
     if not q_:
@@ -175,13 +222,11 @@ def _start():
     tk_ = reg.resolve(q_)
     st.session_state["vp_query"], st.session_state["vp_ticker"] = q_, tk_
     st.session_state["vp_err"] = None if tk_ else q_
-    st.session_state["vp_force"] = True          # phân tích mới → lấy số liệu thị trường mới
-    _refresh_rf()
+    st.session_state["vp_force"] = True          # phân tích mới → lấy số liệu thị trường + Rf mới (_sync_rf đầu trang)
 
 
 def _refresh_market():
     st.session_state["vp_force"] = True
-    _refresh_rf()
 
 
 st.session_state.setdefault("vp_query_box", st.session_state.get("vp_query", ""))
@@ -254,11 +299,8 @@ if st.session_state.pop("vp_force", False) or not _snap or _snap.get("key") != _
         _snap = {"key": _snap_key, **_load_market(tk, tuple(S0["ptk"]), foreign_codes)}
     st.session_state["vp_snap"] = _snap
 
-from financials import build_annual_series  # noqa: E402
-row = dict(_snap["row"])
 beta, peer_rows, foreign = _snap["beta"], _snap["peers"], _snap["foreign"]
 quarters, extras, fs_full = S0["quarters"], S0["extras"], S0["fs_full"]
-series = build_annual_series(tk, S0["annual"], row.get("market_cap"), row.get("price"), years=6, quarters=quarters)
 _peer_ev = []
 for _r in peer_rows:                                  # vốn hóa MỚI của đối thủ + BCTC (tĩnh) → EV/EBIT
     _pf = S0["peer_fins"].get(_r["ticker"]) or {}
@@ -269,14 +311,20 @@ for _r in peer_rows:                                  # vốn hóa MỚI của �
     _peer_ev.append({"Mã": _r["ticker"], "Tên": _r.get("name"), "EBIT 4 quý (억)": _eb,
                      "EV/EBIT": DCF.ev_ebit_of(_r.get("market_cap"), _eb, S0["peer_fs"].get(_r["ticker"]))})
 D = {"annual": S0["annual"], "peer_fins": S0["peer_fins"], "peer_ev": _peer_ev}
-row["beta"] = beta
+D_extra: list = []       # mô hình chuyên ngành thêm vào ⑥ (tab 🏭 điền)
+# Rf dự phòng mà người dùng không tự sửa → ❌ ở bảng kiểm tra số liệu (trần Low)
+_rf_feeds = ({} if (_rf_stat.get("live") or st.session_state.get("as_rf") != st.session_state.get("_rf_auto"))
+             else {"rf": {"ok": False, "note": _rf_stat.get("note")}})
+
+# ---------------------------------------------------------------------------- tính toàn bộ pipeline
+# pipeline.prepare: MỘT cách dựng đầu vào cho mọi trang (chuỗi năm, kiểm tra số liệu, giả định mặc định, bộ đối thủ
+# chuẩn) → với giả định mặc định, trang này ra đúng con số của bảng Định giá tổng hợp, Sàng lọc và bot.
+CTX = P.prepare(tk, dict(_snap["row"]), {"annual": S0["annual"], "quarter": quarters}, A, peer_rows, beta,
+                extras=extras, fs_full=fs_full, peer_ev=_peer_ev, extra=D_extra, years=years, feeds=_rf_feeds)
+row, series, idn, dq = CTX["row"], CTX["series"], CTX["idn"], CTX["dq"]
 name = row.get("name") or tk
 price, mc = row.get("price"), row.get("market_cap")
 reals = [c for c in series if not c.get("is_consensus")]
-
-# ---------------------------------------------------------------------------- tính toàn bộ pipeline
-idn = P.identify(row)
-dq = P.data_quality(row, series, quarters, beta)
 ratios = P.ratio_table(series)
 # ① đối thủ nước ngoài: mặc định theo nhóm ngành, người dùng sửa được (mã Reuters của Naver)
 peer_set = PR.build_peer_set(row, D.get("annual", []), idn["bucket"], peer_rows, D.get("peer_fins", {}),
@@ -284,7 +332,8 @@ peer_set = PR.build_peer_set(row, D.get("annual", []), idn["bucket"], peer_rows,
 decomp = AN.decompose(fs_full) if fs_full else None
 decomp_q = AN.decompose_quarters(S0.get("fs_q") or [], n=6)
 qflags = AN.quarter_flags(decomp_q)
-quality = AN.quality(fs_full, (mc / 1e8) if mc else None, idn["bucket"]) if fs_full else None
+_fs_krw = str((fs_full or {}).get("currency") or "KRW") == "KRW"      # Altman Z trộn vốn hóa (KRW) với nợ trên BCTC
+quality = AN.quality(fs_full, (mc / 1e8) if (mc and _fs_krw) else None, idn["bucket"]) if fs_full else None
 from financials import assess_financials  # noqa: E402
 fin_health = assess_financials(D.get("annual", []), row.get("sector"), row.get("industry_kr"))
 # hồ sơ: lưu ngay phần dữ liệu (①②③) để bước sau / trang sàng lọc đọc lại
@@ -301,20 +350,25 @@ except Exception:
     pass
 
 drv_key = f"drv_{tk}_{years}_{g_term}"
-drv_default = P.default_drivers(series, row, A, years=years, quarters=quarters, cyclical=idn["cyclical"],
-                                 financial=idn["financial"])
-basis = drv_default[0].pop("_basis", "") if drv_default else ""
+drv_default, basis = CTX["drivers"], CTX["basis"]
 coc = P.cost_of_capital(A, beta, mc, extras)
 ke = coc["ke"]
 
 pm = P.peer_medians(peer_rows, exclude=tk)
-evidence = P.reported_evidence(series, quarters)
-
-
-D_extra: list = []       # mô hình chuyên ngành thêm vào ⑥ (tab 🏭 điền)
-D_eval = {"row": row, "series": series, "quarters": quarters, "extras": extras, "peers": peer_rows, "ticker": tk,
-          "extra": D_extra, "fs_full": fs_full, "peer_ev": D.get("peer_ev") or []}
+evidence = CTX["evidence"]
+D_eval = CTX["D"]         # cùng D mà bảng tổng hợp / Sàng lọc / bot đưa vào pipeline.evaluate
 LOG_PATH = os.path.join(_ROOT, "valuation_log.csv")
+
+
+def _no_fs_msg(what: str) -> str:
+    """Vì sao không có BCTC đầy đủ DART — không đổ cho 'thiếu khóa' khi khóa đã có mà DART đang lỗi."""
+    import dart_api as _D
+    if not _D.available():
+        return f"Cần DART_API_KEY để {what}."
+    if S0.get("dart_errors"):
+        return (f"DART chưa trả lời ({S0['dart_errors'][0]}) nên chưa {what} được — bấm **🔄 Cập nhật** sau ít phút. "
+                "(Khóa DART đã có.)")
+    return f"DART không có BCTC năm đầy đủ cho mã này (mới niêm yết hoặc chưa nộp) nên không {what} được."
 
 
 # ---------------------------------------------------------------------------- tiêu đề + bảng giả định
@@ -324,12 +378,34 @@ with HDR:
                f"vốn hóa {mc / 1e12:,.1f} nghìn tỷ KRW" if mc else "")
     _h1, _h2 = st.columns([4, 1])
     _bt = f"{beta:.2f}" if beta is not None else "—"
-    _rfv = f"{_snap['rf'] * 100:.2f}%" if _snap.get("rf") else "—"
+    _rfs = _snap.get("rf") or {}
+    if not isinstance(_rfs, dict):        # ảnh chụp của phiên mở trước bản 15/11 lưu Rf dạng số
+        _rfs = {"value": _rfs, "live": True}
+    _rfv = (f"{_rfs['value'] * 100:.2f}%" + ("" if _rfs.get("live") else " ⚠️ dự phòng")) if _rfs.get("value") else "—"
     _h1.caption(f"🕒 Số liệu thị trường (giá, vốn hóa, P/E–P/B đối thủ, beta {_bt}, Rf 국고채 10년 {_rfv}) lấy lúc "
                 f"**{_snap['at']:%H:%M:%S %d/%m}** — mỗi lần bấm Bắt đầu đều lấy mới; kết quả định giá không dùng lại "
                 "từ lần trước.")
     _h2.button("🔄 Cập nhật", on_click=_refresh_market, width="stretch",
-               help="Lấy lại giá, vốn hóa, đối thủ, beta, Rf ngay bây giờ")
+               help="Lấy lại giá, vốn hóa, đối thủ, beta, Rf ngay bây giờ (và BCTC nếu lượt trước lấy thiếu)")
+    # Nguồn dữ liệu lỗi phải HIỆN RA — không lặng lẽ định giá trên số thiếu (rà soát 15/11/2026)
+    _src_now = (reals[-1].get("_src") if reals else None) or {}
+    if _src_now.get("dart") == "error":          # chuỗi BCTC năm thiếu → ảnh hưởng thẳng tới giá trị hợp lý
+        st.error(f"⚠️ **DART chưa trả đủ BCTC năm** ({_src_now.get('note')}). Giá trị hợp lý đang tính trên chuỗi năm "
+                 "**không đầy đủ** nên độ tin cậy bị hạ xuống **Low** và con số có thể đổi khi DART trả lời lại. Bấm "
+                 "**🔄 Cập nhật** sau ít phút.")
+    elif S0.get("dart_errors"):                  # chỉ thiếu BCTC đầy đủ / quý → bóc tách, chất lượng TS, FCFF đối chiếu
+        st.warning("⚠️ **DART chưa trả đủ dữ liệu** (" + "; ".join(str(x) for x in S0["dart_errors"][:2])
+                   + "). Phần bóc tách, chất lượng tài sản, bóc tách quý và FCFF/EV-EBIT (đối chiếu) có thể trống hoặc "
+                     "đang dùng bản đã lưu trước đó; giá trị hợp lý không dùng các phần này. Lượt lấy này **không được "
+                     "lưu lại**: bấm **🔄 Cập nhật** sau ít phút để lấy lại.")
+    elif S0.get("peer_errors"):
+        st.warning(f"⚠️ DART không trả BCTC của {S0['peer_errors']} đối thủ — bội số EV/EBIT của đối thủ có thể thiếu. "
+                   "Bấm **🔄 Cập nhật** để lấy lại.")
+    if S0.get("naver_empty"):
+        st.error("⚠️ Không lấy được BCTC từ Naver cho mã này lúc này — bấm **🔄 Cập nhật** để thử lại.")
+    if _src_now.get("dart") in ("mismatch", "currency"):
+        st.warning(f"⚠️ Số DART không dùng chung được với số Naver: {_src_now.get('note')}. Chuỗi năm chỉ gồm số Naver"
+                   + ("; các mô hình dựa trên dự phóng bị chặn." if _src_now.get("dart") == "mismatch" else "."))
 
 # 🏭 chuyên ngành trước ④: backlog / công suất sinh giả định cho ④; rNPV / EV-GWh thành mô hình ở ⑥
 SPEC_MODES = {"none": "Không dùng", "backlog": "Backlog — đóng tàu, quốc phòng",
@@ -492,7 +568,8 @@ with T["4"]:
     if fc:
         st.markdown("**Dự phóng năm**")
         fdf = pd.DataFrame(fc)
-        st.dataframe(fdf.style.format({c: "{:,.0f}" for c in ("Doanh thu (억)", "LN HĐ (억)", "LN ròng (억)", "EPS",
+        st.dataframe(fdf.style.format({c: "{:,.0f}" for c in ("Doanh thu (억)", "LN HĐ (억)", "LN ròng (억)",
+                                                              "LN cổ đông mẹ (억)", "EPS",
                                                               "DPS", "BPS đầu kỳ", "BPS cuối kỳ")}
                                       | {c: "{:+.1f}" for c in ("Tăng trưởng DT %",)}
                                       | {c: "{:.1f}" for c in ("Biên LN HĐ %", "Biên LN ròng %", "ROE %")}, na_rep="—"),
@@ -639,7 +716,7 @@ with T["3"]:
     st.markdown("#### Bóc tách tài chính" + (f" — năm {decomp['year']} ({'hợp nhất' if decomp['fs_div'] == 'CFS' else 'riêng'}, DART)"
                                               if decomp else ""))
     if not decomp:
-        st.info("Cần DART_API_KEY để bóc tách từ BCTC đầy đủ (DuPont, cơ cấu lợi nhuận, dòng tiền, vốn lưu động).")
+        st.info(_no_fs_msg("bóc tách từ BCTC đầy đủ (DuPont, cơ cấu lợi nhuận, dòng tiền, vốn lưu động)"))
     else:
         c1, c2, c3, c4 = st.columns(4)
         _dp = decomp["dupont"]
@@ -706,7 +783,7 @@ with T["q"]:
     st.markdown("#### Kết quả" + (f" — hạng **{quality['grade']}** ({quality['score']:.0f}/100)"
                                               if quality and quality.get("score") is not None else ""))
     if not quality:
-        st.info("Cần DART_API_KEY (BCTC đầy đủ) để chấm chất lượng tài sản.")
+        st.info(_no_fs_msg("chấm chất lượng tài sản"))
     else:
         if quality["fin_limited"]:
             st.warning("Ngành tài chính: DART không có nợ xấu / dự phòng dạng cấu trúc → chỉ chấm được phần chung; "

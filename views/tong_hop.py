@@ -29,8 +29,8 @@ except Exception:
     pass
 
 from screener import (TickerRegistry, sector_aggregates, export_excel, COLUMN_KR)
-from valuation import (Assumptions, value_batch, value_stock, recommend_method,
-                       _cap_conf, ev_ebit_value, fcff_value, peer_key,
+from valuation import (Assumptions, value_batch, recommend_method,
+                       _cap_conf, ev_ebit_value, fcff_value,
                        effective_sector, CYCLICAL_SECTORS, RELIABLE_BAND)
 try:
     import coverage
@@ -80,9 +80,10 @@ def _new_market_run():
 
 
 def _rf_live():
-    """Rf = TPCP Hàn 10 năm (Naver thời gian thực, dự phòng FRED), dạng thập phân. None nếu lỗi."""
-    from screener import fetch_kgb10y_detail
-    d = _run_memo("rf", None, fetch_kgb10y_detail)
+    """Rf = TPCP Hàn 10 năm (Naver thời gian thực), dạng thập phân, kèm tình trạng nguồn ở session_state['_rf_info']
+    (live = False: đang dùng giá trị dự phòng — xem screener.rf_for_valuation)."""
+    from screener import rf_for_valuation
+    d = _run_memo("rf", None, rf_for_valuation)
     st.session_state["_rf_info"] = d
     return d.get("value")
 
@@ -120,12 +121,18 @@ with st.sidebar:
     st.divider()
     st.subheader("💰 Giả định định giá")
     st.caption("House Korea (KRW nominal) — chỉnh nếu cần. Để mặc định cũng OK.")
-    _rf0 = _rf_live()                       # TPCP 10 năm: Naver thời gian thực, dự phòng FRED
+    _rf0 = _rf_live()                       # TPCP 10 năm: Naver thời gian thực; lỗi → giá trị dự phòng có ghi rõ
     _rf_def = round(_rf0 * 100, 2) if _rf0 else 3.2
     rf = st.slider("Rf — TPCP Hàn 10Y (%)", 1.0, 6.0, _rf_def, 0.01) / 100
     _rfi = st.session_state.get("_rf_info") or {}
-    st.caption(f"🛰️ Rf mặc định = **{_rf_def}%** — {_rfi.get('source', '')}, lúc {_rfi.get('asof', '')}" if _rf0 else
-               "⚠️ Không lấy được Rf → mặc định 3.2%. Chỉnh tay nếu cần.")
+    if _rfi.get("live"):
+        st.caption(f"🛰️ Rf mặc định = **{_rf_def}%** — {_rfi.get('source', '')}, lúc {_rfi.get('asof', '')}")
+    else:
+        st.caption(f"⚠️ {_rfi.get('note') or 'Không lấy được Rf trực tiếp'}. Chỉnh tay nếu anh có số đúng — khi còn dùng "
+                   "giá trị dự phòng, kết luận của quy trình định giá bị hạ xuống **Low**.")
+    # Rf dự phòng mà người dùng không tự sửa → ❌ ở bảng kiểm tra số liệu của quy trình (trần Low)
+    _rf_feeds = ({} if (_rfi.get("live") or abs(rf * 100 - _rf_def) > 1e-9)
+                 else {"rf": {"ok": False, "note": _rfi.get("note")}})
     erp = st.slider("ERP — phần bù rủi ro VCSH (%)", 4.0, 9.0, round(Assumptions().erp * 100, 2), 0.01,
                     help="Mặc định = ERP tổng cho Hàn Quốc của Damodaran (01/2026), cùng nguồn với "
                          "KCI-Valuation-Lab. Beta riêng từng mã được điều chỉnh Blume (0,67β + 0,33).") / 100
@@ -365,22 +372,13 @@ def _prefetch(tickers: list[str], on_prog=None) -> tuple[dict, dict]:
     return fins, betas
 
 
-PIPE_PEERS_PER_IND = 8   # đối thủ cùng ngành (top vốn hóa) lấy thêm cho phép neo của quy trình
-
-
-def _prefetch_pipeline(rows: list[dict], fins: dict, on_prog=None) -> tuple[dict, list]:
-    """Dữ liệu cho QUY TRÌNH ĐỊNH GIÁ (cùng công thức trang 🧮, đã backtest): chuỗi BCTC năm (Naver + DART) của
-    từng mã và ĐỐI THỦ CÙNG NGÀNH theo top vốn hóa — không chỉ các mã người dùng nhập (danh sách 30 mã thường có
-    < 3 mã/ngành → không đối chiếu được peer). Giá đối thủ lấy MỚI trong lần chạy này."""
+def _prefetch_pipeline(rows: list[dict], fins: dict, on_prog=None) -> tuple[dict, dict]:
+    """Dữ liệu cho QUY TRÌNH ĐỊNH GIÁ (pipeline.assess — cùng một hàm với trang 🧮, Sàng lọc và bot): chuỗi BCTC năm
+    (Naver + DART) của từng mã và BỘ ĐỐI THỦ CHUẨN của từng mã (gợi ý Naver ∪ top vốn hóa cùng ngành KRX — đúng bộ
+    trang 🧮 dùng, để một mã chỉ có một giá trị hợp lý ở mọi trang). Giá đối thủ lấy MỚI trong lần chạy này.
+    Trả (chuỗi năm theo mã, {mã: [dòng thị trường của đối thủ]})."""
     import concurrent.futures as _cf
-    import pipeline as _P
-    from screener import fetch_many
-    have = {r["ticker"] for r in rows}
-    inds = sorted({r.get("industry_kr") for r in rows if r.get("industry_kr")})
-    with _cf.ThreadPoolExecutor(max_workers=4) as ex:
-        lists = list(ex.map(lambda ik: _P.industry_peers(ik, exclude=None, n=PIPE_PEERS_PER_IND), inds))
-    extra = [t for t in dict.fromkeys(t for lst in lists for t in lst) if t not in have and t in set(reg.df["ticker"])]
-    pool = fetch_many(extra, registry=reg, prefer="naver")[0] if extra else []
+    import peers as _PR
 
     def _ser(r):
         f = fins.get(r["ticker"]) or _fin(r["ticker"])
@@ -395,7 +393,12 @@ def _prefetch_pipeline(rows: list[dict], fins: dict, on_prog=None) -> tuple[dict
             series[tk] = ser
             if on_prog:
                 on_prog(i, len(rows))
-    return series, pool
+    try:
+        peer_map = _PR.peer_rows_batch([(r["ticker"], r.get("industry_kr")) for r in rows], reg,
+                                       {r["ticker"]: r for r in rows})
+    except Exception:
+        peer_map = {}
+    return series, peer_map
 
 
 def _dart_extras(ticker: str) -> dict:
@@ -662,16 +665,16 @@ if run_btn:
         def _on_fin(done, total):
             prog.progress(done / total, text=f"Đang nạp BCTC + beta song song: {done}/{total} mã")
         fins, betas = _prefetch([r["ticker"] for r in rows], _on_fin)
-    pipe_series, peer_pool = {}, []
+    pipe_series, peer_map = {}, {}
     if len(rows) <= PREFETCH_MAX:
         def _on_pipe(done, total):
             prog.progress(done / total, text=f"Đang chuẩn bị quy trình định giá (BCTC nhiều năm + đối thủ "
                                              f"cùng ngành): {done}/{total} mã")
-        pipe_series, peer_pool = _prefetch_pipeline(rows, fins, _on_pipe)
+        pipe_series, peer_map = _prefetch_pipeline(rows, fins, _on_pipe)
     prog.empty()
     st.session_state["screen"] = {
         "records": rows, "unresolved": unresolved, "resolutions": resolutions,
-        "fin": fins, "beta": betas, "pipe_series": pipe_series, "peer_pool": peer_pool,
+        "fin": fins, "beta": betas, "pipe_series": pipe_series, "peer_map": peer_map,
         "fetched_at": _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).strftime(
             "%H:%M %d/%m/%Y")}
 
@@ -1023,7 +1026,31 @@ if "screen" in st.session_state:
                 _hist_map[_tk] = [c for c in _fin(_tk)["annual"] if not c.get("is_consensus")]
             except Exception:
                 pass
+    # ---- KẾT LUẬN THEO QUY TRÌNH ĐỊNH GIÁ (pipeline.assess) — con số chính của trang ----
+    # Một hàm, một bộ đối thủ chuẩn cho mọi trang (rà soát 15/11/2026: trước đó Samsung ra 183.820 ở trang 🧮,
+    # 147.796 ở bảng này, 90.690 ở "Chi tiết 1 mã", 119.277 ở Sàng lọc). Backtest point-in-time 2021–25: kết luận của
+    # quy trình có tín hiệu xếp hạng (IC ≈ +0,1), lõi KCI một mình thì không (IC +0,011).
+    _scr = st.session_state["screen"]
+    _pipe, _pipe_ctx = {}, {}
+    if _scr.get("pipe_series"):
+        import pipeline as _P
+        _betas = _scr.get("beta") or {}
+        _pmap = _scr.get("peer_map") or {}
+        for _r in rows:
+            _tk = _r["ticker"]
+            _ser = _scr["pipe_series"].get(_tk) or []
+            if not _ser:
+                continue
+            try:
+                _ctx = _P.assess(_tk, _r, _fin(_tk), assume, _pmap.get(_tk) or [],
+                                 _betas.get(_tk) if _tk in _betas else _beta(_tk), series=_ser, feeds=_rf_feeds)
+                _pipe_ctx[_tk], _pipe[_tk] = _ctx, _ctx["rec"]
+            except Exception:
+                pass
     val_results, _med = value_batch(df, assume, histories=_hist_map)
+    # Lõi KCI (tham khảo): mã đã chạy quy trình thì lấy đúng lõi CỦA quy trình (cùng bộ đối thủ chuẩn, cùng dự phóng)
+    # → cột tham khảo, mục Chi tiết và trang 🧮 cùng một số; mã chưa chạy quy trình giữ cách tính nhanh theo danh sách.
+    val_results = [(_pipe_ctx[r.ticker]["E"]["base"] if r.ticker in _pipe_ctx else r) for r in val_results]
     vdf = pd.DataFrame([r.to_dict() for r in val_results])
     VAL_KR = {
         "ticker": "Mã", "name": "Tên", "sector": "Ngành", "price": "Giá",
@@ -1039,37 +1066,6 @@ if "screen" in st.session_state:
                                 "PP áp dụng": "PP lõi KCI", "Độ tin cậy": "Độ tin cậy lõi",
                                 "Trạng thái": "Trạng thái lõi"})
 
-    # ---- KẾT LUẬN THEO QUY TRÌNH ĐỊNH GIÁ (trang 🧮) — con số chính của trang ----
-    # Backtest point-in-time 2021–25 (78 mã): kết luận của quy trình IC +0,117 (78 mã) / +0,076 (top 200) — 10/11; lõi KCI một
-    # mình IC +0,011. Trước 11/11/2026 trang này chỉ hiện lõi KCI → 10/21 mã lệch > 30% so với trang 🧮.
-    _scr = st.session_state["screen"]
-    _pipe = {}
-    if _scr.get("pipe_series"):
-        import pipeline as _P
-        _pool = rows + (_scr.get("peer_pool") or [])
-        _betas = _scr.get("beta") or {}
-        for _r in rows:
-            _tk = _r["ticker"]
-            _ser = _scr["pipe_series"].get(_tk) or []
-            if not _ser:
-                continue
-            _row = dict(_r)
-            _row["beta"] = _betas.get(_tk) if _tk in _betas else _beta(_tk)
-            _q = (_fin(_tk) or {}).get("quarter", [])
-            try:
-                _idn = _P.identify(_row)
-                _ev = _P.reported_evidence(_ser, _q)
-                _dq = _P.data_quality(_row, _ser, _q, _row["beta"])
-                _drv = _P.default_drivers(_ser, _row, assume, years=min(assume.years_high, 5), quarters=_q,
-                                          cyclical=_idn["cyclical"], financial=_idn["financial"])
-                if _drv:
-                    _drv[0].pop("_basis", None)
-                _peers = [x for x in _pool if x.get("industry_kr") == _row.get("industry_kr")]
-                _E = _P.evaluate({"row": _row, "series": _ser, "quarters": _q, "extras": {}, "peers": _peers,
-                                  "ticker": _tk}, assume, _drv, _idn, _dq, _ev)
-                _pipe[_tk] = _E["rec"]
-            except Exception:
-                pass
     if _pipe:
         vsum.insert(4, "Giá trị hợp lý", [(_pipe.get(t) or {}).get("fair") for t in vsum["Mã"]])
         vsum.insert(5, "Chênh %", [round(u, 1) if (u := (_pipe.get(t) or {}).get("upside")) is not None else None
@@ -1177,11 +1173,13 @@ if "screen" in st.session_state:
         vsty = vsty.map(_c_evebit, subset=["EV/EBIT"])
     st.dataframe(vsty, width="stretch", hide_index=True)
     if _pipe:
-        st.caption("**Giá trị hợp lý / Chênh % / Độ tin cậy / Trạng thái** = kết luận của **quy trình định giá** (cùng "
-                   "công thức trang 🧮: dự phóng mặc định, nhiều mô hình chính qua cổng số, đối thủ = top vốn hóa "
-                   f"cùng ngành, {len(_scr.get('peer_pool') or [])} mã đối thủ lấy giá mới trong lần chạy này). "
-                   "Backtest 2021–25: IC +0,116 (78 mã) / +0,086 (top 200). **Lõi KCI (tham khảo)** là mô hình cũ một mình (IC +0,011) — chỉ để "
-                   "đối chiếu. Mở trang **🧮 Định giá** để đi đủ 5 bước cho một mã.")
+        _n_peer = len({p["ticker"] for ps in (_scr.get("peer_map") or {}).values() for p in ps})
+        st.caption("**Giá trị hợp lý / Chênh % / Độ tin cậy / Trạng thái** = kết luận của **quy trình định giá** — cùng "
+                   "một hàm và cùng bộ đối thủ với trang 🧮, Sàng lọc và bot (dự phóng mặc định, các mô hình chính qua "
+                   f"cổng số; đối thủ = gợi ý Naver ∪ top vốn hóa cùng ngành, {_n_peer} mã đối thủ lấy giá mới trong lần "
+                   "chạy này). Backtest 2021–25: IC +0,12 (78 mã) / +0,09 (top 200) — tín hiệu xếp hạng yếu. **Lõi KCI "
+                   "(tham khảo)** là một mô hình thành phần của quy trình (một mình IC +0,011) — chỉ để đối chiếu. Mở "
+                   "trang **🧮 Định giá** để đi đủ 5 bước và sửa giả định cho một mã.")
     elif len(rows) > PREFETCH_MAX:
         st.caption(f"Danh sách > {PREFETCH_MAX} mã: chỉ hiện lõi KCI (tham khảo). Rút gọn danh sách để có kết luận "
                    "theo quy trình định giá.")
@@ -1204,18 +1202,23 @@ if "screen" in st.session_state:
     r = names[pick]
     drow = df[df["ticker"] == r.ticker].iloc[0].to_dict()
 
-    # Cyclical (bán dẫn/thép/đóng tàu/ô tô/pin): nạp lịch sử DART → định giá MID-CYCLE
-    # (median ROE qua chu kỳ, khử đỉnh/đáy) đáng tin hơn trailing 1 năm ở bảng nhanh.
-    try:
-        _hist = [c for c in build_annual_series(
-                    r.ticker, _fin(r.ticker)["annual"],
-                    drow.get("market_cap"), drow.get("price"), years=6)
-                 if not c.get("is_consensus")]
-        _m = _med.get(peer_key(drow), {}) if isinstance(_med, dict) else {}
-        if _hist:
-            r = value_stock(drow, assume, _m.get("pe"), _m.get("pb"), history=_hist)
-    except Exception:
-        pass
+    # Con số chính của mục này = KẾT LUẬN CỦA QUY TRÌNH ĐỊNH GIÁ (pipeline.assess) — đúng số ở bảng trên, trang 🧮,
+    # Sàng lọc và bot. Danh sách > PREFETCH_MAX mã chưa chạy quy trình ở bảng → chạy riêng cho mã đang xem (đối thủ
+    # lấy một lần trong lần chạy này). Lõi KCI bên dưới là lõi CỦA quy trình (cùng bộ đối thủ), chỉ để tham khảo.
+    _ctx1 = _pipe_ctx.get(r.ticker)
+    if _ctx1 is None:
+        try:
+            import pipeline as _P
+            import peers as _PR
+            _row1 = next(x for x in rows if x["ticker"] == r.ticker)
+            _peers1 = _run_memo("peers1", r.ticker, lambda: _PR.peer_rows_batch(
+                [(r.ticker, _row1.get("industry_kr"))], reg, {x["ticker"]: x for x in rows}).get(r.ticker, []))
+            _ctx1 = _P.assess(r.ticker, _row1, _fin(r.ticker), assume, _peers1, _beta(r.ticker), feeds=_rf_feeds)
+        except Exception:
+            _ctx1 = None
+    _rec1 = (_ctx1 or {}).get("rec") or {}
+    if _ctx1:
+        r = _ctx1["E"]["base"]
 
     # Độ phủ dữ liệu (Naver+DART) → chặn trần confidence cho mã mới niêm yết/thiếu lịch sử
     cov = None
@@ -1224,27 +1227,40 @@ if "screen" in st.session_state:
             cov = coverage.assess_coverage(r.ticker, r.sector)
         except Exception:
             cov = None
-    disp_conf = _cap_conf(r.confidence, cov.get("confidence_cap")) if cov else r.confidence
+    _conf1 = _rec1.get("confidence") if _rec1.get("fair") else None
+    disp_conf = (_cap_conf(_conf1, cov.get("confidence_cap")) if (cov and _conf1) else _conf1) or "—"
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Giá hiện tại", f"{r.price:,.0f}" if r.price else "—")
-    c2.metric(f"Fair value ({r.auto_method})",
+    c2.metric("Giá trị hợp lý",
+              f"{_rec1['fair']:,.0f}" if _rec1.get("fair") else "—",
+              f"{_rec1['upside']:+.1f}%" if _rec1.get("upside") is not None else None,
+              help="Kết luận của quy trình định giá: trung vị các mô hình chính qua cổng số — cùng con số với bảng "
+                   "trên, trang 🧮, Sàng lọc và bot.")
+    c3.metric("Độ tin cậy", disp_conf,
+              "↓ chặn trần" if (_conf1 and disp_conf != _conf1) else None)
+    c4.metric("Lõi KCI (tham khảo)",
               f"{r.fair_value:,.0f}" if r.fair_value else "—",
-              f"{r.upside_pct:+.1f}%" if r.upside_pct is not None else None)
-    c3.metric("Fair value dự phóng (Fwd)",
-              f"{r.fwd_fair:,.0f}" if r.fwd_fair else "—",
-              f"{r.fwd_upside_pct:+.1f}%" if r.fwd_upside_pct is not None else None)
-    c4.metric("Độ tin cậy định giá", disp_conf,
-              "↓ chặn trần" if disp_conf != r.confidence else None)
+              f"{r.upside_pct:+.1f}%" if r.upside_pct is not None else None,
+              help=f"Một mô hình thành phần của quy trình ({r.auto_method}). Không phải con số kết luận.")
+    if r.fwd_fair:
+        st.caption(f"Lõi KCI theo EPS/ROE dự phóng (tham khảo): {r.fwd_fair:,.0f}"
+                   + (f" ({r.fwd_upside_pct:+.1f}%)" if r.fwd_upside_pct is not None else ""))
+    if _rec1:
+        (st.success if _rec1.get("fair") else st.warning)(
+            f"**Kết luận quy trình định giá:** {_rec1.get('status')}"
+            + (f" · {_rec1['verdict']}" if _rec1.get("verdict") else ""))
+        _dqf = [c for c in (_ctx1 or {}).get("dq", {}).get("checks", []) if c["Kết quả"] == "❌"]
+        if _dqf:
+            st.error("❌ Lỗi dữ liệu (kết quả tin cậy Thấp, có thể đổi khi chạy lại): "
+                     + " · ".join(f"{c['Kiểm tra']} — {c['Ghi chú']}" for c in _dqf))
     if not getattr(r, "reliable", True):
-        st.warning(f"⚪ **KCI không công bố giá trị hợp lý cho mã này.** Số thô "
-                   f"{r.fair_raw:,.0f} KRW = {r.fair_raw / r.price:.2f}× giá, ngoài vùng tin cậy 0,4–2,5×: "
-                   "mô hình dựa trên ROE/EPS quá khứ không giải thích được giá hiện tại. Dùng báo cáo "
-                   "nghiên cứu (DCF có dự phóng theo mảng) thay vì con số này."
-                   if r.fair_raw and r.price else "⚪ KCI không công bố giá trị hợp lý cho mã này.")
+        st.caption(f"⚪ Lõi KCI (tham khảo) không công bố: số thô {r.fair_raw:,.0f} KRW = {r.fair_raw / r.price:.2f}× giá, "
+                   "ngoài vùng tin cậy 0,4–2,5× — mô hình dựa trên ROE/EPS quá khứ không giải thích được giá hiện tại."
+                   if r.fair_raw and r.price else "⚪ Lõi KCI (tham khảo) không công bố cho mã này.")
     elif getattr(r, "triangulated", False):
-        st.caption("△ Nội tại lệch trung vị phép neo peer quá 2× → giá trị hợp lý = 50% nội tại + 50% peer "
-                   "(tin cậy Thấp). Xem bảng phương pháp bên dưới.")
+        st.caption("△ Lõi KCI (tham khảo): nội tại lệch trung vị phép neo peer quá 2× → lõi = 50% nội tại + 50% peer. "
+                   "Xem bảng phương pháp bên dưới.")
     if cov:
         st.caption("📊 Độ phủ dữ liệu: " + coverage.coverage_badge(cov))
         if cov.get("is_new_listing"):

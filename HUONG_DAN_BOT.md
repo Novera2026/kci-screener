@@ -75,6 +75,11 @@ Kiểm tra ngay: tab **Actions → Bot săn cổ phiếu → Run workflow**. Sau
 
 - Mỗi lần chạy đều lấy số liệu thị trường mới (giá, beta, Rf thời gian thực). Bot không dùng lại kết quả định giá cũ.
   Trạng thái "hôm trước" chỉ dùng để báo mã mới/rớt.
+- Từ 15/11/2026 bot định giá bằng **đúng hàm và đúng bộ đối thủ của trang 🧮** (`pipeline.assess`) — một mã có cùng giá trị
+  hợp lý ở bot, Sàng lọc, bảng Định giá tổng hợp và trang 🧮.
+- Nguồn dữ liệu lỗi không còn bị che: không lấy được Rf trực tiếp → tin nhắn có dòng ⚠️ và mọi kết quả lần đó tin cậy Thấp;
+  mã nào DART không trả lời / hai nguồn lệch nhau / thiếu beta thì cột **Cảnh báo dữ liệu** (bảng "Định giá sâu" của file
+  Excel) ghi rõ lý do.
 - Backtest 2021–25 cho thấy chỉ **phần định giá** có bằng chứng (IC +0,116 / +0,086). Các bộ tiêu chuẩn **chưa thắng
   trung bình danh sách gốc có ý nghĩa thống kê** (xem `HUONG_DAN_BACKTEST.md`).
 - Danh sách là để **nghiên cứu tiếp, không phải khuyến nghị đầu tư**. Mở mã trong trang 🧮 để đi đủ 5 bước trước khi

@@ -4,8 +4,9 @@ KCI — quy trình SÀNG LỌC cổ phiếu rẻ rồi ĐỊNH GIÁ SÂU danh s�
   ① Danh sách gốc    : top vốn hóa (Naver marketValue) / ngành KRX / chủ đề / nhập tay
   ② Lọc rẻ    : P/E, P/B so với trung vị NGÀNH trong chính danh sách gốc (≥ 3 mã cùng ngành, thiếu thì so cả danh sách),
                 tỷ suất cổ tức, bắt buộc có lãi; điểm rẻ = trung bình (P/E ÷ ngành, P/B ÷ ngành) — càng thấp càng rẻ
-  ③ Định giá sâu: mỗi mã chạy ĐÚNG quy trình trang 🧮 (giả định mặc định, cổng số, chất lượng tài sản, tổng quan)
-                với đối thủ = các mã cùng ngành trong danh sách gốc; lưu hồ sơ dossiers/ cho từng mã
+  ③ Định giá sâu: mỗi mã chạy ĐÚNG quy trình trang 🧮 (pipeline.assess: giả định mặc định, cổng số, chất lượng tài sản,
+                tổng quan) với CÙNG bộ đối thủ chuẩn của trang 🧮 (gợi ý Naver ∪ top vốn hóa cùng ngành KRX) — một mã
+                chỉ có một giá trị hợp lý ở mọi trang; lưu hồ sơ dossiers/ cho từng mã
   ④ Xếp hạng  : kết luận theo quy tắc số → chênh lệch → chất lượng
 
 Bằng chứng (backtest 2021–25, sau rà soát 10/11/2026): IC upside đã công bố +0,117 (78 mã, t 2,9) / +0,076 (top 200,
@@ -118,39 +119,41 @@ def _verdict_rank(v: str) -> int:
 
 
 def analyze_one(tk: str, row: dict, universe_rows: list[dict], a: V.Assumptions, registry,
-                kospi_weekly: list[float], save: bool = True) -> dict:
-    """Toàn bộ quy trình 🧮 cho 1 mã với giả định mặc định (không đối thủ nước ngoài để nhanh)."""
-    from financials import assess_financials, build_annual_series, fetch_financials
+                kospi_weekly: list[float], save: bool = True, peers: Optional[list[dict]] = None,
+                feeds: Optional[dict] = None) -> dict:
+    """Toàn bộ quy trình 🧮 cho 1 mã với giả định mặc định (không đối thủ nước ngoài để nhanh).
+
+    peers: dòng thị trường của bộ đối thủ CHUẨN (deep_stage lấy một lượt cho cả danh sách); không truyền → tự lấy.
+    feeds: tình trạng nguồn thị trường của lần chạy (vd Rf không lấy được trực tiếp) → vào bảng kiểm tra số liệu."""
+    from financials import assess_financials, fetch_financials
     from screener import beta_vs_market, fetch_weekly_closes
     row = dict(row)
     fin = fetch_financials(tk)
-    series = build_annual_series(tk, fin.get("annual", []), row.get("market_cap"), row.get("price"), years=6,
-                                 quarters=fin.get("quarter"))
-    quarters = fin.get("quarter", [])
     try:
-        row["beta"] = beta_vs_market(fetch_weekly_closes(tk), kospi_weekly) if kospi_weekly else None
+        beta = beta_vs_market(fetch_weekly_closes(tk), kospi_weekly) if kospi_weekly else None
     except Exception:
-        row["beta"] = None
-    idn = P.identify(row)
-    dq = P.data_quality(row, series, quarters, row["beta"])
-    ev = P.reported_evidence(series, quarters)
-    drv = P.default_drivers(series, row, a, years=a.years_high, quarters=quarters, cyclical=idn["cyclical"],
-                            financial=idn["financial"])
-    if drv:
-        drv[0].pop("_basis", None)
-    peers_same = [r for r in universe_rows if r.get("industry_kr") == row.get("industry_kr") and r["ticker"] != tk]
-    D = {"row": row, "series": series, "quarters": quarters, "extras": {}, "peers": peers_same, "ticker": tk}
-    E = P.evaluate(D, a, drv, idn, dq, ev)
+        beta = None
+    if peers is None:
+        peers = PR.peer_rows_batch([(tk, row.get("industry_kr"))], registry,
+                                   {r["ticker"]: r for r in universe_rows}).get(tk, [])
+    fs_err: list = []
     try:
-        fs = AN.fetch_full(tk)
+        fs = AN.fetch_full(tk, errors=fs_err)
     except Exception:
         fs = None
+        fs_err.append("lỗi đọc BCTC đầy đủ")
+    ctx = P.assess(tk, row, fin, a, peers, beta, fs_full=fs, feeds=feeds)
+    rec, idn, series, row = ctx["rec"], ctx["idn"], ctx["series"], ctx["row"]
     mc = row.get("market_cap")
-    quality = AN.quality(fs, mc / 1e8 if mc else None, idn["bucket"]) if fs else None
+    krw = str((fs or {}).get("currency") or "KRW") == "KRW"       # Altman Z trộn vốn hóa (KRW) với nợ trên BCTC
+    quality = AN.quality(fs, mc / 1e8 if (mc and krw) else None, idn["bucket"]) if fs else None
     fh = assess_financials(fin.get("annual", []), row.get("sector"), row.get("industry_kr"))
-    ps = PR.build_peer_set(row, fin.get("annual", []), idn["bucket"], peers_same, {}, foreign_profiles=[])
-    overall = P.overall_assessment(E["rec"], fh, quality, ps)
-    rec = E["rec"]
+    ps = PR.build_peer_set(row, fin.get("annual", []), idn["bucket"], peers, {}, foreign_profiles=[])
+    overall = P.overall_assessment(rec, fh, quality, ps)
+    # cảnh báo dữ liệu (❌ của bảng kiểm tra số liệu + lỗi DART khi lấy BCTC đầy đủ) — để danh sách/bot hiện lý do Low
+    data_warn = [c["Kiểm tra"] for c in ctx["dq"]["checks"] if c["Kết quả"] == P.FAIL]
+    if fs_err:
+        data_warn.append(f"BCTC đầy đủ DART: {fs_err[0]}")
     if save:
         try:
             meta = {"name": row.get("name"), "industry_kr": row.get("industry_kr"), "bucket": idn["bucket"],
@@ -169,6 +172,7 @@ def analyze_one(tk: str, row: dict, universe_rows: list[dict], a: V.Assumptions,
             "Chất lượng TS": quality["grade"] if quality else "—",
             "Điểm chất lượng": quality["score"] if quality else None,
             "Tổng quan": overall["total"], "Kết luận": overall["verdict"],
+            "Cảnh báo dữ liệu": "; ".join(data_warn),
             # số liệu cho tầng 2 của bộ tiêu chuẩn
             "F-score": (quality or {}).get("fscore"), "Thanh toán hiện hành": (quality or {}).get("current_ratio"),
             "Nợ/VCSH": (quality or {}).get("debt_equity"),
@@ -177,14 +181,20 @@ def analyze_one(tk: str, row: dict, universe_rows: list[dict], a: V.Assumptions,
 
 def deep_stage(tickers: list[str], rows_by_tk: dict, universe_rows: list[dict], a: V.Assumptions, registry,
                progress=None, workers: int = 4, preset: Optional[str] = None,
-               overrides2: Optional[dict] = None) -> list[dict]:
+               overrides2: Optional[dict] = None, feeds: Optional[dict] = None) -> list[dict]:
     from screener import fetch_weekly_closes
     kospi = fetch_weekly_closes("KOSPI")
+    try:        # bộ đối thủ chuẩn cho cả danh sách, lấy MỘT lượt (giá đối thủ mới); lỗi → từng mã tự lấy
+        peer_map = PR.peer_rows_batch([(tk, rows_by_tk[tk].get("industry_kr")) for tk in tickers], registry,
+                                      rows_by_tk)
+    except Exception:
+        peer_map = {}
     out, done = [], 0
 
     def _one(tk):
         try:
-            return analyze_one(tk, rows_by_tk[tk], universe_rows, a, registry, kospi)
+            return analyze_one(tk, rows_by_tk[tk], universe_rows, a, registry, kospi, peers=peer_map.get(tk),
+                               feeds=feeds)
         except Exception as e:                       # một mã lỗi không làm hỏng cả danh sách
             return {"Mã": tk, "Tên": rows_by_tk[tk].get("name"), "Kết luận": f"⚪ Chưa định giá được ({str(e)[:60]})"}
     with _cf.ThreadPoolExecutor(max_workers=workers) as ex:

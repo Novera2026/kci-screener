@@ -203,10 +203,15 @@ def quarter_medians(profiles: list[dict]) -> dict:
 # ---------------------------------------------------------------------------- danh sách đối thủ
 def naver_domestic_peers(ticker: str) -> list[str]:
     """Danh sách đối thủ trong nước Naver gợi ý cho mã (integration.industryCompareInfo)."""
-    try:
-        j = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/integration", headers=_H,
-                         timeout=_TIMEOUT).json()
-    except Exception:
+    j = None
+    for attempt in range(2):          # lỗi mạng → thử lại 1 lần (thiếu gợi ý làm bộ đối thủ, tức phép neo, đổi)
+        try:
+            j = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/integration", headers=_H,
+                             timeout=_TIMEOUT).json()
+            break
+        except Exception:
+            j = None
+    if not j:
         return []
     return [str(x.get("itemCode")).zfill(6) for x in (j.get("industryCompareInfo") or [])
             if x.get("stockType") == "domestic" and x.get("itemCode") and str(x.get("itemCode")).zfill(6) != ticker]
@@ -270,14 +275,39 @@ def fetch_foreign(codes: list[str]) -> list[dict]:
         return [p for p in ex.map(foreign_profile, codes) if p]
 
 
-def domestic_candidates(ticker: str, industry_kr: Optional[str], registry, n: int = 12) -> list[str]:
-    """Đối thủ trong nước: gợi ý của Naver ∪ top vốn hóa cùng 업종, CHỈ cổ phiếu thường có trong danh mục
-    (bỏ cổ phiếu ưu đãi như 005935 của chính Samsung)."""
+def domestic_candidates(ticker: str, industry_kr: Optional[str], registry, n: int = 12,
+                        ind_cache: Optional[dict] = None) -> list[str]:
+    """BỘ ĐỐI THỦ CHUẨN trong nước — dùng chung cho mọi trang (pipeline.PEER_N mã): gợi ý của Naver ∪ top vốn hóa
+    cùng 업종, CHỈ cổ phiếu thường có trong danh mục (bỏ cổ phiếu ưu đãi như 005935 của chính Samsung).
+    ind_cache: dict của một lần chạy để các mã cùng ngành không gọi lại danh sách ngành."""
     import pipeline as _P
     known = set(registry.df["ticker"]) if registry is not None else None
-    cands = naver_domestic_peers(ticker) + (_P.industry_peers(industry_kr, ticker, n) if industry_kr else [])
+    cands = naver_domestic_peers(ticker) + (
+        _P.industry_peers(industry_kr, ticker, n, cache=ind_cache) if industry_kr else [])
     out = [t for t in dict.fromkeys(cands) if t != ticker and (known is None or t in known)]
     return out[:n]
+
+
+def peer_rows_batch(items: list[tuple], registry, have: Optional[dict] = None, n: Optional[int] = None,
+                    workers: int = 5) -> dict:
+    """Bộ đối thủ chuẩn cho NHIỀU mã trong một lần chạy: {mã: [dòng thị trường của từng đối thủ]}.
+
+    items = [(mã, ngành KRX)]. have = {mã: dòng thị trường} đã lấy trong lần chạy này (dùng lại, không gọi lại);
+    đối thủ chưa có được lấy MỚI một lượt (giá, vốn hóa, P/E, P/B). Cùng quy tắc với trang 🧮 → cùng phép neo peer."""
+    import pipeline as _P
+    from screener import fetch_many
+    n = n or _P.PEER_N
+    have = dict(have or {})
+    ind_cache: dict = {}
+    for ik in dict.fromkeys(ik for _, ik in items if ik):        # nạp trước danh sách ngành (mỗi ngành 1 lần)
+        _P.industry_peers(ik, None, n, cache=ind_cache)
+    with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        cands = list(ex.map(lambda it: domestic_candidates(it[0], it[1], registry, n, ind_cache), items))
+    missing = [t for t in dict.fromkeys(t for c in cands for t in c) if t not in have]
+    if missing:
+        for r in fetch_many(missing, registry=registry, prefer="naver")[0]:
+            have[r["ticker"]] = r
+    return {tk: [have[t] for t in c if t in have] for (tk, _), c in zip(items, cands)}
 
 
 def build_peer_set(row: dict, annual: list[dict], bucket: Optional[str], dom_rows: list[dict],

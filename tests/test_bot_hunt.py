@@ -69,3 +69,18 @@ def test_export_payload_has_sheet_fields():
     r = j["picks"][0]
     assert r["rank"] == 1 and r["ticker"] == "a" and r["upside_pct"] == 30 and r["F-score"] == 6
     assert r["presets"] and r["presets"][0].startswith("KCI")
+
+
+def test_low_confidence_and_data_errors_are_visible_in_the_list():
+    """Mã tin cậy Thấp / có lỗi dữ liệu vẫn có thể đạt tiêu chuẩn — nhưng tin nhắn phải nói rõ (rà soát 15/11/2026)."""
+    res = {"a": {**_res("a", 80), "Độ tin cậy": "Low", "Cảnh báo dữ liệu": "Đối chiếu DART ↔ Naver"},
+           "b": {**_res("b", 40), "Độ tin cậy": "Low", "Cảnh báo dữ liệu": ""},
+           "c": {**_res("c", 20), "Độ tin cậy": "Medium", "Cảnh báo dữ liệu": ""}}
+    picks = BH.aggregate(res, {"kci": ["a", "b", "c"]})
+    assert [p["confidence"] for p in picks] == ["Low", "Low", "Medium"]
+    meta = {"at": __import__("datetime").datetime(2026, 11, 15, 16, 30), "universe": 200, "presets": ["kci"],
+            "n_deep": 3, "rf": 0.032, "rf_live": False, "rf_note": "Không lấy được Rf — dùng mặc định 3,2%"}
+    txt = "\n".join(BH.format_message(picks, BH.diff({}, picks), meta))
+    la, lb, lc = (next(ln for ln in txt.splitlines() if f"({t})" in ln and "→" in ln) for t in "abc")
+    assert "⚠️ lỗi dữ liệu: Đối chiếu DART ↔ Naver" in la and "⚠️ tin cậy Thấp" in lb and "⚠️" not in lc
+    assert "Không lấy được Rf" in txt                                  # Rf dự phòng được nói ở đầu tin nhắn
