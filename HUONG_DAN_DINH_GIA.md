@@ -46,7 +46,7 @@ App đã **tự gợi ý** phương pháp + ghi chú cho từng mã ở mục **
 |---|---|---|---|
 | **S-RIM** | Fair = BPS + (ROE−Ke)×BPS × w/(1+Ke−w) | Ngân hàng, công ty ROE ổn định | Phụ thuộc chất lượng book; normalize ROE |
 | **P/B–ROE (justified)** | Fair = BPS × (ROE−g)/(Ke−g) | Tài chính, tài sản nặng | Vô nghĩa nếu ROE ≤ g (app tự ẩn) |
-| **DDM (Gordon)** | Fair = DPS×(1+g)/(Ke−g) | Cổ tức đều: bank, utility, telecom | Vô dụng nếu không trả cổ tức |
+| **DDM (Gordon)** | Fair = D₁/(Ke−g), D₁ = EPS×(1+g)×(1 − g/ROE); ROE < Ke → g = 0, Fair = EPS/Ke (từ 18/11/2026) | Cổ tức đều: bank, utility, telecom | Vô dụng nếu không trả cổ tức |
 | **DDM 2 giai đoạn** | Cổ tức tăng nhanh `n` năm rồi về g | Như trên nhưng đang tăng trưởng | Nhạy với g giai đoạn đầu |
 | **DCF earnings (thô)** | Chiết khấu chuỗi EPS | Cảm nhận độ lớn, cross-check | ⚠️ EPS ≠ dòng tiền tự do — rất thô |
 | **P/E, P/B vs median ngành** | EPS × median P/E ngành | So tương đối trong nhóm | Chỉ cross-check, không phải base |

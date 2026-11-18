@@ -70,20 +70,26 @@ def aggregate(results: dict, hits: dict) -> list[dict]:
                       "price": r.get("Giá"), "fair": r.get("Giá trị hợp lý"), "upside": up,
                       "quality": r.get("Chất lượng TS"), "verdict": r.get("Kết luận") or "",
                       "confidence": r.get("Độ tin cậy"), "data_warn": r.get("Cảnh báo dữ liệu") or "",
+                      "sources": r.get("Nguồn dữ liệu") or "",            # một dòng chung với 🧮 / Sàng lọc (C8)
                       "presets": sorted(presets, key=lambda k: list(SC.PRESETS).index(k))})
     picks.sort(key=lambda p: -p["upside"])
     return picks
 
 
-def diff(prev: dict, picks: list[dict]) -> dict:
-    """So với lần trước: mã mới, mã rớt, mã đổi kết luận (🟢 ↔ 🟡 …)."""
+def diff(prev: dict, picks: list[dict], errored=None) -> dict:
+    """So với lần trước: mã mới, mã rớt, mã đổi kết luận (🟢 ↔ 🟡 …).
+
+    errored: mã lần này lỗi dữ liệu / định giá lỗi — mã cũ thuộc nhóm này KHÔNG tính là rớt (chưa biết), đưa vào
+    khóa 'errored' (rà soát 18/11/2026: Naver lỗi một phần làm mã cũ hiện 'Rớt')."""
     old = (prev or {}).get("picks", {})
     cur = {p["ticker"]: p for p in picks}
+    err = set(errored or ())
     new = [p for p in picks if p["ticker"] not in old]
-    dropped = [dict(ticker=t, **v) for t, v in old.items() if t not in cur]
+    dropped = [dict(ticker=t, **v) for t, v in old.items() if t not in cur and t not in err]
+    unknown = [dict(ticker=t, **v) for t, v in old.items() if t not in cur and t in err]
     changed = [(p, old[p["ticker"]]) for p in picks if p["ticker"] in old
                and (old[p["ticker"]].get("verdict") or "")[:1] != (p["verdict"] or "")[:1]]
-    return {"new": new, "dropped": dropped, "changed": changed, "first_run": not old}
+    return {"new": new, "dropped": dropped, "changed": changed, "first_run": not old, "errored": unknown}
 
 
 def _short(p: dict) -> str:
@@ -96,6 +102,8 @@ def _line(p: dict, preset_names: dict) -> str:
     low = ""
     if p.get("data_warn"):
         low = f" · ⚠️ lỗi dữ liệu: {html.escape(str(p['data_warn']))}"
+        if p.get("sources"):
+            low += f" ({html.escape(str(p['sources']))})"
     elif p.get("confidence") == "Low":
         low = " · ⚠️ tin cậy Thấp"
     return (f"{_short(p)} <b>{html.escape(str(p['name']))}</b> ({p['ticker']}) · "
@@ -125,6 +133,9 @@ def format_message(picks: list[dict], d: dict, meta: dict, top: int = 12) -> lis
         if d["dropped"]:
             L.append(f"❌ <b>Rớt khỏi danh sách ({len(d['dropped'])})</b>")
             L += [f"{html.escape(str(x.get('name', x['ticker'])))} ({x['ticker']})" for x in d["dropped"]]
+        if d.get("errored"):
+            L.append(f"⚪ <b>Chưa kiểm được lần này — lỗi dữ liệu ({len(d['errored'])})</b>")
+            L += [f"{html.escape(str(x.get('name', x['ticker'])))} ({x['ticker']})" for x in d["errored"]]
     L += ["", f"📋 <b>Danh sách săn ({len(picks)} mã) — top {min(top, len(picks))}</b>"]
     L += [_line(p, names) for p in picks[:top]] or ["— không mã nào đạt chuẩn hôm nay"]
     L += ["", "🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm (chất lượng/ngành tài chính) · TS = hạng chất lượng tài sản · "
@@ -144,10 +155,63 @@ def format_message(picks: list[dict], d: dict, meta: dict, top: int = 12) -> lis
     return msgs
 
 
-def state_of(picks: list[dict], at: _dt.datetime) -> dict:
-    return {"at": at.isoformat(timespec="minutes"),
-            "picks": {p["ticker"]: {"name": p["name"], "upside": p["upside"], "verdict": p["verdict"],
-                                    "presets": p["presets"]} for p in picks}}
+def state_of(picks: list[dict], at: _dt.datetime, d: Optional[dict] = None) -> dict:
+    """Trạng thái lưu cho lần sau. d = kết quả diff(): mã cũ lần này lỗi dữ liệu ('errored') được giữ nguyên mục cũ."""
+    out = {"at": at.isoformat(timespec="minutes"),
+           "picks": {p["ticker"]: {"name": p["name"], "upside": p["upside"], "verdict": p["verdict"],
+                                   "presets": p["presets"]} for p in picks}}
+    for x in (d or {}).get("errored") or []:
+        out["picks"].setdefault(x["ticker"], {k: v for k, v in x.items() if k != "ticker"})
+    return out
+
+
+# mục ❌ trong 'Cảnh báo dữ liệu' (screen.deep_stage) do LỖI LẤY DART — 'Đối chiếu DART ↔ Naver' là lệch nguồn, không tính
+_DART_ERR_CHECK = "Số năm có số gốc DART"          # pipeline: ❌ chỉ khi DART trả lỗi
+_DART_FS_ERR = "BCTC đầy đủ DART:"                 # screen.deep_stage: lỗi lấy BCTC đầy đủ
+
+
+def _errored(r: dict) -> bool:
+    """Dòng định giá sâu lỗi: không định giá được, hoặc BCTC DART lỗi (thiếu F-score… → tầng 2 trượt vì lỗi)."""
+    warns = [w.strip() for w in str(r.get("Cảnh báo dữ liệu") or "").split(";")]
+    return (str(r.get("Kết luận") or "").startswith("⚪ Chưa định giá được")
+            or any(w == _DART_ERR_CHECK or w.startswith(_DART_FS_ERR) for w in warns))
+
+
+MIN_UNIVERSE_SHARE = 0.8        # danh sách gốc có dữ liệu < 80% số mã yêu cầu → lượt chạy hỏng
+MAX_ERROR_SHARE = 0.2           # > 20% mã định giá sâu lỗi → lượt chạy hỏng
+
+
+def _health(out: dict, n_req: Optional[int] = None) -> tuple[bool, list[str]]:
+    """Lượt săn có đủ dữ liệu để ghi / gửi không. n_req: số mã yêu cầu ở chế độ top vốn hóa (None = danh sách riêng)."""
+    import screen as SC
+    m, why = out["meta"], []
+    n_data = sum(1 for r in out.get("rows") or [] if not SC.no_market_data(r))
+    if n_req and n_data < MIN_UNIVERSE_SHARE * n_req:
+        why.append(f"danh sách gốc chỉ có {n_data}/{n_req} mã có dữ liệu thị trường (Naver lỗi?)")
+    if not m.get("n_deep"):
+        why.append("không mã nào được định giá sâu")
+    res = list((out.get("results") or {}).values())
+    n_err = sum(1 for r in res if _errored(r))
+    if res and n_err > MAX_ERROR_SHARE * len(res):
+        why.append(f"{n_err}/{len(res)} mã định giá sâu bị lỗi (DART / dữ liệu)")
+    return (not why, why)
+
+
+def _write_json_atomic(path: str, obj, **kw) -> None:
+    """Ghi JSON qua file tạm rồi đổi tên — lỗi giữa chừng không để lại file hỏng / nửa vời."""
+    import tempfile
+    d = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, **kw)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ============================================================================ mạng
@@ -174,12 +238,24 @@ def market_open_today(now: Optional[_dt.datetime] = None) -> Optional[bool]:
         return None
 
 
+def _round_robin(stage1: dict, presets: list[str]) -> list[str]:
+    """Gộp mã qua tầng 1 của các bộ kiểu xen kẽ (mã thứ 1 của mọi bộ, rồi mã thứ 2…) — cắt bớt thì bộ nào cũng còn mã."""
+    out: dict = {}
+    for i in range(max((len(stage1[k]) for k in presets), default=0)):
+        for k in presets:
+            if i < len(stage1[k]):
+                out.setdefault(stage1[k][i], None)
+    return list(out)
+
+
 def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=print,
-         tickers: Optional[list[str]] = None, market: str = "ALL", scope: str = "") -> dict:
-    """Chạy sàng lọc + định giá sâu. Trả {picks, results, hits, rows, meta}.
+         tickers: Optional[list[str]] = None, market: str = "ALL", scope: str = "",
+         max_total: Optional[int] = None) -> dict:
+    """Chạy sàng lọc + định giá sâu. Trả {picks, results, hits, rows, errored, meta}.
 
     Mặc định danh sách gốc = top `universe` vốn hóa của `market` (ALL / KOSPI / KOSDAQ).
-    Truyền `tickers` để săn trong danh sách riêng (ngành, chủ đề, mega trend…), tối đa 400 mã."""
+    Truyền `tickers` để săn trong danh sách riêng (ngành, chủ đề, mega trend…), tối đa 400 mã.
+    max_total: trần TỔNG số mã định giá sâu (khách trên bản công khai — guard.MAX_DEEP_PUBLIC); None = không trần."""
     import screen as SC
     import valuation as V
     from screener import TickerRegistry, fetch_many, rf_for_valuation
@@ -196,6 +272,11 @@ def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=p
     rows, _ = fetch_many(tks, registry=reg, prefer="naver")
     stage1 = {k: [r["Mã"] for r in SC.apply_preset(rows, k) if r["Qua lọc"]][:max_deep] for k in presets}
     union = list(dict.fromkeys(t for k in presets for t in stage1[k]))
+    n_cut = 0
+    if max_total is not None and len(union) > max_total:
+        union = _round_robin(stage1, presets)[:max_total]
+        n_cut = len(dict.fromkeys(t for k in presets for t in stage1[k])) - len(union)
+        progress(f"   Đã cắt còn {len(union)} mã (trần {max_total} mã định giá sâu mỗi lần trên bản công khai)…")
     progress(f"② Tầng 1: {', '.join(f'{k} {len(v)}' for k, v in stage1.items())} → định giá sâu {len(union)} mã…")
     # Rf không lấy được trực tiếp → vẫn tính trên giá trị dự phòng nhưng nói rõ và mọi kết quả bị hạ xuống Low
     # (trước 15/11/2026: lặng lẽ dùng 3,2%)
@@ -210,9 +291,12 @@ def hunt(presets: list[str], universe: int = 200, max_deep: int = 15, progress=p
     hits = {k: [t for t in stage1[k] if t in results and SC.stage2_check(results[t], k)[0]] for k in presets}
     progress("③ Tầng 2: " + ", ".join(f"{k} {len(v)}" for k, v in hits.items()))
     picks = aggregate(results, hits)
-    return {"picks": picks, "results": results, "hits": hits, "rows": rows,
+    # mã lỗi dữ liệu lần này (Naver không trả số / định giá lỗi) — không được coi là "rớt" khi so lần trước
+    errored = sorted({r["ticker"] for r in rows if SC.no_market_data(r)}
+                     | {t for t, r in results.items() if _errored(r)})
+    return {"picks": picks, "results": results, "hits": hits, "rows": rows, "errored": errored,
             "meta": {"at": at, "universe": len(rows), "scope": scope, "presets": presets, "n_deep": len(union),
-                     "rf": rf["value"], "rf_live": rf["live"], "rf_note": rf["note"]}}
+                     "n_cut": n_cut, "rf": rf["value"], "rf_live": rf["live"], "rf_note": rf["note"]}}
 
 
 def excel_bytes(out: dict) -> bytes:
@@ -253,7 +337,7 @@ def tg_chat_ids(token: str) -> list[dict]:
 
 
 _EXPORT_FIELDS = ("Điểm chất lượng", "F-score", "Nợ/VCSH", "Thanh toán hiện hành", "Có năm lỗ", "Tổng quan",
-                  "Độ tin cậy", "Trạng thái", "Nhóm", "Cảnh báo dữ liệu")
+                  "Độ tin cậy", "Trạng thái", "Nhóm", "Cảnh báo dữ liệu", "Nguồn dữ liệu")
 
 
 def export_payload(out: dict, d: dict, registry=None) -> dict:
@@ -272,12 +356,15 @@ def export_payload(out: dict, d: dict, registry=None) -> dict:
                      "presets": [names.get(k, k) for k in p["presets"]],
                      **{k: r.get(k) for k in _EXPORT_FIELDS}})
     m = out["meta"]
-    return {"at": m["at"].strftime("%d/%m/%Y %H:%M"), "scope": m.get("scope"), "universe": m["universe"],
+    # run_status: chỉ "ok" mới được ghi Google Sheet (main() không ghi file khi lượt chạy hỏng — rà soát 18/11/2026)
+    return {"run_status": m.get("run_status", "ok"), "run_problems": list(m.get("run_problems") or []),
+            "at": m["at"].strftime("%d/%m/%Y %H:%M"), "scope": m.get("scope"), "universe": m["universe"],
             "n_deep": m["n_deep"], "rf": m.get("rf"), "rf_live": m.get("rf_live", True), "rf_note": m.get("rf_note") or "",
             "presets": [names.get(k, k) for k in m["presets"]],
             "picks": rows,
             "vs_previous": {"first_run": d["first_run"], "new": [p["ticker"] for p in d["new"]],
                             "dropped": [{"ticker": x["ticker"], "name": x.get("name")} for x in d["dropped"]],
+                            "errored": [{"ticker": x["ticker"], "name": x.get("name")} for x in d.get("errored") or []],
                             "changed": [{"ticker": p["ticker"], "from": (o.get("verdict") or "")[:1],
                                          "to": (p["verdict"] or "")[:1]} for p, o in d["changed"]]}}
 
@@ -298,18 +385,30 @@ def main(argv=None) -> int:
         print("\n".join(f"chat_id = {c['chat_id']}  ({c['name']})" for c in ids)
               or "Chưa thấy tin nhắn nào — mở bot trên Telegram, bấm Start hoặc gửi /start rồi chạy lại.")
         return 0
-    if not args.force and market_open_today() is False:
-        print("Hôm nay sàn nghỉ (KOSPI không có phiên) — không quét."); return 0
+    if not args.force:
+        mo = market_open_today()
+        if mo is False:
+            print("Hôm nay sàn nghỉ (KOSPI không có phiên) — không quét."); return 0
+        if mo is None:
+            print("⚠️ Không kiểm được lịch phiên KOSPI (Naver lỗi?) — vẫn quét.", file=sys.stderr)
     presets = [k.strip() for k in os.environ.get("BOT_PRESETS", ",".join(DEFAULT_PRESETS)).split(",") if k.strip()]
-    out = hunt(presets, int(os.environ.get("BOT_UNIVERSE", "200")), int(os.environ.get("BOT_MAX_DEEP", "15")))
+    n_req = int(os.environ.get("BOT_UNIVERSE", "200"))
+    out = hunt(presets, n_req, int(os.environ.get("BOT_MAX_DEEP", "15")))
+    # cổng sức khỏe (rà soát 18/11/2026): mạng lỗi trước đây vẫn thoát 0, xuất 0 mã, báo mọi mã "Rớt", xóa bot_state
+    ok, why = _health(out, n_req)
+    if not ok:
+        print("LƯỢT CHẠY HỎNG — không ghi export, không ghi bot_state.json, không gửi Telegram: " + "; ".join(why),
+              file=sys.stderr)
+        if args.export and os.path.exists(args.export):
+            os.remove(args.export)       # không để file của lần trước bị đọc nhầm là kết quả lần này
+        return 2
     prev = json.load(open(STATE_PATH, encoding="utf-8")) if os.path.exists(STATE_PATH) else {}
-    d = diff(prev, out["picks"])
+    d = diff(prev, out["picks"], out.get("errored"))
     msgs = format_message(out["picks"], d, out["meta"])
     if args.export:
         from screener import TickerRegistry
-        with open(args.export, "w", encoding="utf-8") as f:
-            json.dump(export_payload(out, d, TickerRegistry()), f, ensure_ascii=False, indent=1, default=str)
-        json.dump(state_of(out["picks"], out["meta"]["at"]), open(STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+        _write_json_atomic(args.export, export_payload(out, d, TickerRegistry()), indent=1, default=str)
+        _write_json_atomic(STATE_PATH, state_of(out["picks"], out["meta"]["at"], d))
         prev_txt = "chưa có" if d["first_run"] else f"{len(d['new'])} mới, {len(d['dropped'])} rớt"
         print(f"EXPORT {args.export} · {len(out['picks'])} mã · so lần trước: {prev_txt}")
         return 0
@@ -318,7 +417,7 @@ def main(argv=None) -> int:
     if not token or not chat:
         print("Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID — chạy --dry-run hoặc cấu hình .env"); return 1
     tg_send(token, chat, msgs, excel_bytes(out), f"kci_san_co_phieu_{out['meta']['at']:%Y%m%d}.xlsx")
-    json.dump(state_of(out["picks"], out["meta"]["at"]), open(STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+    _write_json_atomic(STATE_PATH, state_of(out["picks"], out["meta"]["at"], d))
     print(f"Đã gửi {len(msgs)} tin + Excel · {len(out['picks'])} mã trong danh sách săn.")
     return 0
 

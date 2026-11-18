@@ -34,12 +34,49 @@ def _raw_signal(rec: dict) -> Optional[float]:
     return V._median(vals) if vals else None
 
 
+UNIT_RATIO_MAX = 300     # giá / BPS năm Y−1 vượt 300 lần → số mỗi cổ phiếu khác đơn vị (USD: ~1.300 lần)
+UNIT_JUMP_MAX = 300      # BPS một năm cũ lệch BPS năm Y−1 quá 300 lần → khác đơn vị
+
+
+def _unit_ok(h: dict, price: Optional[float]) -> bool:
+    """Năm Y−1 cùng đơn vị với giá (KRW): không ghi tiền tệ khác KRW, và giá / BPS ≤ 300 (Doosan Bobcat nộp BCTC
+    USD từ 2023: số mỗi cổ phiếu nhỏ đi ~1.300 lần). Dùng BPS, không dùng EPS: EPS gần 0 cho P/E rất lớn mà vẫn đúng
+    đơn vị. Ngưỡng 300 vẫn để lọt P/B cao thật (Alteogen ~100)."""
+    if str(h.get("currency") or "KRW") != "KRW":
+        return False
+    bps = V._num(h.get("bps"))
+    return not (price and bps and bps > 0 and price / bps > UNIT_RATIO_MAX)
+
+
+def _unit_hist(hist: list[dict]) -> list[dict]:
+    """Bỏ năm lịch sử khác đơn vị với năm Y−1 (đã qua _unit_ok): tiền tệ khác KRW, hoặc BPS lệch BPS năm Y−1 quá
+    UNIT_JUMP_MAX lần. So với năm Y−1, KHÔNG so với giá hôm nay: cổ phiếu tăng trưởng P/B cao giữ được năm cũ BPS nhỏ."""
+    ref = V._num(hist[-1].get("bps")) if hist else None
+
+    def ok(h):
+        if str(h.get("currency") or "KRW") != "KRW":
+            return False
+        b = V._num(h.get("bps"))
+        return not (ref and ref > 0 and b and b > 0 and max(ref / b, b / ref) > UNIT_JUMP_MAX)
+    return [h for h in hist if ok(h)]
+
+
+def g_high_used(row: dict, a: V.Assumptions) -> float:
+    """g giai đoạn đầu mà value_stock THỰC dùng (mode 'sustainable' bỏ qua a.g_high)."""
+    if a.g_high_mode == "sustainable":
+        return V.sustainable_growth(row.get("eps"), row.get("bps"), row.get("dps"))
+    return a.g_high
+
+
 def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years_fc: int = 5,
                     with_fs: bool = True, g_high_fn=None) -> list[dict]:
-    """Chạy pipeline.evaluate cho từng điểm của backtest_dart.build_point.
+    """Chạy pipeline cho từng điểm của backtest_dart.build_point qua ĐÚNG đường của App: pipeline.prepare()
+    (fs_mismatch, data_quality, default_drivers…) rồi pipeline.evaluate().
 
-    g_high_fn(row, hist, drivers) → tăng trưởng giai đoạn đầu RIÊNG từng mã (thay a.g_high cố định, dùng trong
-    "DCF earnings" và DDM 2 giai đoạn). None = giữ a.g_high. Chỉ dùng dữ liệu ≤ Y−1 (hist) và dự phóng tại mốc."""
+    g_high_fn(row, hist, drivers) → tăng trưởng giai đoạn đầu RIÊNG từng mã, dùng trong "DCF earnings" và DDM 2 giai
+    đoạn — ép g_high_mode='fixed' (mode 'sustainable' mặc định của App bỏ qua g_high). None = giữ nguyên giả định `a`
+    (mặc định: sustainable như App). Chỉ dùng dữ liệu ≤ Y−1 (hist) và dự phóng tại mốc. Năm lịch sử khác đơn vị với
+    năm Y−1 (_unit_hist) bị bỏ; năm Y−1 khác đơn vị với giá (_unit_ok) → bỏ điểm."""
     a = a or V.Assumptions()
     by_year: dict = {}
     for p in points:
@@ -49,28 +86,29 @@ def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years
         rows = [p["row"] for p in pts]
         for p in pts:
             row = dict(p["row"])
-            row["beta"] = beta_vs_market(p["stock_weekly"], p["kospi_weekly"])
-            hist = [dict(h, _dart=True) for h in p["hist"]]
+            beta = beta_vs_market(p["stock_weekly"], p["kospi_weekly"])
+            if not p["hist"] or not _unit_ok(p["hist"][-1], row.get("price")):
+                continue
+            # ctrl_net = LN cổ đông mẹ (net_profit của _hist_row đã là LN mẹ; BCTC riêng: toàn bộ LN là của mẹ) — để
+            # prepare() không báo nhầm "BCTC Naver thiếu EPS / LN cổ đông mẹ" (trần Low) khi DART không có dòng EPS
+            hist = [dict(h, _dart=True, ctrl_net=h["ctrl_net"] if "ctrl_net" in h else h.get("net_profit"))
+                    for h in _unit_hist(p["hist"])]
             peers = [r for r in rows if r.get("industry_kr") == row.get("industry_kr")]
             ap = dataclasses.replace(a, rf=p["rf"]) if p["rf"] is not None else a
-            D = {"row": row, "series": hist, "quarters": [], "extras": {}, "peers": peers,
-                 "ticker": row["ticker"]}
+            fs_full = None
             if with_fs:                               # BCTC đầy đủ năm Y−1 (point-in-time) → FCFF-DCF được chấm
                 try:
-                    D["fs_full"] = AN.fetch_full(row["ticker"], year - 1)
+                    fs_full = AN.fetch_full(row["ticker"], year - 1)
                 except Exception:
-                    D["fs_full"] = None
+                    fs_full = None
             try:
-                idn = P.identify(row)
                 t_day = _dt.date(int(p["date"][:4]), int(p["date"][4:6]), int(p["date"][6:8]))
-                dq = P.data_quality(row, hist, [], row["beta"], today=t_day)
-                drv = P.default_drivers(hist, row, ap, years=years_fc, cyclical=idn["cyclical"],
-                                         financial=idn["financial"])
-                if drv:
-                    drv[0].pop("_basis", None)
+                ctx = P.prepare(row["ticker"], row, None, ap, peers, beta, series=hist, fs_full=fs_full,
+                                years=years_fc, today=t_day)
+                row, idn, dq, drv = ctx["row"], ctx["idn"], ctx["dq"], ctx["drivers"]
                 if g_high_fn is not None:
-                    ap = dataclasses.replace(ap, g_high=g_high_fn(row, hist, drv))
-                ev = P.evaluate(D, ap, drv, idn, dq)
+                    ap = dataclasses.replace(ap, g_high=g_high_fn(row, hist, drv), g_high_mode="fixed")
+                ev = P.evaluate(ctx["D"], ap, drv, idn, dq, ctx["evidence"])
             except Exception:
                 continue
             rec, price = ev["rec"], row["price"]
@@ -88,11 +126,11 @@ def pipeline_points(points: list[dict], a: Optional[V.Assumptions] = None, years
                 "raw_upside": (raw / price - 1) if (raw and price) else None,
                 "fc_ok": ev["fg"]["ok"], "n_primary_pass": len(prim), "agree": agree,
                 "base_upside": ((ev["base"].fair_raw / price - 1) if (ev["base"].fair_raw and price) else None),
-                "base_method": ev["base"].auto_method, "g_high": ap.g_high,
+                "base_method": ev["base"].auto_method, "g_high": g_high_used(row, ap),
                 "fcff_upside": ((ev["fcff"]["value"] / price - 1) if (ev.get("fcff") and ev["fcff"].get("value")
                                                                        and price) else None),
                 "fcff_pass": any(r["name"].startswith("FCFF-DCF") and r["pass"] for r in rec["rows"]),
-                "dq_cap": dq["cap"], "ret": p["ret"], "kospi_ret": p["kospi_ret"], "excess": excess})
+                "dq_cap": dq["cap"], "fs_note": ctx["fs_note"], "ret": p["ret"], "kospi_ret": p["kospi_ret"], "excess": excess})
     return out
 
 
@@ -109,8 +147,9 @@ def _grp(rows: list[dict], key: str = "upside") -> dict:
             "median_abs_gap": _st.median(err) if err else None}
 
 
-def _ic(rows: list[dict], key: str) -> dict:
-    """IC theo năm (Spearman, ≥8 điểm/năm), trung bình, t, IC gộp."""
+def _ic(rows: list[dict], key: str, horizon_months: int = 12) -> dict:
+    """IC theo năm (Spearman, ≥8 điểm/năm), trung bình, t (hiệu chỉnh chồng lợi suất khi giữ > 12 tháng — B.ic_t_stat),
+    IC gộp."""
     xs = [r for r in rows if r.get(key) is not None and r.get("excess") is not None]
     by = {}
     for y in sorted({r["year"] for r in xs}):
@@ -120,8 +159,8 @@ def _ic(rows: list[dict], key: str) -> dict:
             by[y] = ic
     ics = list(by.values())
     mean = _st.mean(ics) if ics else None
-    t = (mean / (_st.stdev(ics) / len(ics) ** 0.5)) if len(ics) >= 3 and _st.stdev(ics) > 0 else None
-    return {"n": len(xs), "by_year": by, "mean": mean, "t": t,
+    t, t_note = B.ic_t_stat(ics, horizon_months)
+    return {"n": len(xs), "by_year": by, "mean": mean, "t": t, "t_note": t_note,
             "pooled": B.spearman([r[key] for r in xs], [r["excess"] for r in xs])}
 
 

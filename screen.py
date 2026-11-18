@@ -60,7 +60,14 @@ def top_by_cap(market: str, n: int, registry) -> list[str]:
 
 
 def by_industry(industry_kr: str, registry) -> list[str]:
-    return [str(t).zfill(6) for t in registry.df[registry.df["industry_kr"] == industry_kr]["ticker"]]
+    """Mã của ngành theo danh mục, bỏ mã không còn trong danh sách ngành hiện tại của Naver (đã rời sàn, vd 082640
+    trong 생명보험 — rà soát 18/11/2026). Naver lỗi hoặc không có ngành → giữ nguyên danh mục."""
+    tks = [str(t).zfill(6) for t in registry.df[registry.df["industry_kr"] == industry_kr]["ticker"]]
+    listed = P._industry_ranked(industry_kr)
+    if listed:
+        cur = set(listed)
+        tks = [t for t in tks if t in cur]
+    return tks
 
 
 def by_theme(theme: str) -> list[str]:
@@ -129,8 +136,11 @@ def analyze_one(tk: str, row: dict, universe_rows: list[dict], a: V.Assumptions,
     from screener import beta_vs_market, fetch_weekly_closes
     row = dict(row)
     fin = fetch_financials(tk)
+    beta_w = None
     try:
-        beta = beta_vs_market(fetch_weekly_closes(tk), kospi_weekly) if kospi_weekly else None
+        wk = fetch_weekly_closes(tk) if kospi_weekly else []
+        beta = beta_vs_market(wk, kospi_weekly) if kospi_weekly else None
+        beta_w = (min(len(wk), len(kospi_weekly)) - 1) if beta else None      # số tuần của beta (C8)
     except Exception:
         beta = None
     if peers is None:
@@ -142,7 +152,9 @@ def analyze_one(tk: str, row: dict, universe_rows: list[dict], a: V.Assumptions,
     except Exception:
         fs = None
         fs_err.append("lỗi đọc BCTC đầy đủ")
-    ctx = P.assess(tk, row, fin, a, peers, beta, fs_full=fs, feeds=feeds)
+    ctx = P.assess(tk, row, fin, a, peers, beta, fs_full=fs, feeds=feeds,
+                   dart_quarters=P.cached_dart_quarters(tk),      # quý DART đã lưu (không gọi DART thêm) — I05
+                   src_info={"beta_weeks": beta_w})
     rec, idn, series, row = ctx["rec"], ctx["idn"], ctx["series"], ctx["row"]
     mc = row.get("market_cap")
     krw = str((fs or {}).get("currency") or "KRW") == "KRW"       # Altman Z trộn vốn hóa (KRW) với nợ trên BCTC
@@ -173,6 +185,7 @@ def analyze_one(tk: str, row: dict, universe_rows: list[dict], a: V.Assumptions,
             "Điểm chất lượng": quality["score"] if quality else None,
             "Tổng quan": overall["total"], "Kết luận": overall["verdict"],
             "Cảnh báo dữ liệu": "; ".join(data_warn),
+            "Nguồn dữ liệu": ctx["dq"].get("source_line") or "",          # một dòng chung với 🧮 / Tổng hợp / bot (C8)
             # số liệu cho tầng 2 của bộ tiêu chuẩn
             "F-score": (quality or {}).get("fscore"), "Thanh toán hiện hành": (quality or {}).get("current_ratio"),
             "Nợ/VCSH": (quality or {}).get("debt_equity"),
@@ -199,7 +212,8 @@ def deep_stage(tickers: list[str], rows_by_tk: dict, universe_rows: list[dict], 
             import guard as _G                    # URL lỗi của requests có thể chứa khóa DART → che trước khi hiện
             return {"Mã": tk, "Tên": rows_by_tk[tk].get("name"),
                     "Kết luận": f"⚪ Chưa định giá được ({_G.redact(e)[:80]})"}
-    with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
+    import dart_api as _Dp
+    with _cf.ThreadPoolExecutor(max_workers=workers, **_Dp.pool_kwargs()) as ex:   # luồng phụ gọi DART: hạn mức phiên
         for r in ex.map(_one, tickers):
             out.append(r)
             done += 1
@@ -302,6 +316,15 @@ def _metrics(r: dict) -> dict:
             "graham_margin": (gn / price - 1) if (gn and price) else None}
 
 
+NO_DATA_WHY = "không lấy được dữ liệu"
+
+
+def no_market_data(r: dict) -> bool:
+    """Dòng thị trường lỗi nguồn (Naver không trả lời): không có giá, hoặc nguồn chỉ số báo lỗi (fetch_ok False) —
+    P/E, ROE trống vì LỖI chứ không phải vì lỗ."""
+    return V._num(r.get("price")) is None or r.get("fetch_ok") is False
+
+
 def apply_preset(rows: list[dict], key: str, overrides: Optional[dict] = None) -> list[dict]:
     """Tầng 1 của bộ tiêu chuẩn `key` trên toàn danh sách gốc. overrides: sửa ngưỡng (vd {'max_pe': 12})."""
     crit = {**PRESETS[key]["stage1"], **(overrides or {})}
@@ -342,6 +365,8 @@ def apply_preset(rows: list[dict], key: str, overrides: Optional[dict] = None) -
         if crit.get("max_rel") and (b.get("Điểm rẻ") is None or b["Điểm rẻ"] > crit["max_rel"]):
             why.append(f"không rẻ hơn {b.get('So với', 'ngành')} (điểm {b['Điểm rẻ']:.2f})" if b.get("Điểm rẻ")
                        else "thiếu so sánh ngành")
+        if no_market_data(r):          # lỗi nguồn → nói đúng lý do, không bịa "lỗ / ROE 0%" (18/11/2026)
+            why = [NO_DATA_WHY]
         out.append({**b, "ROE %": m["roe"], "Lợi suất LN (E/P) %": m["ey"] * 100 if m["ey"] else None,
                     "Biên an toàn Graham %": m["graham_margin"] * 100 if m["graham_margin"] is not None else None,
                     "Vốn hóa (tỷ KRW)": m["mcap"] / 1e9 if m["mcap"] else None,

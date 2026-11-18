@@ -284,13 +284,13 @@ def test_peer_rows_batch_builds_canonical_set_once(monkeypatch):
     import screener
 
     class Reg:
-        df = pd.DataFrame({"ticker": ["000001", "000002", "000003", "000004", "000005"]})
-    monkeypatch.setattr(PR, "naver_domestic_peers", lambda tk: {"000001": ["000003", "999999"], "000002": []}[tk])
+        df = pd.DataFrame({"ticker": ["000010", "000020", "000030", "000040", "000050"]})
+    monkeypatch.setattr(PR, "naver_domestic_peers", lambda tk: {"000010": ["000030", "999999"], "000020": []}[tk])
     ranked_calls = []
 
     def ranked(ik):
         ranked_calls.append(ik)
-        return ["000001", "000002", "000004", "000005"]
+        return ["000010", "000020", "000040", "000050"]
     monkeypatch.setattr(P, "_industry_ranked", ranked)
     fetched = []
 
@@ -298,13 +298,13 @@ def test_peer_rows_batch_builds_canonical_set_once(monkeypatch):
         fetched.extend(tks)
         return [{"ticker": t, "per": 10.0, "pbr": 1.0} for t in tks], []
     monkeypatch.setattr(screener, "fetch_many", fake_fetch_many)
-    have = {"000001": {"ticker": "000001", "per": 9.0}, "000002": {"ticker": "000002", "per": 8.0}}
-    out = PR.peer_rows_batch([("000001", "식품"), ("000002", "식품")], Reg(), have, n=3)
+    have = {"000010": {"ticker": "000010", "per": 9.0}, "000020": {"ticker": "000020", "per": 8.0}}
+    out = PR.peer_rows_batch([("000010", "식품"), ("000020", "식품")], Reg(), have, n=3)
     # gợi ý Naver trước, rồi top vốn hóa cùng ngành; bỏ chính mã và mã ngoài danh mục (999999)
-    assert [r["ticker"] for r in out["000001"]] == ["000003", "000002", "000004"]
-    assert [r["ticker"] for r in out["000002"]] == ["000001", "000004", "000005"]
-    assert out["000001"][1]["per"] == 8.0                           # dòng đã có trong lần chạy được dùng lại
-    assert sorted(fetched) == ["000003", "000004", "000005"]        # chỉ lấy mới các mã còn thiếu, một lượt
+    assert [r["ticker"] for r in out["000010"]] == ["000030", "000020", "000040"]
+    assert [r["ticker"] for r in out["000020"]] == ["000010", "000040", "000050"]
+    assert out["000010"][1]["per"] == 8.0                           # dòng đã có trong lần chạy được dùng lại
+    assert sorted(fetched) == ["000030", "000040", "000050"]        # chỉ lấy mới các mã còn thiếu, một lượt
     assert ranked_calls == ["식품"]                                  # danh sách ngành gọi đúng một lần
 
 

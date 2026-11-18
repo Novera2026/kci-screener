@@ -32,9 +32,10 @@ import concurrent.futures as _cf
 import dataclasses
 import datetime as _dt
 import json
+import logging
+import math
 import os
 import statistics as _st
-import threading
 import time
 from typing import Optional
 
@@ -43,8 +44,12 @@ import requests
 
 import dart_api
 import financials
+import guard as G
 import valuation as V
+from reporting import expected_fy
 from screener import beta_vs_market
+
+_LOG = logging.getLogger(__name__)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(_HERE, ".cache")
@@ -68,9 +73,7 @@ IDS = {
 SJ = {"BS": {"equity_parent", "equity"},
       "IS": {"revenue", "op_profit", "ni", "ni_parent", "eps"}}
 VERSION = 2              # v2: số cổ phiếu đọc được cả nhãn '의결권 있는 주식' / dòng '합계'
-_LOCK = threading.Lock()
-_LAST = [0.0]
-MIN_GAP = 0.08          # giây giữa 2 lần gọi DART (≈ 750 lần/phút, dưới giới hạn)
+OK_STATUS = ("000", dart_api.NO_DATA)   # DART trả dữ liệu / XÁC NHẬN không có — mọi mã khác là lỗi, không lưu cache
 
 
 def _num(s) -> Optional[float]:
@@ -86,21 +89,17 @@ def _num(s) -> Optional[float]:
 
 
 def _dart_get(path: str, **params) -> dict:
-    with _LOCK:
-        wait = MIN_GAP - (time.time() - _LAST[0])
-        if wait > 0:
-            time.sleep(wait)
-        _LAST[0] = time.time()
-    for attempt in range(3):
-        if not dart_api.budget_take():             # hạn mức DART trong ngày của App (dart_api)
-            return {"status": "ERR", "message": dart_api.BUDGET_MSG}
-        try:
-            return requests.get(f"https://opendart.fss.or.kr/api/{path}",
-                                params=dict(crtfc_key=dart_api.api_key(), **params),
-                                timeout=20).json()
-        except Exception:
-            time.sleep(1.5 * (attempt + 1))
-    return {"status": "ERR"}
+    """Gọi DART qua cửa chung dart_api.get_json (giãn nhịp, hạn mức, ngắt mạch, STATS dùng chung với App — rà soát
+    18/11/2026). Lỗi (mạng, 020, 800, ngắt mạch…) → {'status': 'ERR', 'message': …}: KHÔNG phải 'không có'."""
+    try:
+        return dart_api.get_json(path, **params)
+    except dart_api.DartError as e:
+        return {"status": "ERR", "message": str(e)}
+
+
+def _err_msg(j: dict) -> str:
+    st = str(j.get("status"))
+    return str(j.get("message") or (f"DART báo mã {st}" if st != "ERR" else "lỗi gọi DART"))
 
 
 def _statements(j: dict) -> dict:
@@ -130,6 +129,7 @@ def _add_shares(rec: dict, corp_code: str, year: int) -> dict:
     # Nhãn dòng không thống nhất giữa DN: '보통주', '의결권 있는\n보통주', '의결권 있는 주식'…
     # → ưu tiên dòng '합계'; không có thì cộng các dòng cổ phiếu thường + ưu đãi.
     total = parts = 0.0
+    errs = [_err_msg(j) for j in (s,) if str(j.get("status")) not in OK_STATUS]
     for x in s.get("list", []) if s.get("status") == "000" else []:
         se = "".join((x.get("se") or "").split())
         v = _num(x.get("distb_stock_co")) or _num(x.get("istc_totqy")) or 0.0
@@ -140,11 +140,17 @@ def _add_shares(rec: dict, corp_code: str, year: int) -> dict:
     rec["shares_out"] = total or parts or None
     a = _dart_get("alotMatter.json", corp_code=corp_code, bsns_year=str(year),
                   reprt_code="11011")
+    errs += [_err_msg(j) for j in (a,) if str(j.get("status")) not in OK_STATUS]
     for x in a.get("list", []) if a.get("status") == "000" else []:
         if "주당 현금배당금" in (x.get("se") or "") and \
                 (x.get("stock_knd") or "").startswith("보통주"):
             rec["dps"] = _num(x.get("thstrm")) or 0.0
-    rec["shares_checked"] = True
+    if errs:                       # lỗi ≠ 'không có': không đánh dấu đã kiểm → lần sau lấy lại, không lưu None mãi
+        rec.pop("shares_checked", None)
+        rec["shares_err"] = "; ".join(dict.fromkeys(errs))
+    else:
+        rec.pop("shares_err", None)
+        rec["shares_checked"] = True
     return rec
 
 
@@ -153,10 +159,14 @@ def _fetch_year(corp_code: str, year: int, full: bool) -> dict:
     for fs in ("CFS", "OFS"):
         j = _dart_get("fnlttSinglAcntAll.json", corp_code=corp_code, bsns_year=str(year),
                       reprt_code="11011", fs_div=fs)
-        if j.get("status") == "000":
+        st = str(j.get("status"))
+        if st == "000":
             rec.update(_statements(j), fs_div=fs)
             break
-        rec["status"] = j.get("status")
+        if st != dart_api.NO_DATA:     # lỗi: không lùi OFS (năm có BCTC hợp nhất sẽ thành 'không có'), không lưu cache
+            rec.update(status="ERR", message=_err_msg(j))
+            return rec
+        rec["status"] = st             # chỉ 013 (DART xác nhận không có) mới lùi CFS → OFS
     if rec.get("fs_div") and full:
         _add_shares(rec, corp_code, year)
     return rec
@@ -164,7 +174,8 @@ def _fetch_year(corp_code: str, year: int, full: bool) -> dict:
 
 def annual(ticker: str, year: int, full: bool = True, cache_dir: str = CACHE_DIR) -> dict:
     """BCTC năm `year` (KRW). full=False: bỏ số cổ phiếu/cổ tức (năm chỉ dùng làm lịch sử).
-    Cache JSON; năm chưa có báo cáo chỉ cache khi đã quá hạn nộp (30/6 năm sau)."""
+    Cache JSON; năm chưa có báo cáo chỉ cache khi đã quá hạn nộp (30/6 năm sau). Lỗi DART (status 'ERR', số cổ
+    phiếu lỗi 'shares_err') không bao giờ được lưu — chỉ 013 mới là 'không có'."""
     d = os.path.join(cache_dir, "dart_fs")
     os.makedirs(d, exist_ok=True)
     p = os.path.join(d, f"{ticker}_{year}.json")
@@ -175,20 +186,24 @@ def annual(ticker: str, year: int, full: bool = True, cache_dir: str = CACHE_DIR
             if not full or rec.get("shares_checked") or not rec.get("fs_div"):
                 return rec
             cc = dart_api.corp_code_of(ticker)
-            if cc:
+            if cc and dart_api.api_key():
                 _add_shares(rec, cc, year)
-                with open(p, "w", encoding="utf-8") as f:
-                    json.dump(rec, f, ensure_ascii=False)
+                if rec.get("shares_checked"):
+                    _save(p, rec)
             return rec
     cc = dart_api.corp_code_of(ticker)
     if not cc or not dart_api.api_key():
         return {"year": year, "status": "NO_CORP"}
     rec = _fetch_year(cc, year, full)
-    final = rec.get("fs_div") or _dt.date.today() > _dt.date(year + 1, 6, 30)
+    final = rec.get("fs_div") or G.today_kst() > _dt.date(year + 1, 6, 30)
     if final and rec.get("status") != "ERR":
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(rec, f, ensure_ascii=False)
+        _save(p, rec)              # số cp lỗi: lưu BCTC, không 'shares_checked' → lần sau chỉ lấy lại số cp
     return rec
+
+
+def _save(p: str, rec: dict) -> None:
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({k: v for k, v in rec.items() if k not in ("shares_err", "message")}, f, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -316,14 +331,20 @@ def _hist_row(f: dict, adj: float) -> dict:
             "equity": e(eq),
             "eps": f["eps"] / adj if f.get("eps") is not None else None,
             "bps": eq / sh / adj if (eq and sh) else None,
-            "dps": (f.get("dps") or 0.0) / adj}
+            # năm chỉ-lịch-sử (full=False) không đọc cổ tức → None ('không biết'), KHÔNG phải 0: số 0 kéo trung vị
+            # tỷ lệ cổ tức lịch sử về 0 (DDM tường minh mất, RIM coi như giữ lại toàn bộ) — rà soát 18/11/2026
+            "dps": (f["dps"] / adj) if f.get("dps") is not None else (0.0 if f.get("shares_checked") else None)}
 
 
 def build_point(ticker: str, year: int, fs: dict, px_series, kospi, rf, registry,
                 split_ref_shares: Optional[float], horizon_months: int = 12) -> Optional[dict]:
     """Dữ liệu tại mốc T của năm `year` (BCTC năm year−1). None nếu thiếu dữ liệu."""
     last = fs.get(year - 1) or {}
-    if not last.get("fs_div") or not last.get("shares_out"):
+    if not last.get("fs_div"):
+        return None
+    if not last.get("shares_out"):
+        _LOG.info("backtest_dart: bỏ điểm %s %s — thiếu số cổ phiếu năm %s%s", ticker, year, year - 1,
+                  f" ({last['shares_err']})" if last.get("shares_err") else "")
         return None
     t = close_on_or_after(px_series, f"{year}{ANCHOR_MMDD}")
     if not t:
@@ -344,7 +365,8 @@ def build_point(ticker: str, year: int, fs: dict, px_series, kospi, rf, registry
            "price": price, "eps": eps, "bps": bps, "dps": h["dps"],
            "per": price / eps if eps and eps > 0 else None,
            "pbr": price / bps if bps and bps > 0 else None,
-           "market_cap": price * last["shares_out"] / adj}
+           # EPS/BPS đã chia adj (về gốc cổ phiếu của giá Naver) → số cp gốc mới = shares_out × adj
+           "market_cap": price * last["shares_out"] * adj}
     return {"year": year, "date": t[0], "row": row, "hist": hist[-6:],
             "stock_weekly": weekly_before(px_series, t[0]),
             "kospi_weekly": weekly_before(kospi, t[0]), "rf": rf_at(rf, t[0]),
@@ -431,9 +453,39 @@ def spearman(xs: list[float], ys: list[float], min_n: int = 8) -> Optional[float
     return cov / (vx * vy) if vx and vy else None
 
 
-def evaluate(vals: list[dict], key: str = "upside") -> dict:
+T_NOTE_OVERLAP = "t Newey–West: giữ quá 12 tháng nên lợi suất các mốc liền nhau chồng nhau"
+
+
+def _nw_se(xs: list[float], lag: int) -> Optional[float]:
+    """Sai số chuẩn Newey–West (Bartlett) của trung bình chuỗi xs với `lag` độ trễ."""
+    n = len(xs)
+    m = sum(xs) / n
+    d = [x - m for x in xs]
+    lrv = sum(x * x for x in d) / n
+    for k in range(1, min(lag, n - 1) + 1):
+        lrv += 2 * (1 - k / (lag + 1)) * sum(d[i] * d[i - k] for i in range(k, n)) / n
+    return (lrv / n) ** 0.5 if lrv > 0 else None
+
+
+def ic_t_stat(ics: list[float], horizon_months: int = 12) -> tuple[Optional[float], Optional[str]]:
+    """t của IC trung bình theo năm (mốc cách nhau 12 tháng). Giữ ≤ 12 tháng: t thường (các năm độc lập).
+    Giữ > 12 tháng: lợi suất hai mốc liền nhau chung một khoảng → IC tương quan, t thường bị phóng đại → dùng sai
+    số chuẩn Newey–West lag = ceil(h/12) − 1, và không nhỏ hơn sai số chuẩn thường (không bao giờ làm t lớn lên).
+    Trả (t, ghi chú) — ghi chú khác None khi đã hiệu chỉnh."""
+    if len(ics) < 3 or _st.stdev(ics) <= 0:
+        return None, (T_NOTE_OVERLAP if horizon_months > 12 else None)
+    mean = _st.mean(ics)
+    se = _st.stdev(ics) / len(ics) ** 0.5
+    if horizon_months <= 12:
+        return mean / se, None
+    nw = _nw_se(ics, math.ceil(horizon_months / 12) - 1)
+    return (mean / max(se, nw) if nw else None), T_NOTE_OVERLAP
+
+
+def evaluate(vals: list[dict], key: str = "upside", horizon_months: int = 12) -> dict:
     """IC theo năm + IC gộp, ngũ phân vị trong từng năm và tỷ lệ mất vốn cho tín hiệu `key`
-    ('upside' = fair value chính, hoặc tên 1 phương pháp trong method_upsides)."""
+    ('upside' = fair value chính, hoặc tên 1 phương pháp trong method_upsides). horizon_months > 12 → t hiệu chỉnh
+    lợi suất chồng nhau (ic_t_stat), kèm 't_note'."""
     def sig(r):
         return r.get(key) if key == "upside" else (r.get("method_upsides") or {}).get(key)
     xs = [r for r in vals if sig(r) is not None and r.get("excess") is not None]
@@ -445,8 +497,7 @@ def evaluate(vals: list[dict], key: str = "upside") -> dict:
             ic_year[y] = round(ic, 3)
     ics = list(ic_year.values())
     mean_ic = _st.mean(ics) if ics else None
-    t = (mean_ic / (_st.stdev(ics) / len(ics) ** 0.5)) \
-        if len(ics) >= 3 and _st.stdev(ics) > 0 else None
+    t, t_note = ic_t_stat(ics, horizon_months)
     pooled = spearman([sig(r) for r in xs], [r["excess"] for r in xs])
     # ngũ phân vị trong từng năm (Q1 = upside cao nhất = "rẻ nhất"), năm ít hơn 5 điểm bỏ qua
     quint: dict = {q: [] for q in range(1, 6)}
@@ -466,7 +517,7 @@ def evaluate(vals: list[dict], key: str = "upside") -> dict:
                           "loss30": sum(r["ret"] < -0.30 for r in rs) / len(rs),
                           "beat_mkt": sum(r["excess"] > 0 for r in rs) / len(rs)})
     return {"signal": key, "n": len(xs), "ic_by_year": ic_year, "mean_ic": mean_ic,
-            "t_stat": t, "ic_pooled": pooled, "quintiles": qrows}
+            "t_stat": t, "t_note": t_note, "ic_pooled": pooled, "quintiles": qrows}
 
 
 def forecast_accuracy(fs_by_ticker: dict, years) -> list[dict]:
@@ -522,18 +573,41 @@ def kci_vs_naive_wins(rows: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 # Runner end-to-end
 # ---------------------------------------------------------------------------
+def _ref_shares(f_t: dict, last_fy: int) -> tuple[Optional[float], bool]:
+    """Số cổ phiếu ở GỐC CỦA GIÁ NAVER (đã điều chỉnh chia tách về hôm nay) — tham chiếu cho split_factor.
+
+    Lấy shares_out của năm tài chính gần nhất đã nộp (last_fy, không phụ thuộc khung năm chạy hay cache); không có
+    thì năm mới nhất có số cp. Đối chiếu với số cp suy từ LN cổ đông mẹ ÷ EPS của báo cáo mới nhất (EPS được trình
+    bày lại theo chia tách xảy ra trước ngày nộp): lệch theo hệ số tròn → nhân vào. Báo cáo mới nhất lệch không tròn
+    (LN nhỏ: EPS trừ lãi trái phiếu vĩnh cửu / phần cổ phiếu ưu đãi → tỷ số là nhiễu) thì xét báo cáo liền trước
+    (run_backtest_dart luôn tải last_fy−1 → không phụ thuộc khung năm); cả hai không tròn → (None, True) = gốc số cp đáng ngờ, bỏ mã. Trả (ref, suspect)."""
+    rec = f_t.get(last_fy) or {}
+    ref = rec.get("shares_out") or next((f_t[y].get("shares_out") for y in sorted(f_t, reverse=True)
+                                         if f_t[y].get("shares_out")), None)
+    if not ref:
+        return None, False
+    reports = [f_t[y] for y in sorted(f_t, reverse=True) if y <= last_fy and f_t[y].get("fs_div")][:2]
+    for r in reports or [{}]:
+        ni, eps = r.get("ni_parent"), r.get("eps")
+        derived = ni / eps if (ni is not None and eps and ni * eps > 0) else None
+        adj = split_factor(derived, ref)
+        if adj is not None:
+            return ref * adj, False
+    return None, True
+
+
 def run_backtest_dart(tickers: list[str], years: tuple[int, int] = (2021, 2025),
                       horizon_months: int = 12, a: Optional[V.Assumptions] = None,
                       registry=None, progress=None, cache_dir: str = CACHE_DIR,
-                      workers: int = 4) -> tuple[pd.DataFrame, dict]:
+                      workers: int = 4, today: Optional[_dt.date] = None) -> tuple[pd.DataFrame, dict]:
     """Chạy backtest cho `tickers`, mốc 15/4 các năm years[0]..years[1].
 
     progress(text, frac) để cập nhật tiến trình. Trả (DataFrame điểm, kết quả đo lường).
-    Cần DART_API_KEY. Lần đầu ~30–60 giây cho 15 mã × 5 năm, sau đó đọc cache."""
+    Cần DART_API_KEY. Lần đầu ~30–60 giây cho 15 mã × 5 năm, sau đó đọc cache. today: mặc định hôm nay (KST)."""
     t0 = time.time()
     y0, y1 = years
-    today = _dt.date.today()
-    last_fy = today.year - 1 if today >= _dt.date(today.year, 4, 1) else today.year - 2
+    today = today or G.today_kst()
+    last_fy = expected_fy(today, 12)       # năm tài chính gần nhất đã quá hạn nộp báo cáo năm (quy tắc chung)
     tickers = list(dict.fromkeys(str(t).strip().upper().zfill(6) for t in tickers if str(t).strip()))
 
     def _p(text, frac):
@@ -541,19 +615,32 @@ def run_backtest_dart(tickers: list[str], years: tuple[int, int] = (2021, 2025),
             progress(text, frac)
 
     # năm chỉ-lịch-sử (không cần số cổ phiếu) + năm làm mốc (cần số cổ phiếu, cổ tức)
-    # + năm y1 để chấm dự phóng
-    jobs = [(t, y, False) for t in tickers for y in range(y0 - 1 - HIST_YEARS, y0 - 1)]
-    jobs += [(t, y, True) for t in tickers for y in range(y0 - 1, min(y1 - 1, last_fy) + 1)]
-    jobs += [(t, y1, False) for t in tickers if y1 <= last_fy]
+    # + năm y1 để chấm dự phóng + năm last_fy đủ số cp (và last_fy−1): gốc cổ phiếu của giá Naver (_ref_shares)
+    want: dict = {}
+    for t in tickers:
+        for y in range(y0 - 1 - HIST_YEARS, y0 - 1):
+            want.setdefault((t, y), False)
+        for y in range(y0 - 1, min(y1 - 1, last_fy) + 1):
+            want[(t, y)] = True
+        if y1 <= last_fy:
+            want.setdefault((t, y1), False)
+        want[(t, last_fy)] = True
+        want.setdefault((t, last_fy - 1), False)   # báo cáo liền trước cho phép đối chiếu EPS của _ref_shares
+    jobs = [(t, y, full) for (t, y), full in want.items()]
     fs: dict = {}
+    dart_errors: list = []
     with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(annual, t, y, full, cache_dir): (t, y) for t, y, full in jobs}
         for i, fut in enumerate(_cf.as_completed(futs), 1):
             t, y = futs[fut]
             try:
                 fs.setdefault(t, {})[y] = fut.result()
-            except Exception:
-                fs.setdefault(t, {})[y] = {"year": y, "status": "ERR"}
+            except Exception as e:
+                fs.setdefault(t, {})[y] = {"year": y, "status": "ERR", "message": G.redact(e)}
+            r = fs[t][y]
+            if r.get("status") == "ERR" or r.get("shares_err"):
+                dart_errors.append({"ticker": t, "year": y,
+                                    "error": r.get("message") or r.get("shares_err") or "lỗi gọi DART"})
             if i % 10 == 0 or i == len(jobs):
                 _p(f"BCTC DART: {i}/{len(jobs)} năm-mã", 0.7 * i / max(len(jobs), 1))
     have = sum(1 for t in fs for y in fs[t] if fs[t][y].get("fs_div"))
@@ -567,10 +654,13 @@ def run_backtest_dart(tickers: list[str], years: tuple[int, int] = (2021, 2025),
 
     _p("Định giá từng mốc...", 0.9)
     points = []
+    basis_suspect = []
     for t in tickers:
         f_t = fs.get(t, {})
-        ref = next((f_t[y].get("shares_out") for y in sorted(f_t, reverse=True)
-                    if f_t[y].get("shares_out")), None)
+        ref, suspect = _ref_shares(f_t, last_fy)
+        if suspect:
+            basis_suspect.append(t)
+            continue
         for y in range(y0, y1 + 1):
             if _dt.date(y, 4, 15) > today:
                 continue
@@ -580,10 +670,10 @@ def run_backtest_dart(tickers: list[str], years: tuple[int, int] = (2021, 2025),
                 points.append(p)
     vals = value_points(points, a)
 
-    res = {"auto": evaluate(vals)}
+    res = {"auto": evaluate(vals, horizon_months=horizon_months)}
     methods = sorted({k for r in vals for k in (r.get("method_upsides") or {})})
-    res["methods"] = {k: evaluate(vals, k) for k in methods}
-    res["by_confidence"] = {c: evaluate([r for r in vals if r["confidence"] == c])
+    res["methods"] = {k: evaluate(vals, k, horizon_months) for k in methods}
+    res["by_confidence"] = {c: evaluate([r for r in vals if r["confidence"] == c], horizon_months=horizon_months)
                             for c in ("High", "Medium", "Low")
                             if any(r["confidence"] == c for r in vals)}
     acc = forecast_accuracy(fs, range(y0, min(y1, last_fy) + 1))
@@ -598,6 +688,11 @@ def run_backtest_dart(tickers: list[str], years: tuple[int, int] = (2021, 2025),
                    "no_points": [t for t in tickers if not any(r["ticker"] == t for r in vals)],
                    "kospi_ok": bool(kospi), "rf_ok": bool(rf),
                    "split_adjusted_points": sum(1 for r in vals if r["split_adj"] != 1.0),
+                   "t_note": res["auto"].get("t_note"),
+                   # mã có số cp năm gần nhất lệch LN mẹ ÷ EPS theo tỷ lệ không tròn → không xác định được gốc giá
+                   "basis_suspect": basis_suspect,
+                   # (mã, năm) DART lỗi (mạng, hạn mức, bảo trì…) — không lưu cache, chạy lại sẽ lấy lại
+                   "dart_errors": dart_errors,
                    "seconds": round(time.time() - t0, 1)}
     _p("Xong", 1.0)
     df = pd.DataFrame([{k: v for k, v in r.items() if k != "method_upsides"} for r in vals])
@@ -621,6 +716,8 @@ def report_markdown(res: dict) -> str:
          "suất chỉ tính giá, không gồm cổ tức.", ""]
     ic = "—" if a["mean_ic"] is None else f"{a['mean_ic']:.3f}"
     t = "" if a.get("t_stat") is None else f" (t = {a['t_stat']:.2f})"
+    if a.get("t_note"):
+        t += f" — _{a['t_note']}_"
     pooled = "—" if a["ic_pooled"] is None else f"{a['ic_pooled']:.3f}"
     by_year = " · ".join(f"{y}: {v:+.3f}" for y, v in a["ic_by_year"].items()) \
         or "— (cần ≥8 mã/năm)"

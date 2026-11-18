@@ -4,6 +4,7 @@
 # sang nhánh `deploy`. Streamlit Cloud deploy từ nhánh `deploy` (anh đổi một lần trong Settings của App) → code
 # chưa qua test không bao giờ lên bản công khai. Chưa đổi thì Cloud vẫn deploy từ main như cũ, workflow chỉ báo đỏ/xanh.
 #
+# Job `secrets` quét bí mật trong phần thêm mới của diff (18/11/2026); đỏ thì không promote.
 # Action ghim theo mã commit (không theo tag có thể bị dời) · quyền tối thiểu · không dùng secret nào.
 name: Kiểm thử
 
@@ -17,8 +18,9 @@ on:
 permissions:
   contents: read
 
+# Tách nhóm theo loại sự kiện: bấm "Run workflow" trên main không hủy lượt push đang test/promote (18/11/2026).
 concurrency:
-  group: test-${{ github.ref }}
+  group: test-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -46,9 +48,24 @@ jobs:
           KCI_PUBLIC: "0"
         run: python -m pytest -q
 
+  secrets:
+    # quét phần THÊM MỚI của diff tìm chuỗi giống khóa DART (40 hex) / token Telegram — không cần secret nào
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262      # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Quét bí mật trong diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: python3 .github/scripts/scan_secrets.py "$BASE" "$GITHUB_SHA"
+
   promote:
     # chỉ khi test đạt trên push vào main → đưa đúng commit đó sang nhánh deploy (chỉ tiến, không ghi đè lịch sử)
-    needs: test
+    needs: [test, secrets]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5

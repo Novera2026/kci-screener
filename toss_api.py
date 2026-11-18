@@ -26,6 +26,8 @@ from typing import Optional, Any
 
 import requests
 
+import guard as GD
+
 try:
     from dotenv import load_dotenv
     load_dotenv()  # tự nạp .env nếu có
@@ -61,6 +63,8 @@ class TossClient:
     def __init__(self, client_id: Optional[str] = None,
                  client_secret: Optional[str] = None,
                  base_url: str = BASE_URL):
+        # khóa Toss của chủ app: khách trên bản công khai không được dùng, dù giao diện quên khóa (rà soát 18/11/2026)
+        GD.require_owner("Nguồn giá Toss")
         self.client_id = client_id or os.environ.get("TOSS_CLIENT_ID")
         self.client_secret = client_secret or os.environ.get("TOSS_CLIENT_SECRET")
         self.base_url = base_url.rstrip("/")
@@ -91,7 +95,8 @@ class TossClient:
         exp = _first(j, "expires_in", "expiresIn", default=3600)
         self._token_exp = time.time() + float(exp)
         if not self._token:
-            raise RuntimeError(f"Không lấy được access_token. Response: {j}")
+            # không đưa nguyên phản hồi vào lỗi (có thể chứa client_id) — chỉ mã lỗi
+            raise RuntimeError(f"Không lấy được access_token (lỗi: {_first(j, 'error', 'code', default='?')})")
         return self._token
 
     def _headers(self, account: Optional[str] = None) -> dict:
@@ -201,13 +206,13 @@ class TossClient:
             p = self.get_price(stock_code)
             out["price"] = p["price"]
         except Exception as e:
-            out["note"] = f"toss price fail: {str(e)[:60]}"
+            out["note"] = f"toss price fail: {GD.err(e, 60)}"
         try:
             hi, lo = self.get_52w_high_low(stock_code)
             out["high_52w"], out["low_52w"] = hi, lo
         except Exception as e:
             out.setdefault("note", "")
-            out["note"] += f" | toss candles fail: {str(e)[:50]}"
+            out["note"] += f" | toss candles fail: {GD.err(e, 50)}"
         return out
 
     def download_openapi_spec(self, path: str = "toss_openapi.json") -> str:

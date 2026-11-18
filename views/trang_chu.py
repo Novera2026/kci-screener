@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import sys
+import threading
 
 import pandas as pd
 import streamlit as st
@@ -18,27 +19,48 @@ import hotnews as H                                  # noqa: E402
 import megatrend as MT                               # noqa: E402
 
 st.set_page_config(page_title="Trang chủ — KCI", page_icon="🏠", layout="wide")
-_KST = _dt.timezone(_dt.timedelta(hours=9))
+import guard as GD                                   # noqa: E402 — giờ Hàn Quốc dùng chung
 
 
 # ---------------------------------------------------------------- dữ liệu (cache rất ngắn, chỉ để rerun nhanh)
 @st.cache_data(ttl=60, show_spinner=False)
-def _themes():
-    return H.theme_ranking()
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def _indices():
-    return MT.market_indices()
+def _overview():
+    """Chỉ số và xếp hạng chủ đề lấy SONG SONG (trước 18/11/2026: nối tiếp, I69). → (chỉ số, (chủ đề, trạng thái))."""
+    r = H.parallel(lambda f: f(), [MT.market_indices, H.theme_ranking], workers=2)
+    return r.get(MT.market_indices) or [], r.get(H.theme_ranking) or ([], "")
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _details(nos: tuple):
-    return H.parallel(lambda no: H.theme_detail(no, 100), list(nos))     # đủ thành viên (chủ đề lớn > 40 mã)
+    return H.parallel(lambda no: H.theme_detail(no, 100), list(nos), workers=max(1, min(len(nos), 24)))  # đủ thành viên (> 40 mã)
+
+
+def _details_wave(groups: list) -> dict:
+    """Nhiều nhóm chủ đề trong MỘT đợt song song (I69), mỗi nhóm một khóa cache riêng, ổn định: chọn xu hướng khác
+    chỉ tải chủ đề của xu hướng đó, nhóm dẫn dắt vẫn lấy từ cache (không gộp thành một khóa đổi theo lựa chọn)."""
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+    ctx = get_script_run_ctx()
+    keys = list(dict.fromkeys(tuple(g) for g in groups if g))
+
+    def one(nos):
+        add_script_run_ctx(threading.current_thread(), ctx)
+        d = _details(nos)
+        if H.details_incomplete(d):        # Naver lỗi một phần → không giữ bản thiếu cho người xem sau
+            _details.clear(nos)
+        return d
+    out = {}
+    for d in H.parallel(one, keys, workers=max(1, len(keys))).values():
+        out.update(d or {})
+    return out
 
 
 def _refresh():
-    for f in (_themes, _indices, _details):
+    # cache dùng chung cho mọi người xem → tối đa 1 lần / 60 giây toàn máy chủ (I33)
+    wait = H.refresh_wait("trang_chu")
+    if wait > 0:
+        st.toast(f"Vừa làm mới, thử lại sau {wait:.0f} giây")
+        return
+    for f in (_overview, _details):
         f.clear()
 
 
@@ -65,8 +87,9 @@ h2.write("")
 h2.button("🔄 Làm mới", on_click=_refresh, width="stretch")
 
 with st.spinner("Đang lấy chỉ số & chủ đề realtime (Naver)..."):
-    idx = _indices()
-    themes, mstatus = _themes()
+    idx, (themes, mstatus) = _overview()
+if not idx or not themes:          # rỗng = Naver lỗi → bỏ khỏi cache chung ngay (không giữ 60 giây cho mọi người xem;
+    _overview.clear()              # lần chạy lại / bấm 🔄 sau đó tự gọi lại Naver, không vướng giới hạn làm mới)
 
 _ST = {"OPEN": "🟢 Mở cửa", "CLOSE": "⚪ Đóng cửa", "PREOPEN": "🟡 Chờ mở"}
 cols = st.columns(max(len(idx), 1) + 1)
@@ -75,7 +98,7 @@ for c, r in zip(cols, idx):
              f"{r['price']:,.2f}" if r["price"] is not None else "—",
              f"{r['chg_pt']:+,.2f} ({r['chg']:+.2f}%)" if r["chg"] is not None and r["chg_pt"] is not None else None)
 cols[-1].metric("Thị trường", _ST.get(mstatus, mstatus or "—"))
-st.caption(f"🕒 Lấy lúc **{_dt.datetime.now(_KST):%H:%M %d/%m/%Y}** giờ Hàn Quốc · nguồn Naver realtime.")
+st.caption(f"🕒 Lấy lúc **{GD.now_kst():%H:%M %d/%m/%Y}** giờ Hàn Quốc · nguồn Naver realtime.")
 if not themes:
     st.error("Không lấy được danh sách chủ đề từ Naver (lỗi mạng?). Bấm 🔄 Làm mới để thử lại.")
     st.stop()
@@ -85,27 +108,38 @@ st.subheader("🌐 Mega trend hôm nay")
 st.caption("Mỗi xu hướng gom vài chủ đề Naver (danh mục chọn tay trong `megatrend.py`). "
            "**% hôm nay** = trung bình các chủ đề con · **Lan tỏa** = tỷ lệ mã đang tăng.")
 tt = MT.trend_table(themes)
+# bảng theo thứ tự CỐ ĐỊNH của danh mục: dòng được chọn lưu theo vị trí, mà tt sắp lại theo % mỗi lần làm mới
+# → chọn '⚡ Lưới điện' rồi làm mới từng nhảy sang xu hướng khác (I38). Thứ hạng hôm nay ở cột riêng.
+_rank = {r["key"]: i + 1 for i, r in enumerate(tt) if r["chg"] is not None}
+_tt_fixed = sorted(tt, key=lambda r: next(i for i, m in enumerate(MT.MEGATRENDS) if m["key"] == r["key"]))
 tdf = pd.DataFrame([{
+    "Hạng hôm nay": _rank.get(r["key"]),
     "Xu hướng": f"{r['icon']} {r['name']}",
     "% hôm nay": r["chg"], "Lan tỏa %": r["breadth"],
     "Mã tăng/tổng": f"{r['rise']}/{r['total']}",
     "Chủ đề con mạnh nhất": f"{r['best']} ({r['best_chg']:+.2f}%)" if r["best"] and r["best_chg"] is not None else "—",
     "Gồm": r["desc"],
-} for r in tt])
+} for r in _tt_fixed])
 st.caption("👆 **Bấm vào một dòng** để xem toàn bộ cổ phiếu trong nhóm xu hướng đó.")
-_ev = st.dataframe(tdf.style.format({"% hôm nay": "{:+.2f}", "Lan tỏa %": "{:.0f}"}, na_rep="—")
+_ev = st.dataframe(tdf.style.format({"Hạng hôm nay": "{:.0f}", "% hôm nay": "{:+.2f}", "Lan tỏa %": "{:.0f}"},
+                                    na_rep="—")
                    .map(_color, subset=["% hôm nay"])
                    .bar(subset=["Lan tỏa %"], color="#cdebd8", vmin=0, vmax=100),
                    hide_index=True, width="stretch", height=35 * (len(tdf) + 1) + 3,   # hiện đủ, không cuộn trong bảng
                    on_select="rerun", selection_mode="single-row", key="mt_table")
 _rows = (_ev.selection.rows if _ev is not None and hasattr(_ev, "selection") else []) or []
-_r = tt[_rows[0]] if _rows else tt[0]                  # chưa chọn → xu hướng mạnh nhất hôm nay
+_r = _tt_fixed[_rows[0]] if _rows and _rows[0] < len(_tt_fixed) else tt[0]     # chưa chọn → mạnh nhất hôm nay
 _key = _r["key"]
 _m = next(x for x in MT.MEGATRENDS if x["key"] == _key)
 st.markdown(f"#### {_r['icon']} {_r['name']} — cổ phiếu trong nhóm" + ("" if _rows else " _(mạnh nhất hôm nay)_"))
 st.caption(_m["desc"])
+_lead = [t for t in tt if t.get("chg") is not None][:3]          # 3 nhóm dẫn dắt cho tóm tắt phiên bên dưới
+_lead_nos = []
+for _t in _lead:
+    _lead_nos += [n for n in next(x for x in MT.MEGATRENDS if x["key"] == _t["key"])["themes"] if n not in _lead_nos]
 with st.spinner("Đang lấy thành viên các chủ đề..."):
-    _det = _details(tuple(_m["themes"]))
+    # MỘT đợt song song (trước: 3 đợt nối tiếp, I69); khóa nhóm dẫn dắt không đổi khi chọn dòng khác
+    _det = _details_wave([_lead_nos, [n for n in _m["themes"] if n not in _lead_nos]])
 _tnames = {t["no"]: t["name"] for t in themes}
 members = MT.trend_leaders(_key, _det, top=None, theme_names=_tnames)
 if members:
@@ -144,13 +178,8 @@ st.subheader("📝 Tóm tắt phiên — đăng Facebook")
 st.caption("Viết tự động từ số liệu realtime ở trên (chỉ số, mega trend, mã tăng mạnh trong nhóm dẫn dắt). Bấm biểu "
            "tượng 📋 ở góc khung để copy. Trước giờ đóng cửa (15:30) là **diễn biến phiên**, sau đó là **tổng kết phiên** "
            "— bấm 🔄 Làm mới để lấy số mới nhất.")
-_lead = [t for t in tt if t.get("chg") is not None][:3]
-with st.spinner("Đang lấy mã tăng mạnh của các nhóm dẫn dắt..."):
-    _mv = {}
-    for _t in _lead:
-        _mm = next(x for x in MT.MEGATRENDS if x["key"] == _t["key"])
-        _mv[_t["key"]] = MT.trend_leaders(_t["key"], _details(tuple(_mm["themes"])), top=5)
-_post = MT.session_summary(idx, tt, _mv, _dt.datetime.now(_KST), mstatus)
+_mv = {_t["key"]: MT.trend_leaders(_t["key"], _det, top=5) for _t in _lead}     # thành viên đã lấy ở trên
+_post = MT.session_summary(idx, tt, _mv, GD.now_kst(), mstatus)
 st.code(_post, language=None, wrap_lines=True)
 
 # ---------------------------------------------------------------- bot
@@ -175,7 +204,6 @@ def _theme_names() -> list[str]:
 
 
 import bot_hunt as BH                                # noqa: E402
-import guard as GD                                   # noqa: E402
 import screen as SC                                  # noqa: E402
 
 reg = _reg()
@@ -183,105 +211,117 @@ _mkt_of = dict(zip(reg.df["ticker"].astype(str).str.zfill(6), reg.df["market"]))
 _ind_of = dict(zip(reg.df["ticker"].astype(str).str.zfill(6), reg.df["industry_kr"]))
 _MK = {"ALL": "Cả hai sàn", "KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}
 
-kind = st.segmented_control("Phạm vi săn", ["Top vốn hóa", "Ngành KRX", "Chủ đề Naver", "Mega trend"],
-                            default="Top vốn hóa", key="hb_kind") or "Top vốn hóa"
-c1, c2 = st.columns(2)
-if kind == "Top vốn hóa":
-    mk = c1.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk")
-    n_top = c2.select_slider("Top vốn hóa", [50, 100, 200, 300, 400], value=200, key="hb_n")
-    scope = f"top {n_top} vốn hóa {_MK[mk]}"
-elif kind == "Ngành KRX":
-    ind = c1.selectbox("Ngành", sorted(reg.df["industry_kr"].dropna().unique()), key="hb_ind")
-    mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_i")
-    scope = f"ngành {ind}" + ("" if mk == "ALL" else f" · {mk}")
-elif kind == "Chủ đề Naver":
-    th = c1.selectbox("Chủ đề", _theme_names(), key="hb_th")
-    mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_t")
-    scope = f"chủ đề {th}" + ("" if mk == "ALL" else f" · {mk}")
-else:
-    _mt = {f"{m['icon']} {m['name']}": m["key"] for m in MT.MEGATRENDS}
-    mt_lab = c1.selectbox("Mega trend", list(_mt), key="hb_mt")
-    mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_m")
-    scope = f"mega trend {mt_lab}" + ("" if mk == "ALL" else f" · {mk}")
-
-c3, c4 = st.columns([3, 1])
-presets = c3.multiselect("Bộ tiêu chuẩn", list(SC.PRESETS), default=BH.DEFAULT_PRESETS,
-                         format_func=lambda k: SC.PRESETS[k]["name"].split(" — ")[0], key="hb_presets")
-max_deep = c4.slider("Định giá sâu tối đa / bộ", 3, 15, 8, key="hb_deep",
-                     help="Mỗi bộ lấy tối đa chừng này mã qua tầng 1 để định giá sâu. Nhiều hơn = lâu hơn.")
-
-if st.button("🤖 Cho bot săn", type="primary", disabled=not presets, key="hb_run"):
-    with GD.heavy_slot() as _ok:      # giới hạn tác vụ nặng cùng lúc trên máy chủ; luôn nhả khi xong/lỗi
-        if not _ok:
-            st.warning(GD.BUSY_MSG)
-            st.stop()
-        with st.status(f"Bot đang săn trong {scope}…", expanded=True) as _sts:
-            if kind == "Top vốn hóa":
-                tks = None
-            elif kind == "Ngành KRX":
-                tks = SC.by_industry(ind, reg)
-            elif kind == "Chủ đề Naver":
-                tks = SC.by_theme(th)
-            else:
-                st.write("Lấy thành viên các chủ đề của mega trend…")
-                tks = MT.trend_tickers(_mt[mt_lab])
-            if tks is not None and mk != "ALL":
-                tks = [t for t in tks if _mkt_of.get(t) == mk]
-            if tks is not None and not tks:
-                _sts.update(label="Phạm vi này không có mã nào.", state="error")
-                st.stop()
-            out = BH.hunt(presets, universe=n_top if kind == "Top vốn hóa" else 200, max_deep=max_deep,
-                          progress=st.write, tickers=tks, market=mk, scope=scope)
-            st.session_state["home_hunt"] = out
-            _sts.update(label=f"Xong · {len(out['picks'])} mã đạt chuẩn trong {out['meta']['universe']} mã "
-                              f"({out['meta']['scope']})", state="complete", expanded=False)
-
-hunt = st.session_state.get("home_hunt")
-if hunt:
-    _meta = hunt["meta"]
-    st.caption(f"Kết quả săn lúc **{_meta['at']:%H:%M %d/%m/%Y}** KST · {_meta.get('scope', '')} · "
-               f"{_meta['universe']} mã · định giá sâu {_meta['n_deep']} mã.")
-    # nguồn dữ liệu lỗi phải hiện ra (rà soát 15/11/2026): Rf dự phòng, DART không trả lời, hai nguồn lệch nhau…
-    if _meta.get("rf_live") is False:
-        st.warning(f"⚠️ {_meta.get('rf_note') or 'Không lấy được Rf trực tiếp'}. Mọi kết quả lần săn này tin cậy Thấp — "
-                   "bấm săn lại sau ít phút.")
-    _res_all = hunt.get("results") or {}
-    _n_dw = sum(1 for r in _res_all.values() if r.get("Cảnh báo dữ liệu"))
-    if _n_dw:
-        st.warning(f"⚠️ {_n_dw}/{len(_res_all)} mã định giá sâu có **lỗi dữ liệu** (DART không trả lời, hai nguồn lệch "
-                   "nhau, thiếu beta…). Các mã đó tin cậy Thấp và kết quả có thể đổi khi chạy lại.")
-    picks = hunt["picks"]
-    if not picks:
-        st.info("Không mã nào qua đủ 2 tầng trong phạm vi này. Thử mở rộng phạm vi hoặc thêm bộ tiêu chuẩn.")
+# Bot trong một fragment (I69): đổi 'Phạm vi săn', bộ tiêu chuẩn… chỉ chạy lại phần này, không tải lại chỉ số,
+# chủ đề và mega trend ở trên (trước: hết TTL 60 giây thì mỗi thao tác ở form gọi lại ~17 lượt Naver).
+@st.fragment
+def _bot_panel():
+    kind = st.segmented_control("Phạm vi săn", ["Top vốn hóa", "Ngành KRX", "Chủ đề Naver", "Mega trend"],
+                                default="Top vốn hóa", key="hb_kind") or "Top vốn hóa"
+    c1, c2 = st.columns(2)
+    if kind == "Top vốn hóa":
+        mk = c1.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk")
+        n_top = c2.select_slider("Top vốn hóa", [50, 100, 200, 300, 400], value=200, key="hb_n")
+        scope = f"top {n_top} vốn hóa {_MK[mk]}"
+    elif kind == "Ngành KRX":
+        ind = c1.selectbox("Ngành", sorted(reg.df["industry_kr"].dropna().unique()), key="hb_ind")
+        mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_i")
+        scope = f"ngành {ind}" + ("" if mk == "ALL" else f" · {mk}")
+    elif kind == "Chủ đề Naver":
+        th = c1.selectbox("Chủ đề", _theme_names(), key="hb_th")
+        mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_t")
+        scope = f"chủ đề {th}" + ("" if mk == "ALL" else f" · {mk}")
     else:
-        pdf = pd.DataFrame([{
-            "Mã": p["ticker"], "Tên": p["name"], "Sàn": _mkt_of.get(p["ticker"], "—"),
-            "Ngành": p.get("industry") or _ind_of.get(p["ticker"]) or "—",
-            "Kết luận": p["verdict"] or "—", "Giá": p["price"], "Giá trị hợp lý": p["fair"],
-            "Chênh %": p["upside"], "Độ tin cậy": (_res_all.get(p["ticker"]) or {}).get("Độ tin cậy") or "—",
-            "Chất lượng TS": p.get("quality") or "—", "Số bộ đạt": len(p["presets"]),
-            "Bộ tiêu chuẩn": ", ".join(SC.PRESETS[k]["name"].split(" — ")[0] for k in p["presets"]),
-        } for p in picks])
-        f1, f2 = st.columns(2)
-        fm = f1.segmented_control("Lọc sàn", ["Tất cả", "KOSPI", "KOSDAQ"], default="Tất cả", key="hb_fm") or "Tất cả"
-        inds = sorted(pdf["Ngành"].unique())
-        fi = f2.multiselect("Lọc ngành", inds, key="hb_fi")
-        view = pdf[(pdf["Sàn"] == fm) if fm != "Tất cả" else pdf["Sàn"].notna()]
-        if fi:
-            view = view[view["Ngành"].isin(fi)]
-        st.dataframe(view.style.format({"Giá": "{:,.0f}", "Giá trị hợp lý": "{:,.0f}", "Chênh %": "{:+.1f}"},
-                                       na_rep="—").map(_color, subset=["Chênh %"]),
-                     hide_index=True, width="stretch")
-        st.caption("Xếp theo **chênh lệch định giá**. 🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm. Backtest 2021–25 (top "
-                   "200): định giá xếp hạng có tín hiệu yếu (IC +0,08), nhưng **danh sách kiểu này chưa thắng trung bình "
-                   "thị trường** (top 12 ≈ +0,4%/năm, không có ý nghĩa thống kê) — để nghiên cứu tiếp, không phải danh "
-                   "mục mua.")
-        if len(view):
-            c1, c2 = st.columns([3, 1])
-            pick = c1.selectbox("Định giá đủ 5 bước một mã", [f"{r['Mã']} · {r['Tên']}" for _, r in view.iterrows()],
-                                key="home_pick_hunt")
-            if c2.button("Mở trong 🧮", key="home_open_hunt", width="stretch"):
-                _open_valuation(pick.split(" · ")[0])
+        _mt = {f"{m['icon']} {m['name']}": m["key"] for m in MT.MEGATRENDS}
+        mt_lab = c1.selectbox("Mega trend", list(_mt), key="hb_mt")
+        mk = c2.selectbox("Sàn", list(_MK), format_func=_MK.get, key="hb_mk_m")
+        scope = f"mega trend {mt_lab}" + ("" if mk == "ALL" else f" · {mk}")
+
+    c3, c4 = st.columns([3, 1])
+    presets = c3.multiselect("Bộ tiêu chuẩn", list(SC.PRESETS), default=BH.DEFAULT_PRESETS,
+                             format_func=lambda k: SC.PRESETS[k]["name"].split(" — ")[0], key="hb_presets")
+    max_deep = c4.slider("Định giá sâu tối đa / bộ", 3, 15, 8, key="hb_deep",
+                         help="Mỗi bộ lấy tối đa chừng này mã qua tầng 1 để định giá sâu. Nhiều hơn = lâu hơn.")
+    # trần tổng số mã định giá sâu cho khách (trước 18/11/2026: 7 bộ × 15 = tới 105 mã mỗi lần bấm, hết hạn mức DART chung)
+    _max_total = None if GD.owner_ok() else GD.MAX_DEEP_PUBLIC
+    st.caption("Mỗi mã định giá sâu chưa có dữ liệu lưu sẵn tốn khoảng 7–14 lượt gọi DART"
+               + ("." if _max_total is None else f" · bản công khai định giá sâu tối đa {_max_total} mã mỗi lần."))
+
+    if st.button("🤖 Cho bot săn", type="primary", disabled=not presets, key="hb_run"):
+        with GD.heavy_slot() as _ok:      # giới hạn tác vụ nặng cùng lúc trên máy chủ; luôn nhả khi xong/lỗi
+            if not _ok:
+                st.warning(GD.BUSY_MSG)
+                st.stop()
+            with st.status(f"Bot đang săn trong {scope}…", expanded=True) as _sts:
+                if kind == "Top vốn hóa":
+                    tks = None
+                elif kind == "Ngành KRX":
+                    tks = SC.by_industry(ind, reg)
+                elif kind == "Chủ đề Naver":
+                    tks = SC.by_theme(th)
+                else:
+                    st.write("Lấy thành viên các chủ đề của mega trend…")
+                    tks = MT.trend_tickers(_mt[mt_lab])
+                if tks is not None and mk != "ALL":
+                    tks = [t for t in tks if _mkt_of.get(t) == mk]
+                if tks is not None and not tks:
+                    _sts.update(label="Phạm vi này không có mã nào.", state="error")
+                    st.stop()
+                out = BH.hunt(presets, universe=n_top if kind == "Top vốn hóa" else 200, max_deep=max_deep,
+                              progress=st.write, tickers=tks, market=mk, scope=scope, max_total=_max_total)
+                st.session_state["home_hunt"] = out
+                _sts.update(label=f"Xong · {len(out['picks'])} mã đạt chuẩn trong {out['meta']['universe']} mã "
+                                  f"({out['meta']['scope']})", state="complete", expanded=False)
+
+    hunt = st.session_state.get("home_hunt")
+    if hunt:
+        _meta = hunt["meta"]
+        st.caption(f"Kết quả săn lúc **{_meta['at']:%H:%M %d/%m/%Y}** KST · {_meta.get('scope', '')} · "
+                   f"{_meta['universe']} mã · định giá sâu {_meta['n_deep']} mã.")
+        # nguồn dữ liệu lỗi phải hiện ra (rà soát 15/11/2026): Rf dự phòng, DART không trả lời, hai nguồn lệch nhau…
+        if _meta.get("rf_live") is False:
+            st.warning(f"⚠️ {_meta.get('rf_note') or 'Không lấy được Rf trực tiếp'}. Mọi kết quả lần săn này tin cậy Thấp — "
+                       "bấm săn lại sau ít phút.")
+        _res_all = hunt.get("results") or {}
+        _n_dw = sum(1 for r in _res_all.values() if r.get("Cảnh báo dữ liệu"))
+        if _n_dw:
+            st.warning(f"⚠️ {_n_dw}/{len(_res_all)} mã định giá sâu có **lỗi dữ liệu** (DART không trả lời, hai nguồn lệch "
+                       "nhau, thiếu beta…). Các mã đó tin cậy Thấp và kết quả có thể đổi khi chạy lại.")
+        picks = hunt["picks"]
+        if not picks:
+            st.info("Không mã nào qua đủ 2 tầng trong phạm vi này. Thử mở rộng phạm vi hoặc thêm bộ tiêu chuẩn.")
+        else:
+            pdf = pd.DataFrame([{
+                "Mã": p["ticker"], "Tên": p["name"], "Sàn": _mkt_of.get(p["ticker"], "—"),
+                "Ngành": p.get("industry") or _ind_of.get(p["ticker"]) or "—",
+                "Kết luận": p["verdict"] or "—", "Giá": p["price"], "Giá trị hợp lý": p["fair"],
+                "Chênh %": p["upside"], "Độ tin cậy": (_res_all.get(p["ticker"]) or {}).get("Độ tin cậy") or "—",
+                "Chất lượng TS": p.get("quality") or "—", "Số bộ đạt": len(p["presets"]),
+                "Bộ tiêu chuẩn": ", ".join(SC.PRESETS[k]["name"].split(" — ")[0] for k in p["presets"]),
+            } for p in picks])
+            f1, f2 = st.columns(2)
+            fm = f1.segmented_control("Lọc sàn", ["Tất cả", "KOSPI", "KOSDAQ"], default="Tất cả", key="hb_fm") or "Tất cả"
+            inds = sorted(pdf["Ngành"].unique())
+            fi = f2.multiselect("Lọc ngành", inds, key="hb_fi")
+            view = pdf[(pdf["Sàn"] == fm) if fm != "Tất cả" else pdf["Sàn"].notna()]
+            if fi:
+                view = view[view["Ngành"].isin(fi)]
+            st.dataframe(view.style.format({"Giá": "{:,.0f}", "Giá trị hợp lý": "{:,.0f}", "Chênh %": "{:+.1f}"},
+                                           na_rep="—").map(_color, subset=["Chênh %"]),
+                         hide_index=True, width="stretch")
+            st.caption("Xếp theo **chênh lệch định giá**. 🟢 rẻ & chất lượng tốt · 🟡 rẻ nhưng cần kiểm. Backtest 2021–25 (top "
+                       "200): định giá xếp hạng có tín hiệu yếu (IC +0,08), nhưng **danh sách kiểu này chưa thắng trung bình "
+                       "thị trường** (top 12 ≈ +0,4%/năm, không có ý nghĩa thống kê) — để nghiên cứu tiếp, không phải danh "
+                       "mục mua.")
+            if len(view):
+                c1, c2 = st.columns([3, 1])
+                pick = c1.selectbox("Định giá đủ 5 bước một mã", [f"{r['Mã']} · {r['Tên']}" for _, r in view.iterrows()],
+                                    key="home_pick_hunt")
+                if c2.button("Mở trong 🧮", key="home_open_hunt", width="stretch"):
+                    _open_valuation(pick.split(" · ")[0])
+
+
+_bot_panel()
+
 
 bot = MT.load_bot_state(os.path.join(_ROOT, "bot_state.json"))
 if bot:

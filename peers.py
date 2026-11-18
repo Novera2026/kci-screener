@@ -45,7 +45,9 @@ FOREIGN_PEERS: dict[str, list[str]] = {
     "Entertainment": ["WMG.O", "TME"],
     "Holdco": ["8058.T", "8001.T", "9984.T"],
 }
-METRICS = ["P/E", "P/B", "Tăng trưởng DT 3 năm %", "Biên LN HĐ %", "Biên LN ròng %", "ROE %", "Tỷ suất cổ tức %"]
+# Naver chỉ có 3 năm thực (cả trong nước lẫn nước ngoài) → tăng trưởng DT là CAGR 2 năm (nhãn cũ "3 năm" sai, 18/11)
+GROWTH = "CAGR DT 2 năm %"
+METRICS = ["P/E", "P/B", GROWTH, "Biên LN HĐ %", "Biên LN ròng %", "ROE %", "Tỷ suất cổ tức %"]
 LOWER_IS_CHEAPER = {"P/E", "P/B"}
 PE_MAX = 200.0                    # P/E > 200 hoặc ≤ 0 → không đưa vào trung vị (vd Berkshire 0,01× trên Naver)
 
@@ -80,9 +82,37 @@ def domestic_profile(row: dict, annual: list[dict]) -> dict:
     return {"Mã": row.get("ticker"), "Tên": row.get("name"), "Thị trường": "🇰🇷 Hàn Quốc",
             "Vốn hóa (tỷ KRW)": (row["market_cap"] / 1e9) if row.get("market_cap") else None,
             "P/E": pe, "P/B": pb,
-            "Tăng trưởng DT 3 năm %": _cagr([c.get("revenue") for c in reals[-4:]]),
+            GROWTH: _cagr([c.get("revenue") for c in reals[-3:]]),
             "Biên LN HĐ %": V._num(last.get("op_margin")), "Biên LN ròng %": V._num(last.get("net_margin")),
             "ROE %": roe, "Tỷ suất cổ tức %": V._num(row.get("div_yield")), "Năm BCTC": str(last.get("period", ""))[:4]}
+
+
+def _col_date(k: str) -> Optional[_dt.date]:
+    try:
+        return _dt.date(int(k[:4]), int(k[5:7]), int(k[8:10]))
+    except (ValueError, TypeError):
+        return None
+
+
+def _clean_annual_cols(cols: list[str], rev: dict, ni: dict) -> tuple[list[str], str]:
+    """Cột năm dùng được của /finance/annual (Naver nước ngoài). Rà soát 18/11/2026:
+      • cột cách cột giữ trước < 300 ngày là cột quý chèn vào (GM, NTES: 2026.03.31 sau FY2025) → bỏ;
+      • năm có DT và LN ròng cùng lệch < 0,1% so với năm kế tiếp là Naver chép trùng (TSM, VZ, DUK) → bỏ năm cũ
+        (EBIT không xét: VZ trùng DT và LN nhưng EBIT được tính lại lệch 1,7%; AT&T DT lệch 0,075% nhưng LN khác hẳn).
+    Trả (cột giữ lại, ghi chú)."""
+    keep: list[str] = []
+    for k in cols:
+        d, prev = _col_date(k), (_col_date(keep[-1]) if keep else None)
+        if d and prev and (d - prev).days < 300:
+            continue
+        keep.append(k)
+
+    def same(a, b):
+        return a is not None and b is not None and b != 0 and abs(a / b - 1) < 0.001
+    dup = [k for k, nxt in zip(keep, keep[1:])
+           if all(same(x.get(k), x.get(nxt)) for x in (rev, ni))]
+    note = "dữ liệu Naver trùng năm " + ", ".join(k[:4] for k in dup) if dup else ""
+    return [k for k in keep if k not in dup], note
 
 
 def foreign_profile(code: str) -> Optional[dict]:
@@ -100,23 +130,29 @@ def foreign_profile(code: str) -> Optional[dict]:
 
     def series(title):
         c = rows.get(title, {})
-        return [_f((c.get(k) or {}).get("krw")) for k in cols]
+        return {k: _f((c.get(k) or {}).get("krw")) for k in cols}
     rev, ebit, ni = series("매출액"), series("EBIT"), series("당기순이익")
+    cols, note = _clean_annual_cols(cols, rev, ni)
     pe, pb = _f(info.get("per")), _f(info.get("pbr"))
-    last = len(cols) - 1
-    rv = rev[last] if cols else None
+    last = cols[-1] if cols else None
+    rv = rev.get(last) if last else None
     mc = _f(b.get("marketValueKrwRaw"))
-    return {"Mã": code, "Tên": b.get("stockName"),
-            "Thị trường": f"🌐 {b.get('nationName') or (b.get('stockExchangeType') or {}).get('nationName') or ''}".strip(),
-            "Vốn hóa (tỷ KRW)": mc / 1e9 if mc else None, "P/E": pe, "P/B": pb,
-            "Tăng trưởng DT 3 năm %": _cagr(rev),
-            "Biên LN HĐ %": (ebit[last] / rv * 100) if (cols and rv and ebit[last] is not None) else None,
-            "Biên LN ròng %": (ni[last] / rv * 100) if (cols and rv and ni[last] is not None) else None,
-            # ROE ≈ P/B ÷ P/E (cùng giá, LN và vốn chủ gần nhất)
-            "ROE %": (pb / pe * 100) if (pe and pb and pe > 0) else None,
-            "Tỷ suất cổ tức %": _f(info.get("dividendYieldRatio")),
-            "Năm BCTC": cols[-1][:4] if cols else "",
-            "_quarter": quarter_profile_foreign(code, b.get("stockName"), mc, _world_quarter(code))}
+    out = {"Mã": code, "Tên": b.get("stockName"),
+           "Thị trường": f"🌐 {b.get('nationName') or (b.get('stockExchangeType') or {}).get('nationName') or ''}".strip(),
+           "Vốn hóa (tỷ KRW)": mc / 1e9 if mc else None, "P/E": pe, "P/B": pb,
+           GROWTH: _cagr([rev[k] for k in cols[-3:]]),
+           "Biên LN HĐ %": (ebit[last] / rv * 100) if (rv and ebit.get(last) is not None) else None,
+           "Biên LN ròng %": (ni[last] / rv * 100) if (rv and ni.get(last) is not None) else None,
+           # ROE ≈ P/B ÷ P/E (cùng giá, LN và vốn chủ gần nhất)
+           "ROE %": (pb / pe * 100) if (pe and pb and pe > 0) else None,
+           "Tỷ suất cổ tức %": _f(info.get("dividendYieldRatio")),
+           "Năm BCTC": last[:4] if last else "",
+           "_quarter": quarter_profile_foreign(code, b.get("stockName"), mc, _world_quarter(code))}
+    if out[GROWTH] is not None and len([k for k in cols[-3:] if rev.get(k) is not None]) == 2:
+        note = "; ".join(x for x in (note, "tăng trưởng DT chỉ tính 1 năm") if x)
+    if note:
+        out["Ghi chú"] = note
+    return out
 
 
 # ---------------------------------------------------------------------------- QUÝ gần nhất
@@ -201,20 +237,36 @@ def quarter_medians(profiles: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------- danh sách đối thủ
-def naver_domestic_peers(ticker: str) -> list[str]:
-    """Danh sách đối thủ trong nước Naver gợi ý cho mã (integration.industryCompareInfo)."""
-    j = None
-    for attempt in range(2):          # lỗi mạng → thử lại 1 lần (thiếu gợi ý làm bộ đối thủ, tức phép neo, đổi)
+def _naver_integration(ticker: str) -> Optional[dict]:
+    """JSON integration của Naver cho mã; None nếu lỗi (mạng, HTTP 429/5xx có thân JSON) sau 1 lần thử lại."""
+    for attempt in range(2):
         try:
-            j = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/integration", headers=_H,
-                             timeout=_TIMEOUT).json()
-            break
+            r = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/integration", headers=_H,
+                             timeout=_TIMEOUT)
+            r.raise_for_status()
+            j = r.json()
+            if isinstance(j, dict):
+                return j
         except Exception:
-            j = None
-    if not j:
-        return []
+            pass
+    return None
+
+
+def naver_domestic_peers(ticker: str) -> Optional[list[str]]:
+    """Danh sách đối thủ trong nước Naver gợi ý cho mã (integration.industryCompareInfo).
+    None khi lỗi (khác [] = Naver không gợi ý): lỗi không được hiểu là 'không có đối thủ' (rà soát 18/11/2026)."""
+    j = _naver_integration(ticker)
+    if j is None:
+        return None
     return [str(x.get("itemCode")).zfill(6) for x in (j.get("industryCompareInfo") or [])
             if x.get("stockType") == "domestic" and x.get("itemCode") and str(x.get("itemCode")).zfill(6) != ticker]
+
+
+def naver_industry_code(ticker: str) -> Optional[str]:
+    """Mã ngành KRX (industryCode) của Naver cho mã — dùng khi danh mục chưa có mã (mới niêm yết)."""
+    j = _naver_integration(ticker)
+    code = (j or {}).get("industryCode")
+    return str(code) if code not in (None, "") else None
 
 
 def _plausible(p: dict) -> bool:
@@ -275,17 +327,93 @@ def fetch_foreign(codes: list[str]) -> list[dict]:
         return [p for p in ex.map(foreign_profile, codes) if p]
 
 
+LIST_ERROR = "_list_error"     # dòng đánh dấu "danh sách đối thủ lỗi" trong danh sách dòng đối thủ (không phải mã)
+
+
+def list_error_row(msg: str) -> dict:
+    """Dòng đánh dấu: danh sách đối thủ của mã không lấy đủ (lỗi nguồn). pipeline đọc để hạ tin cậy/không công bố;
+    không có mã, không có số → không vào trung vị."""
+    return {"ticker": None, "fetch_ok": False, LIST_ERROR: msg}
+
+
+def is_common(t: str) -> bool:
+    """Cổ phiếu thường: mã tận cùng 0 (ưu đãi tận cùng 5/7/9/K…, vd 005935, 00104K)."""
+    return str(t).endswith("0")
+
+
+def _registry_info(registry) -> dict:
+    """{mã: (tập đoàn, sector EN, ngành KRX, tên Hàn)} từ danh mục; cột thiếu (registry giả) → None."""
+    df = getattr(registry, "df", None)
+    if df is None or "ticker" not in df.columns:
+        return {}
+
+    def col(c):
+        return [v if isinstance(v, str) and v.strip() else None for v in df[c]] if c in df.columns \
+            else [None] * len(df)
+    return dict(zip(df["ticker"], zip(col("group"), col("sector"), col("industry_kr"), col("name_kr"))))
+
+
 def domestic_candidates(ticker: str, industry_kr: Optional[str], registry, n: int = 12,
-                        ind_cache: Optional[dict] = None) -> list[str]:
+                        ind_cache: Optional[dict] = None, errors: Optional[list] = None,
+                        exclude: Optional[set] = None, dropped: Optional[list] = None) -> list[str]:
     """BỘ ĐỐI THỦ CHUẨN trong nước — dùng chung cho mọi trang (pipeline.PEER_N mã): gợi ý của Naver ∪ top vốn hóa
-    cùng 업종, CHỈ cổ phiếu thường có trong danh mục (bỏ cổ phiếu ưu đãi như 005935 của chính Samsung).
-    ind_cache: dict của một lần chạy để các mã cùng ngành không gọi lại danh sách ngành."""
+    cùng 업종, CHỈ cổ phiếu thường (bỏ cổ phiếu ưu đãi như 005935 của chính Samsung).
+    ind_cache: dict của một lần chạy để các mã cùng ngành không gọi lại danh sách ngành.
+    errors: list nhận thông báo khi nguồn lỗi (gợi ý Naver / danh sách ngành) — bộ đối thủ khi đó CHƯA ĐẦY ĐỦ.
+    exclude: các mã không được làm đối thủ (vd cùng tập đoàn) — lọc TRƯỚC khi cắt n.
+    Rà soát 18/11/2026: lọc rồi mới cắt n (cổ phiếu ưu đãi không chiếm chỗ); mã mới niêm yết có trong danh sách ngành
+    hiện tại của Naver được nhận dù danh mục (tickers_all.csv) chưa có; mã chưa có ngành lấy ngành từ industryCode.
+    Rà soát 18/11/2026 (I21, I57): bỏ mã CÙNG TẬP ĐOÀN (cột group của danh mục — SK스퀘어 trong bộ của SK하이닉스) và,
+    khi mã đang định giá không phải Holdco, bỏ công ty holding (P/E của holding là P/E công ty con sau chiết khấu →
+    phép neo tự tham chiếu). dropped: list nhận {Mã, Tên, Lý do} của các mã bị loại trước khi đủ n."""
     import pipeline as _P
     known = set(registry.df["ticker"]) if registry is not None else None
-    cands = naver_domestic_peers(ticker) + (
-        _P.industry_peers(industry_kr, ticker, n, cache=ind_cache) if industry_kr else [])
-    out = [t for t in dict.fromkeys(cands) if t != ticker and (known is None or t in known)]
-    return out[:n]
+    if not industry_kr and (known is None or ticker not in known):
+        j = _naver_integration(ticker)                  # mã mới niêm yết: ngành theo industryCode
+        if j is None:
+            if errors is not None:
+                errors.append("ngành của mã (Naver) lỗi")
+        else:
+            code = j.get("industryCode")
+            industry_kr = _P.industry_name(code, errors) if code not in (None, "") else None
+    sug = naver_domestic_peers(ticker)
+    if sug is None:
+        sug = []
+        if errors is not None:
+            errors.append("gợi ý đối thủ Naver lỗi")
+    listed = _P.industry_peers(industry_kr, ticker, n + 20, cache=ind_cache, errors=errors) if industry_kr else []
+    in_list = set(listed)
+    skip = set(exclude or ()) | {ticker}
+    info = _registry_info(registry)
+    g0, sec0, ik0, nm0 = info.get(ticker) or (None, None, None, None)
+    self_holdco = V.effective_sector(sec0, ik0 or industry_kr, nm0) == "Holdco"
+
+    def ok(t):
+        if t in skip or not is_common(t):               # cp ưu đãi trong danh mục (00104K) cũng bị loại
+            return False
+        if known is not None and t in known:
+            return True
+        return known is None or t in in_list
+
+    def why(t):                                         # lý do loại (None = giữ)
+        g, sec, ik, nm = info.get(t) or (None, None, None, None)
+        if g0 and g == g0:
+            return f"cùng tập đoàn {g0}"
+        if not self_holdco and V.effective_sector(sec, ik, nm) == "Holdco":
+            return "công ty holding — định giá theo NAV/SOTP"
+        return None
+    out: list[str] = []
+    for t in dict.fromkeys(sug + listed):
+        if len(out) >= n:
+            break
+        if not ok(t):
+            continue
+        r = why(t)
+        if r is None:
+            out.append(t)
+        elif dropped is not None:
+            dropped.append({"Mã": t, "Tên": (info.get(t) or (None,) * 4)[3], "Lý do": r})
+    return out
 
 
 def peer_rows_batch(items: list[tuple], registry, have: Optional[dict] = None, n: Optional[int] = None,
@@ -293,7 +421,8 @@ def peer_rows_batch(items: list[tuple], registry, have: Optional[dict] = None, n
     """Bộ đối thủ chuẩn cho NHIỀU mã trong một lần chạy: {mã: [dòng thị trường của từng đối thủ]}.
 
     items = [(mã, ngành KRX)]. have = {mã: dòng thị trường} đã lấy trong lần chạy này (dùng lại, không gọi lại);
-    đối thủ chưa có được lấy MỚI một lượt (giá, vốn hóa, P/E, P/B). Cùng quy tắc với trang 🧮 → cùng phép neo peer."""
+    đối thủ chưa có được lấy MỚI một lượt (giá, vốn hóa, P/E, P/B). Cùng quy tắc với trang 🧮 → cùng phép neo peer.
+    Đối thủ lấy lỗi giữ fetch_ok=False; danh sách lỗi → thêm list_error_row (pipeline hạ tin cậy / không công bố)."""
     import pipeline as _P
     from screener import fetch_many
     n = n or _P.PEER_N
@@ -301,13 +430,16 @@ def peer_rows_batch(items: list[tuple], registry, have: Optional[dict] = None, n
     ind_cache: dict = {}
     for ik in dict.fromkeys(ik for _, ik in items if ik):        # nạp trước danh sách ngành (mỗi ngành 1 lần)
         _P.industry_peers(ik, None, n, cache=ind_cache)
+    errs: list[list] = [[] for _ in items]
     with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        cands = list(ex.map(lambda it: domestic_candidates(it[0], it[1], registry, n, ind_cache), items))
+        cands = list(ex.map(lambda ie: domestic_candidates(ie[1][0], ie[1][1], registry, n, ind_cache, errs[ie[0]]),
+                            enumerate(items)))
     missing = [t for t in dict.fromkeys(t for c in cands for t in c) if t not in have]
     if missing:
         for r in fetch_many(missing, registry=registry, prefer="naver")[0]:
             have[r["ticker"]] = r
-    return {tk: [have[t] for t in c if t in have] for (tk, _), c in zip(items, cands)}
+    return {tk: [have[t] for t in c if t in have] + [list_error_row(m) for m in dict.fromkeys(e)]
+            for (tk, _), c, e in zip(items, cands, errs)}
 
 
 def build_peer_set(row: dict, annual: list[dict], bucket: Optional[str], dom_rows: list[dict],
@@ -317,6 +449,7 @@ def build_peer_set(row: dict, annual: list[dict], bucket: Optional[str], dom_row
     """Ghép đủ bước 1: hồ sơ mã + đối thủ trong nước (dom_rows/dom_fins đã tải) + nước ngoài (truyền sẵn
     foreign_profiles, hoặc tải theo foreign_codes / danh sách mặc định của nhóm ngành). Trả dict thuần JSON."""
     self_p = domestic_profile(row, annual)
+    dom_rows = [r for r in dom_rows if not r.get(LIST_ERROR)]
     dom = [domestic_profile(r, (dom_fins.get(r["ticker"]) or {}).get("annual", [])) for r in dom_rows
            if r.get("ticker") != row.get("ticker")]
     if foreign_profiles is not None:

@@ -99,10 +99,18 @@ def test_rim_explicit_equals_book_when_roe_equals_ke():
 
 
 def test_ddm_explicit_gordon_consistency():
+    """Cuối kỳ: D_{N+1} = ROE·BPS cuối × (1 − g/ROE) (rà soát 18/11, I07); ROE < Ke → g = 0, trả hết."""
     ke, g = 0.08, 0.02
-    fc = [{"DPS": 100.0}]
+    fc = [{"EPS": 100.0, "DPS": 40.0, "BPS đầu kỳ": 1000.0, "BPS cuối kỳ": 1060.0}]      # ROE 10% > Ke
     v = P.ddm_explicit(fc, ke, g)["value"]
-    assert v == pytest.approx(100 / 1.08 + 100 * 1.02 / 0.06 / 1.08)
+    assert v == pytest.approx(40 / 1.08 + 0.10 * 1060 * (1 - 0.02 / 0.10) / 0.06 / 1.08)
+    assert v > 1000.0                                                                  # ROE > Ke ⇒ > BPS
+    fc = [{"EPS": 50.0, "DPS": 25.0, "BPS đầu kỳ": 1000.0, "BPS cuối kỳ": 1025.0}]       # ROE 5% < Ke
+    v = P.ddm_explicit(fc, ke, g)["value"]
+    assert v == pytest.approx(25 / 1.08 + 0.05 * 1025 / 0.08 / 1.08)
+    assert v < 1000.0
+    # thiếu EPS/BPS → cách cũ DPS_N(1+g)
+    assert P.ddm_explicit([{"DPS": 100.0}], ke, g)["value"] == pytest.approx(100 / 1.08 + 100 * 1.02 / 0.06 / 1.08)
     assert P.ddm_explicit([{"DPS": 0.0}], ke, g) is None
 
 

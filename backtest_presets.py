@@ -79,8 +79,9 @@ def _stats(xs: list[float]) -> dict:
 
 
 def run_presets(points: list[dict], pipe: list[dict], keys: Optional[list[str]] = None,
-                fs_cache: Optional[dict] = None) -> dict:
-    """Áp từng bộ tiêu chuẩn lên từng lát cắt năm, đo danh mục tầng 1 và tầng 2."""
+                fs_cache: Optional[dict] = None, horizon_months: int = 12) -> dict:
+    """Áp từng bộ tiêu chuẩn lên từng lát cắt năm, đo danh mục tầng 1 và tầng 2. horizon_months = thời gian giữ của
+    lợi suất trong `points` (> 12 tháng → t hiệu chỉnh chồng lợi suất, B.ic_t_stat)."""
     keys = keys or list(SC.PRESETS)
     fs_cache = {} if fs_cache is None else fs_cache
     pipe_by = {(r["year"], r["ticker"]): r for r in pipe}
@@ -112,9 +113,9 @@ def run_presets(points: list[dict], pipe: list[dict], keys: Optional[list[str]] 
         for tag in ("t1", "t2"):
             d = [r[tag]["vs_univ"] for r in yrs if r[tag]["vs_univ"] is not None]
             dk = [r[tag]["vs_kospi"] for r in yrs if r[tag]["vs_kospi"] is not None]
-            t = (_st.mean(d) / (_st.stdev(d) / len(d) ** 0.5)) if len(d) >= 3 and _st.stdev(d) > 0 else None
+            t, t_note = B.ic_t_stat(d, horizon_months)
             all_r = [p for r in yrs for p in r[tag]["tickers"]]
-            summ[tag] = {"years": len(d), "mean_vs_univ": _st.mean(d) if d else None, "t": t,
+            summ[tag] = {"years": len(d), "mean_vs_univ": _st.mean(d) if d else None, "t": t, "t_note": t_note,
                          "years_beat_univ": sum(x > 0 for x in d), "mean_vs_kospi": _st.mean(dk) if dk else None,
                          "avg_n": _st.mean(r[tag]["n"] for r in yrs) if yrs else 0,
                          "beat_univ": _st.mean(r[tag]["beat_univ"] for r in yrs if r[tag]["beat_univ"] is not None)

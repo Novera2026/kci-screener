@@ -171,3 +171,8 @@ Lưu ý:
 - Trên 78 mã, kết quả kém ổn định hơn (t 3,21 → 1,66; năm 2022 âm).
 - Chạy lại backtest với mặc định mới ra đúng +0,116 (243 điểm công bố).
 - Trang tổng hợp vẫn cho chọn "Cố định" khi cần.
+
+> **Rà soát 18/11/2026:** từ 10/11 mode `sustainable` bỏ qua `g_high`, nên mọi lần chạy `backtest_growth.py` sau đó
+> cho 5 phương án GIỐNG HỆT nhau. Nay các phương án chạy với `g_high_mode="fixed"` (thêm `current` = đúng như App);
+> cùng đợt sửa vốn hóa / hệ số chia tách (I28, I29), cổ tức năm lịch sử (I59), DART qua `dart_api` (I30) và t khi giữ
+> quá 12 tháng (I61). Các số IC ở trên là trước đợt sửa — chạy lại trước khi dùng cho quyết định.

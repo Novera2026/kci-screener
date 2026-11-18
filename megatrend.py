@@ -92,10 +92,11 @@ def trend_leaders(key: str, details: dict, top: Optional[int] = 10,
 
 
 def market_indices(codes=("KOSPI", "KOSDAQ")) -> list[dict]:
-    """Chỉ số thị trường realtime (Naver). Lỗi mạng → bỏ qua chỉ số đó."""
+    """Chỉ số thị trường realtime (Naver), các chỉ số lấy SONG SONG (I69). Lỗi mạng → bỏ qua chỉ số đó."""
     out = []
+    got = H.parallel(lambda c: H._get(f"https://m.stock.naver.com/api/index/{c}/basic"), list(codes))
     for c in codes:
-        j = H._get(f"https://m.stock.naver.com/api/index/{c}/basic")
+        j = got.get(c)
         if not j:
             continue
         out.append({"code": c, "price": H._n(j.get("closePrice")),

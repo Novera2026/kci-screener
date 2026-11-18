@@ -18,9 +18,12 @@ import concurrent.futures as _cf
 import datetime as _dt
 import html
 import json
+import re
 from typing import Optional
 
 import requests
+
+import guard as GD
 
 _H = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
 _TIMEOUT = 10
@@ -74,7 +77,7 @@ def universe_by_cap(min_cap_eok: float = 1000, markets=("KOSPI", "KOSDAQ"),
 # ----------------------------------------------------------------------------
 def fetch_daily(symbol: str, cal_days: int = 560) -> dict:
     """Nến NGÀY từ Naver (~380 phiên với 560 ngày lịch). {} nếu lỗi."""
-    end = _dt.date.today()
+    end = GD.today_kst()
     start = end - _dt.timedelta(days=cal_days)
     u = (f"https://api.finance.naver.com/siseJson.naver?symbol={symbol}&requestType=1"
          f"&startTime={start:%Y%m%d}&endTime={end:%Y%m%d}&timeframe=day")
@@ -91,6 +94,21 @@ def fetch_daily(symbol: str, cal_days: int = 560) -> dict:
             "open": [float(x[1]) for x in rows], "high": [float(x[2]) for x in rows],
             "low": [float(x[3]) for x in rows], "close": [float(x[4]) for x in rows],
             "volume": [float(x[5] or 0) for x in rows]}
+
+
+def pack_daily(d: dict) -> dict:
+    """Nến gọn để giữ trong bộ nhớ dùng chung (quét toàn sàn ~1.300–2.700 mã): close/high/low/volume bằng array('d')
+    (float64 — chart_metrics cho đúng số như list), bỏ 'open' (không dùng), 'date' bằng array('i') YYYYMMDD.
+    ~13 KB/mã thay vì ~80 KB (rà soát 18/11/2026). Rỗng / lỗi → {}."""
+    from array import array
+    if not d or not d.get("close"):
+        return {}
+    out = {k: array("d", d.get(k) or []) for k in ("close", "high", "low", "volume")}
+    try:
+        out["date"] = array("i", (int(x) for x in d.get("date") or []))
+    except (TypeError, ValueError, OverflowError):
+        out["date"] = list(d.get("date") or [])
+    return out
 
 
 def _sma(xs: list, n: int, end_offset: int = 0) -> Optional[float]:
@@ -381,6 +399,11 @@ POS_KW = ["수주", "공급계약", "공급 계약", "단일판매", "신고가"
 NEG_KW = ["유상증자", "전환사채", "적자", "하향", "소송", "감자", "관리종목", "횡령",
           "배임", "급락", "하한가", "매도", "거래정지", "불성실", "투자경고", "투자주의",
           "투자위험", "리콜", "부진", "쇼크", "상장폐지"]
+# Từ phủ định NGAY SAU danh từ xúc tác ('공급계약 해지', '허가 신청 철회') = tin XẤU (rà soát 18/11/2026, I36).
+# Cùng mẫu với hotnews.CANCEL_RE; không bắt '규제 해제 수혜', '하락 중단' (không phải xúc tác bị hủy).
+CANCEL_RE = re.compile(r"(계약|수주|공급|납품|허가|승인|인수|합병|매각|MOU|협약|제휴|기술이전|기술수출|임상|투자|증설|"
+                       r"양산|상장|특허)\s*(신청|계획|결정|건)?\s*(을|를|이|가|도|은|는)?\s*"
+                       r"(해지|철회|취소|무산|반환|불발|중단|해제)")
 
 
 def fetch_news(ticker: str, n: int = 30) -> list[dict]:
@@ -411,11 +434,13 @@ def tag_title(title: str) -> int:
         return 0
     pos = any(k in title for k in POS_KW)
     neg = any(k in title for k in NEG_KW)
+    if CANCEL_RE.search(title):
+        return -1
     return 1 if pos and not neg else (-1 if neg and not pos else 0)
 
 
 def news_metrics(items: list[dict], today: Optional[_dt.date] = None) -> dict:
-    today = today or _dt.date.today()
+    today = today or GD.today_kst()      # ngày tin của Naver là ngày Hàn
 
     def age(dt):
         try:
@@ -602,10 +627,11 @@ WARN_VI = {"LIQUIDATION_TRADING": "Đang thanh lý (sắp hủy niêm yết)",
 
 
 def toss_overlay(tickers: list[str]) -> tuple[dict, dict, Optional[str]]:
-    """(giá realtime {mã: giá}, cảnh báo {mã: [mô tả]}, lỗi hoặc None)."""
+    """(giá realtime {mã: giá}, cảnh báo {mã: [mô tả]}, lỗi hoặc None).
+    Dùng chung 1 TossClient (giữ token) — trước 18/11/2026 mỗi lần gọi xin token mới."""
     try:
-        from toss_api import TossClient
-        cli = TossClient()
+        import screener as _S
+        cli = _S._toss_client()
         prices = cli.get_prices(tickers)
         warns = {}
         for t in tickers:
@@ -620,15 +646,16 @@ def toss_overlay(tickers: list[str]) -> tuple[dict, dict, Optional[str]]:
                 pass
         return prices, warns, None
     except Exception as ex:
-        return {}, {}, f"{type(ex).__name__}: {str(ex)[:120]}"
+        return {}, {}, GD.err(ex)
 
 
 # ----------------------------------------------------------------------------
 # Song song (5 luồng — lịch sự với Naver)
 # ----------------------------------------------------------------------------
 def parallel_map(fn, keys: list, workers: int = 5, progress=None) -> dict:
+    import dart_api as _Dp
     out, done = {}, 0
-    with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
+    with _cf.ThreadPoolExecutor(max_workers=workers, **_Dp.pool_kwargs()) as ex:   # fn có thể gọi DART: hạn mức phiên
         futs = {ex.submit(fn, k): k for k in keys}
         for f in _cf.as_completed(futs):
             k = futs[f]

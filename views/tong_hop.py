@@ -76,8 +76,10 @@ def _run_memo(name: str, key, fn):
 
 
 def _new_market_run():
-    """on_click của 🚀: bỏ số liệu thị trường của lần trước."""
+    """on_click của 🚀: bỏ số liệu thị trường của lần trước (cả số DART của ô 🏗️ EV/EBIT đã nhớ trong phiên)."""
     st.session_state["_mkt_memo"] = {}
+    st.session_state["_dart_cache"] = {}
+    st.session_state["_adv_memo"] = {}
 
 
 def _rf_live():
@@ -339,15 +341,29 @@ with col2:
     st.button("🧹 Xóa ô", width="stretch", on_click=_clear)
     st.caption("Mẹo: dán cả danh sách từ Excel cũng được.")
 
+class _FinIncomplete(Exception):
+    """BCTC Naver lỗi / rỗng — mang kết quả để dùng tạm, KHÔNG được st.cache_data lưu (như _Incomplete của trang 🧮)."""
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
+def _fin_cached_ok(ticker: str) -> dict:
+    f = fetch_financials(ticker)
+    if f.get("_error") or not (f.get("annual") or f.get("quarter")):
+        raise _FinIncomplete(f)          # ngoại lệ không được cache → lần sau tự lấy lại khi Naver đã hồi phục
+    return f
+
+
 def _fin_cached(ticker: str) -> dict:
-    return fetch_financials(ticker)
+    try:
+        return _fin_cached_ok(ticker)
+    except _FinIncomplete as e:
+        return e.args[0]
 
 
 def _fin(ticker: str) -> dict:
     """BCTC Naver: ưu tiên bản đã nạp song song lúc bấm 🚀 (_prefetch), nếu không thì cache."""
     f = (st.session_state.get("screen") or {}).get("fin", {}).get(ticker)
-    if f and (f.get("annual") or f.get("quarter")):
+    if f and (f.get("annual") or f.get("quarter")) and not f.get("_error"):    # bản nạp lỗi một phần → lấy lại
         return f
     return _fin_cached(ticker)
 
@@ -391,7 +407,8 @@ def _prefetch_pipeline(rows: list[dict], fins: dict, on_prog=None) -> tuple[dict
         except Exception:
             return r["ticker"], []
     series = {}
-    with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+    import dart_api as _Dp
+    with _cf.ThreadPoolExecutor(max_workers=5, **_Dp.pool_kwargs()) as ex:   # luồng phụ tính vào hạn mức phiên khách
         for i, (tk, ser) in enumerate(ex.map(_ser, rows), 1):
             series[tk] = ser
             if on_prog:
@@ -399,38 +416,138 @@ def _prefetch_pipeline(rows: list[dict], fins: dict, on_prog=None) -> tuple[dict
     try:
         peer_map = _PR.peer_rows_batch([(r["ticker"], r.get("industry_kr")) for r in rows], reg,
                                        {r["ticker"]: r for r in rows})
-    except Exception:
-        peer_map = {}
+    except Exception as e:      # không nuốt lỗi: mọi mã mang dấu "bộ đối thủ lỗi" → trần Low / không công bố khi mất neo
+        msg = f"lỗi lấy bộ đối thủ: {G.redact(type(e).__name__)}"
+        st.error(f"⚠️ Không lấy được bộ đối thủ ({msg}) — độ tin cậy mọi mã bị hạ, mã thiếu phép neo không công bố. "
+                 "Chạy lại sau ít phút.")
+        peer_map = {r["ticker"]: [_PR.list_error_row(msg)] for r in rows}
     return series, peer_map
 
 
-def _dart_extras(ticker: str) -> dict:
-    """Số liệu DART cho EV/EBIT + FCFF. Cache thủ công CHỈ khi có data (tránh kẹt {}
-    rỗng từ lần lỗi trước — không như st.cache_data cache cả kết quả rỗng)."""
+_DART_NONE_S = 600      # mã DART xác nhận không đủ số (ngân hàng, bảo hiểm…): nhớ 10 phút trong phiên
+
+
+def _dart_extras(ticker: str, errors: list | None = None) -> dict:
+    """Số liệu DART cho EV/EBIT + FCFF, nhớ trong phiên. Nhớ cả kết quả rỗng khi DART KHÔNG lỗi (hết hạn sau
+    _DART_NONE_S) — trước đây mã trả {} tốn 4 lượt DART mỗi lần chạy lại; DART lỗi thì không nhớ (lần sau thử lại).
+    Báo cáo không lập bằng KRW (Doosan Bobcat lập USD) → {} — không đem số USD vào EV/nợ ròng tính bằng KRW."""
+    import time
     cache = st.session_state.setdefault("_dart_cache", {})
-    if ticker in cache:
-        return cache[ticker]
-    try:
-        import dart_api
-        e = dart_api.valuation_extras(ticker)
-    except Exception:
-        e = {}
-    if e:                       # chỉ lưu khi CÓ dữ liệu → lần sau lỗi sẽ tự thử lại
-        cache[ticker] = e
+    hit = cache.get(ticker)
+    if hit is not None and (not hit.get("_none") or time.time() - hit.get("at", 0) < _DART_NONE_S):
+        e = {} if hit.get("_none") else hit
+    else:
+        errs: list = []
+        try:
+            import dart_api
+            e = dart_api.valuation_extras(ticker, errors=errs) or {}
+        except Exception as ex:
+            e, errs = {}, [G.err(ex)]
+        if e:
+            cache[ticker] = e
+        elif not errs:
+            cache[ticker] = {"_none": True, "at": time.time()}
+        if errors is not None:
+            errors.extend(errs)
+    if e and str(e.get("currency") or "KRW").upper() != "KRW":
+        return {}
     return e
 
 
+_SOTP_RETRY_S = 60      # SOTP: kết quả lỗi/rỗng chỉ giữ 60 giây rồi thử lại (không giữ cả lần chạy, không gọi mạng mỗi rerun)
+
+
+def _memo_retry(name: str, key, fn, failed):
+    """Như _run_memo nhưng kết quả lỗi (failed(out) đúng) chỉ giữ _SOTP_RETRY_S giây — sau đó gọi lại fn."""
+    import time
+    store = st.session_state.setdefault("_mkt_memo", {})
+    k = (name, key)
+    hit = store.get(k)
+    if hit is not None and (hit[1] is None or time.monotonic() - hit[1] < _SOTP_RETRY_S):
+        return hit[0]
+    out = fn()
+    store[k] = (out, time.monotonic() if failed(out) else None)
+    return out
+
+
 def _mktcap_eok(query: str):
-    """Vốn hóa (억) của 1 mã (cho SOTP — định giá phần niêm yết). None nếu không thấy. Giữ trong lần chạy hiện tại."""
+    """Vốn hóa (억) của 1 mã cho SOTP: {mc, ticker, name, how}. Chỉ nhận mã khớp CHẮC (mã/đúng tên/ưu đãi) —
+    tên đoán mờ ('SK On' → SK hynix) trả ticker=None để bảng cảnh báo. Nhận diện và vốn hóa giữ trong lần chạy
+    (trang rerun mỗi lần kéo slider — không tra Naver lại); lỗi/rỗng chỉ giữ _SOTP_RETRY_S giây."""
+    from sotp import resolve_sure
+    # how=None & ticker=None: không khớp hoặc Naver không xác minh được mã ưu đãi → coi là lỗi, thử lại sau.
+    # Từ chối kiểu đoán (contains/fuzzy) là kết quả chắc → giữ cả lần chạy.
+    info = _memo_retry("sotp_resolve", str(query).strip(), lambda: resolve_sure(reg, query),
+                       lambda o: not o.get("ticker") and o.get("how") is None)
+    if not info["ticker"]:
+        return info
+
     def _get():
         try:
             from screener import fetch_one
-            tk = reg.resolve(query) or query
-            mc = fetch_one(tk, registry=reg, prefer="naver").to_dict().get("market_cap")
-            return round(mc / 1e8) if mc else None
+            d = fetch_one(info["ticker"], registry=reg, prefer="naver").to_dict()
+            mc = d.get("market_cap")
+            return dict(info, mc=round(mc / 1e8) if mc else None, name=d.get("name") or reg.name_of(info["ticker"]))
         except Exception:
-            return None
-    return _run_memo("mktcap", query, _get)
+            return dict(info, mc=None)
+    return _memo_retry("mktcap", info["ticker"], _get, lambda o: o.get("mc") is None)
+
+
+def _adv_records(df: pd.DataFrame, ikc) -> tuple:
+    """Số DART cho ô 🏗️ EV/EBIT + FCFF của cả bảng — tính MỘT lần theo danh sách mã (xóa khi bấm 🚀); chạy lại trang
+    không gọi lại DART. Lần đầu chạy trong heavy_slot và chỉ khi còn đủ hạn mức DART (khách trên Cloud có hạn mức phiên).
+    Bỏ qua ngân hàng / bảo hiểm / chứng khoán (EV/EBIT vô nghĩa). Số cp = cơ sở EPS mới nhất (share_basis) khi đã có
+    BCTC Naver của mã. Trả (rec | None khi không chạy được, danh sách lỗi DART)."""
+    import dart_api as _Dx
+    from financials import share_basis, _FIN_SECTORS, _FIN_INDUSTRIES
+    key = tuple(df["ticker"])
+    memo = st.session_state.setdefault("_adv_memo", {})
+    if memo.get("key") == key:
+        return memo["rec"], []
+    fins = (st.session_state.get("screen") or {}).get("fin") or {}
+    rows = list(zip(df["ticker"], df["price"], df["market_cap"], df["sector"], ikc))
+    cache = st.session_state.get("_dart_cache") or {}
+    need = sum(2 for tk, _p, _m, sec, ik in rows          # cận dưới: 2 lượt/mã (tới 4 khi phải đọc thêm OFS)
+               if sec not in _FIN_SECTORS and ik not in _FIN_INDUSTRIES and tk not in cache
+               and not _Dx.extras_cached(tk))
+    ok_budget, why = _Dx.budget_allows(need)
+    if not ok_budget:
+        if _Dx.is_guest() and need > _Dx.SESSION_PER_HOUR:     # không bao giờ chạy được trong một phiên khách
+            why = (f"danh sách quá dài cho hạn mức khách ({_Dx.SESSION_PER_HOUR} lượt/giờ) — chia nhỏ danh sách "
+                   f"(≤ {_Dx.SESSION_PER_HOUR // 2} mã chưa có số DART) hoặc mở khóa chủ app")
+        st.warning(f"📡 Không chạy EV/EBIT + FCFF: cần ít nhất {need} lượt gọi DART nhưng {why}.")
+        return None, []
+    with G.heavy_slot() as ok:
+        if not ok:
+            st.warning(G.BUSY_MSG)
+            return None, []
+        rec, errs, pbar = [], [], st.progress(0.0, text="Đang lấy EV/EBIT + FCFF từ DART...")
+        for i, (tk, px, mc, sec, ik) in enumerate(rows):
+            d = {"tk": tk, "sec": sec or ik, "px": px, "shares": None}
+            if sec in _FIN_SECTORS or ik in _FIN_INDUSTRIES:
+                rec.append(d)
+                pbar.progress((i + 1) / len(rows))
+                continue
+            e = _dart_extras(tk, errors=errs)
+            shares = (mc / px) if (mc and px and px > 0) else None
+            f = fins.get(tk) or {}
+            if f.get("annual") and mc and px:
+                try:
+                    shares = share_basis(f["annual"], f.get("quarter"), mc, px)["shares"] or shares
+                except Exception:
+                    pass
+            d["shares"] = shares
+            if e and e.get("ebit") and shares and mc:
+                d.update(e); d["mc_eok"] = mc / 1e8
+                d["ev_ebit"] = ((mc / 1e8 + (e.get("net_debt") or 0)) / e["ebit"]
+                                if e["ebit"] > 0 else None)
+            rec.append(d)
+            pbar.progress((i + 1) / len(rows))
+        pbar.empty()
+    if not errs:                        # DART lỗi giữa chừng → không nhớ, lần chạy sau lấy lại các mã thiếu
+        memo.clear()
+        memo.update(key=key, rec=rec)
+    return rec, errs
 
 
 def _period_label(c: dict) -> str:
@@ -684,7 +801,7 @@ if run_btn:
     st.session_state["screen"] = {
         "records": rows, "unresolved": unresolved, "resolutions": resolutions,
         "fin": fins, "beta": betas, "pipe_series": pipe_series, "peer_map": peer_map,
-        "fetched_at": _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).strftime(
+        "fetched_at": G.now_kst().strftime(
             "%H:%M %d/%m/%Y")}
 
 # ---- Render kết quả (tồn tại qua các lần rerun để panel chi tiết tương tác được) ----
@@ -775,17 +892,26 @@ if "screen" in st.session_state:
     # nếu không P/E dự kiến / Giá hợp lý / Upside sẽ trống cả bảng.
     fwd_eps_col, fwd_roe_col, fwd_per_col = [], [], []
     if len(df) <= PREFETCH_MAX or enrich:
+        # nhớ theo (mã, vốn hóa, giá) trong lần chạy (xóa khi bấm 🚀): chạy lại trang không cào/tính lại; lỗi không nhớ
+        _fmemo = st.session_state.setdefault("_mkt_memo", {})
+        _todo = sum(1 for tk, mc, px in zip(df["ticker"], df["market_cap"], df["price"])
+                    if ("fwd", (tk, mc, px)) not in _fmemo)
         _fbar = (st.progress(0.0, text="Đang tính EPS dự phóng từng mã...")
-                 if len(df) > PREFETCH_MAX else None)
+                 if (len(df) > PREFETCH_MAX and _todo) else None)
         for _j, (tk, mc, px, bps) in enumerate(zip(df["ticker"], df["market_cap"],
                                                    df["price"], df["bps"])):
-            try:
-                _f = _fin(tk)
-                fc = project_forecast(
-                    [c for c in _f["annual"] if not c.get("is_consensus")], mc, px,
-                    quarters=_f["quarter"])
-            except Exception:
-                fc = None
+            if ("fwd", (tk, mc, px)) in _fmemo:
+                fc = _fmemo[("fwd", (tk, mc, px))]
+            else:
+                try:
+                    _f = _fin(tk)
+                    fc = project_forecast(
+                        [c for c in _f["annual"] if not c.get("is_consensus")], mc, px,
+                        quarters=_f["quarter"])
+                    if _f.get("annual"):                 # Naver trả rỗng → không nhớ, lần sau thử lại
+                        _fmemo[("fwd", (tk, mc, px))] = fc
+                except Exception:
+                    fc = None
             fwd_eps_col.append(fc.get("eps") if fc else None)
             fwd_roe_col.append((fc["eps"] / bps) if (fc and fc.get("eps") and bps) else None)
             fwd_per_col.append(fc.get("period") if fc else None)
@@ -944,8 +1070,9 @@ if "screen" in st.session_state:
     # Cờ độ tin: ngành chu kỳ/đặc thù (data_ok=False trong valuation: đóng tàu, bán dẫn,
     # pin, dược, holdco…) thì định giá theo P/E earnings-based KHÔNG đáng tin → cảnh báo.
     _ik = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
-    disp["PP P/E?"] = ["✓ hợp" if recommend_method(s, ik).get("data_ok", False)
-                       else "⚠ chu kỳ" for s, ik in zip(df["sector"], _ik)]
+    _nmc = df["name"] if "name" in df.columns else [None] * len(df)     # tên → holding vào Holdco (I57)
+    disp["PP P/E?"] = ["✓ hợp" if recommend_method(s, ik, nm if isinstance(nm, str) else None).get("data_ok", False)
+                       else "⚠ chu kỳ" for s, ik, nm in zip(df["sector"], _ik, _nmc)]
 
     disp["Định giá"] = df["valuation_tag"].values
     disp["Nguồn"] = df["source"].values
@@ -1028,9 +1155,11 @@ if "screen" in st.session_state:
     # thay cho trailing 1 năm/DCF-earnings trên EPS đỉnh. (Chi tiết 1 mã: tới 6 năm DART.)
     _ikv = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
     _hist_map = {}
-    for _tk, _s, _ik in zip(df["ticker"], df["sector"], _ikv):
+    _nmv = df["name"] if "name" in df.columns else [None] * len(df)
+    for _tk, _s, _ik, _nm in zip(df["ticker"], df["sector"], _ikv, _nmv):
         if effective_sector(_s if isinstance(_s, str) else None,
-                            _ik if isinstance(_ik, str) else None) in CYCLICAL_SECTORS:
+                            _ik if isinstance(_ik, str) else None,
+                            _nm if isinstance(_nm, str) else None) in CYCLICAL_SECTORS:
             try:
                 _hist_map[_tk] = [c for c in _fin(_tk)["annual"] if not c.get("is_consensus")]
             except Exception:
@@ -1052,7 +1181,8 @@ if "screen" in st.session_state:
                 continue
             try:
                 _ctx = _P.assess(_tk, _r, _fin(_tk), assume, _pmap.get(_tk) or [],
-                                 _betas.get(_tk) if _tk in _betas else _beta(_tk), series=_ser, feeds=_rf_feeds)
+                                 _betas.get(_tk) if _tk in _betas else _beta(_tk), series=_ser, feeds=_rf_feeds,
+                                 dart_quarters=_P.cached_dart_quarters(_tk))     # quý DART đã lưu — I05
                 _pipe_ctx[_tk], _pipe[_tk] = _ctx, _ctx["rec"]
             except Exception:
                 pass
@@ -1094,21 +1224,14 @@ if "screen" in st.session_state:
             kd = assume.rf + 0.015           # chi phí nợ ≈ Rf + 1.5%
             ke_v, gt = assume.ke(), assume.g_term_capped()
             _ikc = df["industry_kr"] if "industry_kr" in df.columns else [None] * len(df)
-            rec, pbar = [], st.progress(0.0, text="Đang lấy EV/EBIT + FCFF từ DART...")
-            for i, (tk, px, mc, sec, ik) in enumerate(
-                    zip(df["ticker"], df["price"], df["market_cap"], df["sector"], _ikc)):
-                e = _dart_extras(tk)
-                shares = (mc / px) if (mc and px and px > 0) else None
-                d = {"tk": tk, "sec": sec or ik, "px": px, "shares": shares}
-                if e and e.get("ebit") and shares and mc:
-                    d.update(e); d["mc_eok"] = mc / 1e8
-                    d["ev_ebit"] = ((mc / 1e8 + (e.get("net_debt") or 0)) / e["ebit"]
-                                    if e["ebit"] > 0 else None)
-                rec.append(d)
-                pbar.progress((i + 1) / len(df))
-            pbar.empty()
-            _got = sum(1 for x in rec if x.get("ebit"))
-            if _got == 0:
+            rec, _adv_errs = _adv_records(df, _ikc)
+            if _adv_errs:
+                st.warning(f"📡 DART lỗi với {len(_adv_errs)} mã — các mã đó để trống, chạy lại sau ít phút. "
+                           f"Nguyên nhân: {_adv_errs[0]}")
+            _got = sum(1 for x in (rec or []) if x.get("ebit"))
+            if rec is None:                 # không chạy được (máy chủ bận / hết hạn mức) — đã cảnh báo
+                rec = []
+            elif _got == 0:
                 import dart_api as _Dx
                 _keyok = _Dx.available()
                 _ccok = bool(_Dx.corp_code_of("005930"))   # Samsung: map OK thì phải ra
@@ -1120,8 +1243,9 @@ if "screen" in st.session_state:
                             "hoặc bản deploy cũ thiếu `dart_corp.csv`). Đảm bảo repo có "
                             "`dart_corp.csv` (commit `5138cdc+`) rồi Reboot.")
                 else:
-                    _why = ("Key ✓, map ✓ → có thể **DART chặn tạm (rate limit)** do gọi nhiều, "
-                            "hoặc các mã này chưa có BCTC. Đợi ít phút rồi thử lại.")
+                    _why = ("Key ✓, map ✓ → các mã này chưa có BCTC năm trên DART, không đủ EBIT / dòng tiền "
+                            "hoạt động, là ngân hàng / bảo hiểm / chứng khoán (bỏ qua), hoặc lập BCTC không phải "
+                            "KRW." + (" DART đang lỗi — xem cảnh báo phía trên." if _adv_errs else ""))
                 st.warning(f"📡 DART trả 0 mã. Chẩn đoán: Key **{'✓' if _keyok else '✗'}** · "
                            f"corp-map(Samsung) **{'✓' if _ccok else '✗'}**. {_why}")
             else:
@@ -1143,6 +1267,8 @@ if "screen" in st.session_state:
                                   assume.years_high, gt, x.get("mc_eok"))
                        if x.get("cfo") is not None else None)
                 pxv = x.get("px")
+                if fv1 and pxv and not RELIABLE_BAND[0] <= fv1 / pxv <= RELIABLE_BAND[1]:
+                    fv1 = None                  # cổng số: ngoài [0,4; 2,5]× giá → không công bố (như lõi KCI)
                 evb.append(round(x["ev_ebit"], 1) if x.get("ev_ebit") else None)
                 ev_up.append(round((fv1 / pxv - 1) * 100, 1) if (fv1 and pxv) else None)
                 fc_up.append(round((fv2 / pxv - 1) * 100, 1) if (fv2 and pxv) else None)
@@ -1150,9 +1276,10 @@ if "screen" in st.session_state:
                     "fv_ev": fv1, "fv_fcff": fv2,
                     "ev_ebit": x.get("ev_ebit"), "net_debt": x.get("net_debt"),
                     "ebit": x.get("ebit"), "cfo": x.get("cfo"), "capex": x.get("capex")}
-            vsum["EV/EBIT"] = evb
-            vsum["Upside EV/EBIT %"] = ev_up
-            vsum["Upside FCFF %"] = fc_up
+            if rec:
+                vsum["EV/EBIT"] = evb
+                vsum["Upside EV/EBIT %"] = ev_up
+                vsum["Upside FCFF %"] = fc_up
             st.caption("EV = Vốn hóa + Nợ ròng (DART). **EV/EBIT** so median ngành (loại outlier, cần ≥3 mã cùng ngành); "
                        "**FCFF** = CFO + lãi×(1−thuế) − CapEx, chiết khấu WACC. Dùng EBIT (DART "
                        "không tách khấu hao). Đóng tàu net-cash nên EV/EBIT thường thấp = rẻ.")
@@ -1182,7 +1309,7 @@ if "screen" in st.session_state:
         vsty = vsty.map(_c_evebit, subset=["EV/EBIT"])
     st.dataframe(vsty, width="stretch", hide_index=True)
     if _pipe:
-        _n_peer = len({p["ticker"] for ps in (_scr.get("peer_map") or {}).values() for p in ps})
+        _n_peer = len({p["ticker"] for ps in (_scr.get("peer_map") or {}).values() for p in ps if p.get("ticker")})
         st.caption("**Giá trị hợp lý / Chênh % / Độ tin cậy / Trạng thái** = kết luận của **quy trình định giá** — cùng "
                    "một hàm và cùng bộ đối thủ với trang 🧮, Sàng lọc và bot (dự phóng mặc định, các mô hình chính qua "
                    f"cổng số; đối thủ = gợi ý Naver ∪ top vốn hóa cùng ngành, {_n_peer} mã đối thủ lấy giá mới trong lần "
@@ -1222,7 +1349,8 @@ if "screen" in st.session_state:
             _row1 = next(x for x in rows if x["ticker"] == r.ticker)
             _peers1 = _run_memo("peers1", r.ticker, lambda: _PR.peer_rows_batch(
                 [(r.ticker, _row1.get("industry_kr"))], reg, {x["ticker"]: x for x in rows}).get(r.ticker, []))
-            _ctx1 = _P.assess(r.ticker, _row1, _fin(r.ticker), assume, _peers1, _beta(r.ticker), feeds=_rf_feeds)
+            _ctx1 = _P.assess(r.ticker, _row1, _fin(r.ticker), assume, _peers1, _beta(r.ticker), feeds=_rf_feeds,
+                              dart_quarters=_P.cached_dart_quarters(r.ticker))
         except Exception:
             _ctx1 = None
     _rec1 = (_ctx1 or {}).get("rec") or {}
@@ -1232,8 +1360,12 @@ if "screen" in st.session_state:
     # Độ phủ dữ liệu (Naver+DART) → chặn trần confidence cho mã mới niêm yết/thiếu lịch sử
     cov = None
     if coverage is not None:
+        # nhớ trong lần chạy (xóa khi bấm 🚀) — trước đây mỗi lần chạy lại tải lại Naver + ~6–12 lượt DART; DART lỗi
+        # chỉ nhớ _SOTP_RETRY_S giây rồi thử lại
         try:
-            cov = coverage.assess_coverage(r.ticker, r.sector)
+            cov = _memo_retry("cov", r.ticker,
+                              lambda: coverage.assess_coverage(r.ticker, r.sector, fin=_fin(r.ticker)),
+                              lambda c: bool((c or {}).get("dart_error") or (c or {}).get("naver_error")))
         except Exception:
             cov = None
     _conf1 = _rec1.get("confidence") if _rec1.get("fair") else None
@@ -1259,6 +1391,8 @@ if "screen" in st.session_state:
         (st.success if _rec1.get("fair") else st.warning)(
             f"**Kết luận quy trình định giá:** {_rec1.get('status')}"
             + (f" · {_rec1['verdict']}" if _rec1.get("verdict") else ""))
+        if (_ctx1 or {}).get("dq", {}).get("source_line"):          # một dòng chung với 🧮 / Sàng lọc / bot (C8)
+            st.caption(f"🗂️ Nguồn: {_ctx1['dq']['source_line']}")
         _dqf = [c for c in (_ctx1 or {}).get("dq", {}).get("checks", []) if c["Kết quả"] == "❌"]
         if _dqf:
             st.error("❌ Lỗi dữ liệu (kết quả tin cậy Thấp, có thể đổi khi chạy lại): "
@@ -1272,7 +1406,12 @@ if "screen" in st.session_state:
                    "Xem bảng phương pháp bên dưới.")
     if cov:
         st.caption("📊 Độ phủ dữ liệu: " + coverage.coverage_badge(cov))
-        if cov.get("is_new_listing"):
+        if cov.get("dart_error"):     # DART lỗi ≠ mã mới niêm yết: không kết luận 🆕 từ một lần gọi hỏng
+            st.warning("⚠️ DART đang lỗi — độ phủ chỉ đánh giá theo Naver, trần độ tin cậy tạm Low. "
+                       + (cov.get("dart_note") or ""))
+        elif cov.get("naver_error"):  # Naver lỗi ≠ mới niêm yết
+            st.warning("⚠️ " + cov["note"])
+        elif cov.get("is_new_listing"):
             st.warning("🆕 Mã mới niêm yết — " + cov["note"])
     st.markdown(f"**PP chuẩn cho ngành _{r.sector}_:** {r.primary} "
                 f"· _cross-check:_ {', '.join(r.cross)}")
@@ -1322,34 +1461,24 @@ if "screen" in st.session_state:
                    "Tool cộng lại − nợ ròng holdco − chiết khấu holdco → NAV/cp.")
         _sotp_key = "sotp_" + r.ticker
         if _sotp_key not in st.session_state:
+            # cột Giá trị là SỐ (float, NaN) — ô chữ từng nhận '5,000'/'5000억' làm sập trang
             st.session_state[_sotp_key] = pd.DataFrame(
                 [{"Mảng/Công ty con": "", "Mã niêm yết": "", "% sở hữu": 100.0,
-                  "Giá trị (억) — nếu chưa niêm yết": None}])
+                  "Giá trị (억) — nếu chưa niêm yết": float("nan")}]).astype(
+                {"Giá trị (억) — nếu chưa niêm yết": "float64"})
         edited = st.data_editor(st.session_state[_sotp_key], num_rows="dynamic",
                                 width="stretch", key=_sotp_key + "_ed",
                                 column_config={
                                     "% sở hữu": st.column_config.NumberColumn(
-                                        format="%.1f", min_value=0.0, max_value=100.0)})
+                                        format="%.1f", min_value=0.0, max_value=100.0),
+                                    # không đặt min_value=0: dòng 'Nợ ròng' nhập ÂM để trừ tay (xem chú thích dưới)
+                                    "Giá trị (억) — nếu chưa niêm yết": st.column_config.NumberColumn(
+                                        format="%.0f")})
         disc = st.slider("Chiết khấu holdco (%)", 0, 70, 40, 5,
                          help="Korea discount điển hình 30–60%.") / 100
 
-        parts, warns = [], []
-        for _, prow in edited.iterrows():
-            nm = str(prow.get("Mảng/Công ty con") or "").strip()
-            sub = str(prow.get("Mã niêm yết") or "").strip()
-            stake = prow.get("% sở hữu")
-            manual = prow.get("Giá trị (억) — nếu chưa niêm yết")
-            if not (nm or sub or (manual and not pd.isna(manual))):
-                continue
-            if sub and stake and not pd.isna(stake):
-                mc = _mktcap_eok(sub)
-                val = round(mc * stake / 100) if mc else None
-                if mc is None:
-                    warns.append(f"không lấy được vốn hóa của '{sub}'")
-            else:
-                val = None if (manual is None or pd.isna(manual)) else float(manual)
-            parts.append({"Mảng": nm or sub, "Mã": sub,
-                          "% sở hữu": stake, "Giá trị (억)": val})
+        from sotp import parse_sotp_rows
+        parts, warns = parse_sotp_rows(edited, _mktcap_eok)
 
         if any(p["Giá trị (억)"] for p in parts):
             gav = sum(p["Giá trị (억)"] for p in parts if p["Giá trị (억)"])
@@ -1371,12 +1500,12 @@ if "screen" in st.session_state:
             if ndebt is None:
                 st.caption("⚠️ Chưa có nợ ròng từ DART (cần DART_API_KEY) → đang coi = 0. "
                            "Thêm 1 dòng 'Nợ ròng' giá trị ÂM để trừ tay nếu muốn.")
-            if warns:
-                st.warning("⚠️ " + " · ".join(warns))
             st.caption("Lưu ý: TRÁNH đếm trùng (đừng vừa tính lợi nhuận hợp nhất của sub vừa "
                        "cộng vốn hóa của nó). Holdco discount là giả định — chỉnh slider để soi độ nhạy.")
         else:
             st.info("Thêm ít nhất 1 mảng có giá trị (mã niêm yết + % sở hữu, hoặc nhập Giá trị tay).")
+        if warns:                       # cả khi chưa dòng nào có giá trị — để biết vì sao
+            st.warning("⚠️ " + " · ".join(warns))
 
     # --- Báo cáo tài chính ---
     st.markdown("#### 🧾 Báo cáo tài chính & Cân đối")
@@ -1386,8 +1515,11 @@ if "screen" in st.session_state:
     else:
         mc, px = drow.get("market_cap"), drow.get("price")
         # chuỗi 5 năm thực (DART nếu có) + 1 cột dự phóng bằng công thức
-        annual_series = build_annual_series(r.ticker, fin["annual"], mc, px, years=5,
-                                            quarters=fin["quarter"])
+        # nhớ trong lần chạy: chạy lại trang không gọi lại annual_financials (DART); DART lỗi → chỉ giữ ít giây
+        annual_series = _memo_retry("annual5", (r.ticker, mc, px),
+                                    lambda: build_annual_series(r.ticker, fin["annual"], mc, px, years=5,
+                                                                quarters=fin["quarter"]),
+                                    lambda a: any((c.get("_src") or {}).get("dart") == "error" for c in a))
         reals = [c for c in annual_series if not c.get("is_consensus")]
         la = reals[-1] if reals else None
         fcast = next((c for c in annual_series if c.get("is_forecast")), None)
@@ -1440,7 +1572,8 @@ if "screen" in st.session_state:
     # sẽ không tải nhầm file của nhau.
     _xbuf = io.BytesIO()
     export_excel(df.reindex(columns=[c for c in df.columns if c in COLUMN_KR]
-                            + ["valuation_tag"]), agg, _xbuf, val=vdf, table_df=disp)
+                            + ["valuation_tag"]), agg, _xbuf, val=vdf, table_df=disp,
+                 conclusion=vsum)        # sheet đầu = kết luận đúng như bảng Định giá trên màn hình
     st.download_button("⬇️ Tải Excel", _xbuf.getvalue(), file_name="kci_screen_output.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.success(f"Xong: {len(df)} mã · {df['per'].notna().sum()} mã có P/E")
@@ -1476,11 +1609,19 @@ def _render_bt_dart(bdf: pd.DataFrame, bres: dict):
     k2.metric("IC trung bình theo năm",
               "—" if a_["mean_ic"] is None else f"{a_['mean_ic']:.3f}",
               None if a_.get("t_stat") is None else f"t = {a_['t_stat']:.2f}",
-              delta_color="off")
+              delta_color="off", help=a_.get("t_note"))
     k3.metric("IC gộp mọi năm", "—" if a_["ic_pooled"] is None else f"{a_['ic_pooled']:.3f}")
     k4.metric("Q1 − Q5 (vượt KOSPI, trung vị)",
               f"{(q[1]['median_excess'] - q[5]['median_excess']) * 100:+.1f} điểm %"
               if (1 in q and 5 in q) else "—")
+    if a_.get("t_note"):
+        st.caption(f"⚠️ {a_['t_note']} — t đã hiệu chỉnh, đọc thận trọng.")
+    if m_.get("dart_errors"):
+        st.warning(f"DART lỗi ở {len(m_['dart_errors'])} năm-mã (không lưu cache, chạy lại sẽ lấy lại): " +
+                   "; ".join(f"{e['ticker']} {e['year']}: {e['error']}" for e in m_["dart_errors"][:5]))
+    if m_.get("basis_suspect"):
+        st.warning("Bỏ (số cổ phiếu lệch LN cổ đông mẹ ÷ EPS không theo tỷ lệ chia tách tròn): " +
+                   ", ".join(m_["basis_suspect"]))
     st.markdown(_bd.report_markdown(bres))
     if m_["no_points"]:
         st.warning("Không tạo được điểm nào cho: " + ", ".join(m_["no_points"]) +
@@ -1547,7 +1688,7 @@ with st.expander("🔬 Backtest — kiểm chứng định giá trên dữ liệ
                                 value=_BT_DEFAULT, height=160, key="bt_universe")
     bt_queries = [x.strip() for x in bt_universe.replace(",", "\n").splitlines() if x.strip()]
     if bt_src.startswith("DART"):
-        _today = _dt.date.today()
+        _today = G.today_kst()
         _ylast = _today.year if _today >= _dt.date(_today.year, 4, 15) else _today.year - 1
         bt_years = cbb.slider("Các năm làm mốc (15/4)", 2017, _ylast,
                               (max(2017, _ylast - 5), _ylast - 1), key="bt_years")

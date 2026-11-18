@@ -16,6 +16,7 @@ Chỉ phụ thuộc thư viện chuẩn (math). Không thêm dependency.
 """
 from __future__ import annotations
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -230,17 +231,51 @@ def implied_roe_from_price(price: float, bps: float, ke: float, g: float) -> Opt
 # ----------------------------------------------------------------------------
 # §3.3 — DDM (Gordon 1 giai đoạn & 2 giai đoạn)
 # ----------------------------------------------------------------------------
-def ddm_gordon(dps: float, ke: float, g: float) -> Optional[float]:
-    """P = DPS×(1+g)/(Ke − g). Cần cổ tức > 0 và Ke > g."""
+def terminal_dividend(eps_next: float, bps_begin: float, ke: float, g: float) -> Optional[tuple]:
+    """Cổ tức ở trạng thái dừng (cuối kỳ): payout = 1 − g/ROE, ROE = eps_next/bps_begin.
+
+    18/11/2026 (rà soát I07): DDM cũ giữ payout lịch sử mà vẫn cho cổ tức tăng g mãi mãi — tăng trưởng đó phải trả bằng
+    lợi nhuận giữ lại (g/ROE), cùng quy tắc P/B-ROE/RIM/dcf_earnings. ROE < Ke → g = 0, trả hết lợi nhuận.
+    Trả (cổ tức = eps_next × payout, g dùng) hoặc None nếu EPS/BPS ≤ 0 hoặc Ke ≤ g dùng."""
+    eps_next, bps_begin = _pos(eps_next), _pos(bps_begin)
+    if eps_next is None or bps_begin is None or ke is None:
+        return None
+    roe = eps_next / bps_begin
+    g_eff = g if roe >= ke else 0.0
+    if ke <= g_eff:
+        return None
+    payout = min(max(1 - g_eff / roe, 0.0), 1.0)
+    return eps_next * payout, g_eff
+
+
+def ddm_gordon(dps: float, ke: float, g: float, eps: Optional[float] = None,
+               bps: Optional[float] = None) -> Optional[float]:
+    """P = D₁/(Ke − g). Cần cổ tức > 0 và Ke > g.
+
+    Có EPS, BPS > 0: D₁ = EPS×(1+g)×(1 − g/ROE) (payout dừng, ROE < Ke → g = 0, = EPS/Ke) — xem terminal_dividend.
+    EPS là EPS năm gần nhất nên nhân (1+g) để ra năm tới; ROE = EPS/BPS hiện tại. Vì vậy khi ROE ≥ Ke, Gordon =
+    (1+g) × P/B-ROE (bước nhảy (1+g) tại ROE = Ke) — đúng công thức anh duyệt.
+    Thiếu EPS/BPS (None/NaN): giữ cách cũ DPS×(1+g)/(Ke − g). EPS/BPS ≤ 0: None — năm lỗ không lấy payout lịch sử
+    kéo vô hạn (nếu không, mã lỗ được định giá cao hơn mã lãi mỏng)."""
     dps = _pos(dps)
     if dps is None or ke is None or ke <= g:
         return None
-    return dps * (1 + g) / (ke - g)
+    if _num(eps) is None or _num(bps) is None:
+        return dps * (1 + g) / (ke - g)
+    td = terminal_dividend(eps, bps, ke, g)
+    if td is None:
+        return None
+    d, g_eff = td
+    return d * (1 + g_eff) / (ke - g_eff)
 
 
 def ddm_two_stage(dps: float, ke: float, g_high: float, years: int,
-                  g_term: float) -> Optional[float]:
-    """DDM 2 giai đoạn: cổ tức tăng g_high trong `years` năm rồi về g_term vĩnh viễn."""
+                  g_term: float, eps: Optional[float] = None,
+                  bps: Optional[float] = None) -> Optional[float]:
+    """DDM 2 giai đoạn: cổ tức tăng g_high trong `years` năm rồi về g_term vĩnh viễn.
+
+    Có EPS, BPS > 0: cuối kỳ dùng payout dừng 1 − g/ROE trên EPS năm N (ROE < Ke → g = 0, trả hết) thay vì kéo
+    payout lịch sử ra vô hạn. Thiếu EPS/BPS (None/NaN): giữ cách cũ. EPS/BPS ≤ 0: None (như ddm_gordon)."""
     dps = _pos(dps)
     if dps is None or ke is None or ke <= g_term:
         return None
@@ -248,8 +283,16 @@ def ddm_two_stage(dps: float, ke: float, g_high: float, years: int,
     for t in range(1, years + 1):
         d *= (1 + g_high)
         pv += d / (1 + ke) ** t
-    d_term = d * (1 + g_term)
-    tv = d_term / (ke - g_term)
+    if _num(eps) is None or _num(bps) is None:
+        g_eff = g_term
+        d_term = d * (1 + g_term)
+    else:
+        td = terminal_dividend(eps, bps, ke, g_term)
+        if td is None:
+            return None
+        d0, g_eff = td                                   # payout dừng × EPS hiện tại; EPS tăng cùng nhịp cổ tức
+        d_term = d0 * (1 + g_high) ** years * (1 + g_eff)
+    tv = d_term / (ke - g_eff)
     pv += tv / (1 + ke) ** years
     return pv
 
@@ -504,18 +547,38 @@ _KR_INDUSTRY_BUCKET: dict[str, str] = {
 }
 
 
-def effective_sector(sector: Optional[str], industry_kr: Optional[str] = None) -> Optional[str]:
-    """Sector EN curated nếu có; nếu không, suy từ 업종 KRV."""
+# Công ty holding phi tài chính (rà soát 18/11/2026, I57): 74/77 mã tên '…지주/…홀딩스' nhận nhóm của công ty con
+# (영원무역홀딩스 → Consumer/Retail, hướng dẫn DCF, không trần Medium). Tên khớp + ngành không phải tài chính → Holdco.
+_HOLDCO_NAME_RE = re.compile(r"(지주|홀딩스)$")
+# tên có '홀딩스' nhưng là doanh nghiệp vận hành (không nắm cổ phần công ty con niêm yết/chủ lực)
+_HOLDCO_NAME_EXCLUDE = frozenset({"사토시홀딩스", "큐로홀딩스", "더네이쳐홀딩스", "엘브이엠씨홀딩스"})
+_FIN_SECTORS = frozenset({"Bank", "Brokerage", "Insurance"})
+
+
+def is_holdco_name(name: Optional[str], industry_kr: Optional[str] = None) -> bool:
+    """Tên là công ty holding phi tài chính (신한지주, 한국금융지주… thuộc ngành tài chính → False)."""
+    nm = name.strip() if isinstance(name, str) else ""
+    if not nm or nm in _HOLDCO_NAME_EXCLUDE or not _HOLDCO_NAME_RE.search(nm):
+        return False
+    return _KR_INDUSTRY_BUCKET.get(industry_kr or "") not in _FIN_SECTORS
+
+
+def effective_sector(sector: Optional[str], industry_kr: Optional[str] = None,
+                     name: Optional[str] = None) -> Optional[str]:
+    """Sector EN curated nếu có (POSCO홀딩스 giữ Steel/Chemicals); không thì holding phi tài chính theo tên (name =
+    tên tiếng Hàn) → 'Holdco'; còn lại suy từ 업종 KRV."""
     if sector:
         return sector
+    if is_holdco_name(name, industry_kr):
+        return "Holdco"
     if industry_kr:
         return _KR_INDUSTRY_BUCKET.get(industry_kr)
     return None
 
 
-def recommend_method(sector: Optional[str], industry_kr: Optional[str] = None) -> dict:
-    """Trả khuyến nghị method cho 1 sector (theo §2/§8). Có thể truyền 업종 KRV."""
-    sec = effective_sector(sector, industry_kr)
+def recommend_method(sector: Optional[str], industry_kr: Optional[str] = None, name: Optional[str] = None) -> dict:
+    """Trả khuyến nghị method cho 1 sector (theo §2/§8). Có thể truyền 업종 KRV và tên (holding → Holdco)."""
+    sec = effective_sector(sector, industry_kr, name)
     g = _SECTOR_GUIDE.get(sec or "", None)
     return dict(g) if g else dict(_DEFAULT_GUIDE)
 
@@ -549,6 +612,8 @@ class ValuationResult:
     triangulated: bool = False
     status: str = "✓"
     confidence_model: str = "Medium"              # độ tin của mô hình trước cổng công bố (backtest dùng)
+    anchor: Optional[float] = None                # phép neo peer đã dùng (tam giác hóa / chặn >4×)
+    anchor_basis: str = "trailing"                # 'mid' khi lõi là mid-cycle (kể cả rơi về mid-cycle do thiếu data)
 
     def to_dict(self) -> dict:
         d = {
@@ -626,7 +691,8 @@ def value_stock(row: dict, a: Assumptions,
     price = _num(row.get("price"))
     industry_kr = row.get("industry_kr")
     sector = row.get("sector")
-    sec_eff = effective_sector(sector, industry_kr)
+    _nm = row.get("name") if isinstance(row.get("name"), str) else None
+    sec_eff = effective_sector(sector, industry_kr, _nm)
     sector_disp = sector or industry_kr   # hiển thị: EN curated, else 업종 KRV
 
     roe = (eps / bps) if (eps and bps and bps != 0) else None
@@ -650,9 +716,9 @@ def value_stock(row: dict, a: Assumptions,
     methods["S-RIM"] = srim(bps, roe, ke, w=a.persistence) if roe is not None else None
     methods["P/B-ROE (justified)"] = _pb_roe(roe) if roe is not None else None
     methods["RIM nhiều giai đoạn"] = _rim_ms(roe) if roe is not None else None
-    methods["DDM (Gordon)"] = ddm_gordon(dps, ke, g_term)
+    methods["DDM (Gordon)"] = ddm_gordon(dps, ke, g_term, eps=eps, bps=bps)   # payout cuối kỳ 1 − g/ROE (I07)
     g_hi = sustainable_growth(eps, bps, dps) if a.g_high_mode == "sustainable" else a.g_high
-    methods["DDM 2 giai đoạn"] = ddm_two_stage(dps, ke, g_hi, a.years_high, g_term)
+    methods["DDM 2 giai đoạn"] = ddm_two_stage(dps, ke, g_hi, a.years_high, g_term, eps=eps, bps=bps)
     methods["DCF earnings (thô)"] = dcf_earnings(eps, ke, g_hi, a.years_high, g_term,
                                                  roe=roe if roe is not None else (eps / bps if (eps and bps) else None))
     methods["P/E vs median ngành"] = relative_pe_value(eps, sector_median_pe)
@@ -678,7 +744,7 @@ def value_stock(row: dict, a: Assumptions,
 
     is_cyclical = sec_eff in CYCLICAL_SECTORS
 
-    guide = recommend_method(sector, industry_kr)
+    guide = recommend_method(sector, industry_kr, _nm)
     auto_key = guide["auto"]
     auto_label = _AUTO_LABEL.get(auto_key, "S-RIM")
     fair = methods.get(auto_label)
@@ -714,7 +780,10 @@ def value_stock(row: dict, a: Assumptions,
                           f"({'mid-cycle' if basis == 'mid' else 'ROE hiện tại'})")
     # --- Đối chiếu phép neo peer: nội tại ngoài [0,5×; 2×] trung vị bội số peer → tam giác hóa 50/50
     #     (cùng luật với KCI-Valuation-Lab: phương pháp chính giữ ≥ 50%). Ngành chu kỳ dùng EPS chuẩn hóa.
-    rel_keys = (("EPS chuẩn hóa × P/E ngành", "P/B vs median ngành") if used_midcycle
+    # Lõi mid-cycle (ngành chu kỳ HOẶC rơi về P/B-ROE mid-cycle vì mô hình auto thiếu data) → neo theo EPS chuẩn hóa,
+    # cùng phép neo mà pipeline dùng cho cổng [0,25; 4]× (rà soát 18/11/2026: trước đây chỉ ngành chu kỳ)
+    anchor_basis = "mid" if (used_midcycle or basis == "mid" or "mid-cycle" in auto_label) else "trailing"
+    rel_keys = (("EPS chuẩn hóa × P/E ngành", "P/B vs median ngành") if anchor_basis == "mid"
                 else ("P/E vs median ngành", "Forward P/E vs median ngành", "P/B vs median ngành"))
     rel = [methods[k] for k in rel_keys if methods.get(k)]
     anchor = _median(rel) if len(rel) >= 2 else None
@@ -816,6 +885,7 @@ def value_stock(row: dict, a: Assumptions,
         fwd_upside_pct=fwd_upside, implied_roe=implied_roe, confidence=conf,
         note=guide["note"], flags=flags, reliable=reliable, fair_raw=fair_raw,
         triangulated=triangulated, status=status, confidence_model=conf_model,
+        anchor=anchor, anchor_basis=anchor_basis,
     )
 
 

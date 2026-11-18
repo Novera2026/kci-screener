@@ -1,6 +1,15 @@
 # --- Secrets: TUYỆT ĐỐI không đẩy lên ---
 .env
+.env.*
+!.env.example
 .streamlit/secrets.toml
+
+# Báo cáo rà soát / bản duyệt nội bộ (danh sách lỗ hổng) — repo deploy là CÔNG KHAI
+RA_SOAT_*.md
+BAN_DUYET_*.html
+
+# Danh sách mã lấy từ tài khoản Toss của chủ app
+tickers_toss.csv
 
 # Môi trường / cache
 .venv/

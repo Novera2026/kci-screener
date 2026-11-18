@@ -34,26 +34,32 @@ def _real_years_naver(annual: list[dict]) -> int:
     return len([c for c in annual if not c.get("is_consensus")])
 
 
-def assess_coverage(ticker: str, sector: Optional[str] = None) -> dict:
+def assess_coverage(ticker: str, sector: Optional[str] = None, fin: Optional[dict] = None) -> dict:
     """Trả báo cáo độ phủ + khuyến nghị.
+
+    fin: BCTC Naver đã có sẵn ({annual, quarter} — vd bản trang đã nạp lúc bấm 🚀) → dùng luôn, không tải lại.
 
     {
       ticker, real_years, source_mix, has_forward, has_quarterly,
       is_new_listing, valuation_mode, confidence_cap, recommended_methods,
-      avoid_methods, note
+      avoid_methods, note, dart_error, dart_note
     }
-    valuation_mode: intrinsic_ok | intrinsic_weak | relative_forward | peer_only
+    dart_error = True: DART đang lỗi (độ phủ chỉ đánh giá theo Naver) — KHÔNG được kết luận 'mới niêm yết'.
+    naver_error = True: BCTC Naver lỗi (fin['_error']) — như dart_error, không kết luận 'mới niêm yết'/peer_only.
+    valuation_mode: intrinsic_ok | intrinsic_weak | relative_forward | peer_only | unknown (Naver lỗi, < 3 năm)
     """
     nav_annual, nav_quarter = [], []
     has_forward = False
-    if financials is not None:
+    naver_error = False      # Naver LỖI (≠ không có dữ liệu) — như dart_error, không kết luận 'mới niêm yết'
+    if fin is not None or financials is not None:
         try:
-            nav = financials.fetch_financials(ticker)
+            nav = fin if fin is not None else financials.fetch_financials(ticker)
             nav_annual = nav.get("annual", []) or []
             nav_quarter = nav.get("quarter", []) or []
             has_forward = any(c.get("is_consensus") for c in nav_annual)
+            naver_error = bool(nav.get("_error"))
         except Exception:
-            pass
+            naver_error = True
 
     nav_years = _real_years_naver(nav_annual)
     dart = {"dart_annual_years": 0, "has_quarterly": False, "coverage": "n/a"}
@@ -113,15 +119,30 @@ def assess_coverage(ticker: str, sector: Optional[str] = None) -> dict:
         note = ("Gần như không có dữ liệu lịch sử → chỉ định giá tương đối theo peer + "
                 "số trong bản cáo bạch IPO. Nêu rõ là ước lượng sơ bộ. Trần Low.")
 
-    if dart.get("coverage") == "error":     # DART lỗi kết nối: chỉ đánh giá được theo Naver → tạm chặn Low, nói rõ
+    dart_error = dart.get("coverage") == "error"
+    if dart_error:     # DART lỗi kết nối: chỉ đánh giá được theo Naver → tạm chặn Low, nói rõ; không kết luận 'mới niêm yết'
         cap = "Low"
         note += " ⚠️ " + str(dart.get("note") or "DART lỗi kết nối.")
+        if new:
+            new = None
+    if naver_error:    # Naver lỗi mạng: thiếu năm là do LỖI, không phải mã mới — chưa đánh giá được độ phủ
+        cap = "Low"
+        if new:
+            new = None
+        if real_years < 3:
+            mode = "unknown"
+            rec, avoid = [], []
+            note = "Naver lỗi — độ phủ chưa đánh giá được (không kết luận mới niêm yết). Trần tạm Low, bấm 🔄 để thử lại."
+        else:
+            note += " ⚠️ Naver lỗi kết nối — độ phủ theo DART."
     return {
         "ticker": ticker, "real_years": real_years,
         "source_mix": " + ".join(source_mix) or "không có",
         "has_forward": has_forward, "has_quarterly": has_quarterly,
         "is_new_listing": new, "valuation_mode": mode, "confidence_cap": cap,
         "recommended_methods": rec, "avoid_methods": avoid, "note": note,
+        "dart_error": dart_error, "dart_note": str(dart.get("note") or "") if dart_error else "",
+        "naver_error": naver_error,
     }
 
 
@@ -131,7 +152,9 @@ def coverage_badge(rep: dict) -> str:
             "relative_forward": "🟠", "peer_only": "🔴"}.get(rep["valuation_mode"], "⚪")
     if rep.get("is_new_listing") and icon == "🟢":   # đủ năm nhưng mới niêm yết
         icon = "🟡"
-    flag = " · ⚠️ mới niêm yết" if rep.get("is_new_listing") else ""
+    flag = (" · ⚠️ DART đang lỗi" if rep.get("dart_error")
+            else " · ⚠️ Naver đang lỗi" if rep.get("naver_error")
+            else " · ⚠️ mới niêm yết" if rep.get("is_new_listing") else "")
     cap = rep["confidence_cap"] or "không chặn"
     return (f"{icon} {rep['real_years']} năm dữ liệu ({rep['source_mix']}) · "
             f"trần confidence: {cap}{flag}")

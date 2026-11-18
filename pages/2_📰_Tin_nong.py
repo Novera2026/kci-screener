@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import collections
 import csv
-import datetime as _dt
 import os
 import sys
 
@@ -80,14 +79,41 @@ def _dart(days: int):
     return H.dart_disclosures(days)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _dart_multi(days: int):
+    """2/3/5 ngày: nhiều trang list.json hơn → giữ lâu hơn (công bố ngày cũ không đổi)."""
+    return H.dart_disclosures(days)
+
+
+def _dart_get(days: int):
+    """→ (danh sách, lỗi, meta). Có lỗi thì bỏ kết quả khỏi cache để lần sau thử lại, không giữ lỗi 10–30 phút."""
+    f = _dart if days == 1 else _dart_multi
+    res = f(days)
+    dl, derr = res[0], res[1]
+    meta = res[2] if len(res) > 2 else {}
+    if derr:
+        f.clear()
+    return dl, derr, meta
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _rt(tickers: tuple):
     return H.realtime(list(tickers))
 
 
 def _clear():
-    for f in (_themes, _details, _market_news, _stock_news, _dart, _rt):
+    """Nút làm mới: cache dùng chung cho MỌI người xem → giới hạn 60 giây toàn máy chủ; công bố DART (tốn hạn mức
+    DART chung của App) chỉ chủ app được xóa — khách thấy DART tự làm mới sau 10 phút (rà soát 18/11/2026, I33)."""
+    owner = GD.owner_ok()
+    wait = 0.0 if owner else H.refresh_wait("tin_nong")
+    if wait > 0:
+        st.toast(f"Vừa làm mới, thử lại sau {wait:.0f} giây")
+        return
+    for f in (_themes, _details, _market_news, _stock_news, _rt):
         f.clear()
+    if owner:
+        _dart.clear()
+        _dart_multi.clear()
 
 
 NAMES, CODE2NAME, THEMES_OF = _ref()
@@ -116,10 +142,15 @@ if r3.button("🔄 Làm mới ngay", use_container_width=False):
 @st.fragment(run_every=(f"{every}m" if auto else None))
 def board():
     themes, status = _themes()
+    if not themes:                 # Naver lỗi → bỏ bản rỗng khỏi cache chung (không giữ 180 giây cho mọi người xem)
+        _themes.clear()
     hot = H.hot_themes(themes, top=15)
     hk = H.hot_keywords(hot)
     hot_names = {t["name"] for t in hot}
-    details = _details(tuple(t["no"] for t in hot[:10]))
+    _nos = tuple(t["no"] for t in hot[:10])
+    details = _details(_nos)
+    if _nos and H.details_incomplete(details):
+        _details.clear(_nos)
 
     # tin: thị trường + tin theo mã của các mã dẫn đầu 5 chủ đề nóng nhất
     leaders = []
@@ -128,10 +159,10 @@ def board():
             leaders.append((s["ticker"], s["name"]))
     raw_news = _market_news() + _stock_news(tuple(leaders))
     uniq = list({n["url"]: n for n in raw_news}.values())
-    now = _dt.datetime.now()
+    now = GD.now_kst_naive()                 # thời điểm tin của Naver là giờ Hàn
     news = sorted((H.score_news(n, hk, NAMES, THEMES_OF, now) for n in uniq),
                   key=lambda x: (-x["score"], x["age_h"]))
-    dart, dart_err = _dart(1)
+    dart, dart_err, dart_meta = _dart_get(1)
 
     # ---- KPI
     up = sum(1 for t in themes if (t["chg"] or 0) > 0)
@@ -173,11 +204,15 @@ def board():
 
         st.markdown("#### 🔎 Xem một chủ đề")
         opts = hot + [t for t in themes if t["name"] not in hot_names and t["total"] >= 3]
-        pick = st.selectbox("Chủ đề", range(len(opts)),
-                            format_func=lambda i: f"{opts[i]['name']} ({_fmt_chg(opts[i]['chg'])})",
+        # chọn theo SỐ chủ đề (ổn định) chứ không theo vị trí: danh sách sắp lại theo % mỗi lần làm mới (I38)
+        by_no = {t["no"]: t for t in opts}
+        if st.session_state.get("news_theme") not in by_no:
+            st.session_state.pop("news_theme", None)
+        pick = st.selectbox("Chủ đề", list(by_no), format_func=lambda no: by_no[no]["name"],
                             key="news_theme")
-        th = opts[pick] if opts else None
+        th = by_no.get(pick)
         if th:
+            st.caption(f"% hôm nay: **{_fmt_chg(th['chg'])}** · {th['rise']}/{th['total']} mã tăng")
             det = details.get(th["no"]) or _details((th["no"],)).get(th["no"]) or {}
             if det.get("desc"):
                 st.info(det["desc"])
@@ -220,9 +255,9 @@ def board():
     with tab2:
         f1, f2, f3 = st.columns([1, 1.6, 1])
         min_sc = f1.slider("Điểm giá trị tối thiểu", 0, 100, 60, 5, key="news_min")
-        kinds = sorted({n["kind"] for n in news})
-        default_k = [k for k in kinds if not k.startswith("⚪")]
-        sel_k = f2.multiselect("Loại tin", kinds, default=default_k, key="news_kinds")
+        # danh sách loại CỐ ĐỊNH (I38): suy từ tin đang có thì loại xuất hiện sau bị ẩn mãi, lựa chọn có thể thành []
+        default_k = [k for k in H.NEWS_KINDS if not k.startswith("⚪")]
+        sel_k = f2.multiselect("Loại tin", H.NEWS_KINDS, default=default_k, key="news_kinds")
         only_hot = f3.checkbox("Chỉ tin thuộc chủ đề nóng", value=False, key="news_hot")
         flt = [n for n in news if n["score"] >= min_sc and n["kind"] in sel_k
                and (not only_hot or n["themes"])]
@@ -272,9 +307,15 @@ def board():
         dmin = g2.slider("Điểm tối thiểu", 0, 100, 60, 5, key="dart_min")
         pol_sel = g3.multiselect("Chiều", ["🟢 Xúc tác", "🔴 Rủi ro", "⚪ Trọng yếu"],
                                  default=["🟢 Xúc tác", "🔴 Rủi ro", "⚪ Trọng yếu"], key="dart_pol")
-        dl, derr = (dart, dart_err) if days == 1 else _dart(days)
-        if derr:
-            st.warning(f"DART: {derr}. Cần `DART_API_KEY` trong `.env` (local) hoặc Secrets (cloud).")
+        dl, derr, dmeta = (dart, dart_err, dart_meta) if days == 1 else _dart_get(days)
+        if derr == "thiếu DART_API_KEY":
+            st.warning("DART: thiếu khóa API. Cần `DART_API_KEY` trong `.env` (local) hoặc Secrets (cloud).")
+        elif derr:
+            st.warning(f"DART: {GD.md_escape(GD.redact(derr))}")
+        if dmeta.get("truncated"):
+            st.warning(f"Chỉ xem được {dmeta.get('read', 0):,}/{dmeta.get('total', 0):,} công bố mới nhất "
+                       f"(trần {H.dart_page_cap(days)} lượt gọi DART mỗi lần tải) — các công bố cũ hơn trong "
+                       f"{days} ngày chưa hiện.")
         polname = {1: "🟢 Xúc tác", -1: "🔴 Rủi ro", 0: "⚪ Trọng yếu"}
         dl = [d for d in dl if d["score"] >= dmin and polname[d["pol"]] in pol_sel]
         if not dl and not derr:

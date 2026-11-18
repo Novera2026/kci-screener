@@ -1,7 +1,7 @@
 """Kiểm tra app chạy THẬT (AppTest thực thi toàn bộ script, khác curl chỉ tải vỏ trang).
 
-- test_no_undefined_names / test_app_boots: chạy mặc định (không cần mạng ổn định).
-- test_full_screen_run: cào dữ liệu thật → bật bằng  KCI_E2E=1 pytest
+- Test mặc định chạy KÍN: mạng ra ngoài bị chặn (tests/conftest.py), trang mở bằng dữ liệu giả fake_market.
+- Test đánh dấu e2e (cào dữ liệu thật) → bật bằng  KCI_E2E=1 pytest
 """
 import glob
 import os
@@ -21,33 +21,67 @@ MODULES = sorted(os.path.relpath(p, ROOT) for p in
 PAGES = sorted(glob.glob(os.path.join(ROOT, "pages", "*.py")))
 
 
+def _pyflakes_findings(proc) -> list:
+    """Kết quả pyflakes → các dòng 'undefined name'. Lỗi cú pháp / thiếu pyflakes (ghi ra stderr) → AssertionError."""
+    assert "No module named" not in proc.stderr, "thiếu pyflakes: pip install -r requirements-dev.txt"
+    assert not proc.stderr.strip(), proc.stderr                  # pyflakes ghi lỗi cú pháp ra stderr
+    assert proc.returncode in (0, 1), proc.returncode
+    assert proc.returncode == 0 or proc.stdout.strip(), "pyflakes báo lỗi nhưng không có cảnh báo nào"
+    return [ln for ln in proc.stdout.splitlines() if "undefined name" in ln]
+
+
 def test_no_undefined_names():
-    """Bắt lỗi kiểu NameError (gọi hàm/biến chưa định nghĩa) bằng phân tích tĩnh."""
-    out = subprocess.run([sys.executable, "-m", "pyflakes", *MODULES], cwd=ROOT,
-                         capture_output=True, text=True).stdout
-    bad = [ln for ln in out.splitlines() if "undefined name" in ln]
+    """Bắt lỗi kiểu NameError (gọi hàm/biến chưa định nghĩa) bằng phân tích tĩnh; lỗi cú pháp cũng làm đỏ."""
+    proc = subprocess.run([sys.executable, "-m", "pyflakes", *MODULES], cwd=ROOT, capture_output=True, text=True)
+    bad = _pyflakes_findings(proc)
     assert not bad, "\n".join(bad)
 
 
-def test_app_boots_without_exception():
+def test_pyflakes_check_catches_syntax_error(tmp_path):
+    """Trang có lỗi cú pháp (pyflakes chỉ ghi ra stderr) phải làm test đỏ — trước 18/11/2026 vẫn qua CI."""
+    bad = tmp_path / "trang_hong.py"
+    bad.write_text("import os\n\ndef broken(:\n    pass\n", encoding="utf-8")
+    proc = subprocess.run([sys.executable, "-m", "pyflakes", str(bad)], capture_output=True, text=True)
+    with pytest.raises(AssertionError):
+        _pyflakes_findings(proc)
+
+
+def test_all_sources_compile():
+    """Mọi file .py ở gốc, pages/, views/ biên dịch được (trang không mở trong CI vẫn bị kiểm cú pháp)."""
+    for rel in MODULES:
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            compile(f.read(), rel, "exec")
+
+
+def test_app_boots_without_exception(fake_market):
     at = AppTest.from_file(APP, default_timeout=120).run()
     assert not at.exception, at.exception
 
 
-def test_super_stock_page_boots():
+def test_super_stock_page_boots(fake_market):
     """Trang 🚀 chỉ đọc CSV lúc mở (chỉ gọi mạng khi bấm Tìm)."""
     page = next(p for p in PAGES if "Sieu_co_phieu" in p)
     at = AppTest.from_file(page, default_timeout=120).run()
     assert not at.exception, at.exception
 
 
-def test_valuation_pipeline_page_boots():
-    """Trang 🧮 chỉ gọi mạng sau khi nhập mã (Rf FRED lỗi thì fallback 3,2%)."""
+def test_valuation_pipeline_page_boots(fake_market):
+    """Trang 🧮 chỉ gọi mạng sau khi nhập mã (Rf lấy từ fake_market, không mạng)."""
     page = next(p for p in PAGES if "Dinh_gia" in p)
     at = AppTest.from_file(page, default_timeout=120).run()
     assert not at.exception, at.exception
 
 
+def test_hot_news_page_boots_offline(fake_market):
+    """Trang 📰 mở được với dữ liệu giả (không mạng): chủ đề nóng, tin, công bố DART đều hiện."""
+    page = next(p for p in PAGES if "Tin_nong" in p)
+    at = AppTest.from_file(page, default_timeout=120).run()
+    assert not at.exception, at.exception
+    assert any(m.label == "Chủ đề đang tăng" for m in at.metric)
+    assert any("Chủ đề" in getattr(d.value, "columns", []) for d in at.dataframe)
+
+
+@pytest.mark.e2e
 @pytest.mark.skipif(os.environ.get("KCI_E2E") != "1",
                     reason="Trang 📰 tải tin/chủ đề từ Naver ngay khi mở: chạy  KCI_E2E=1 pytest")
 def test_hot_news_page_boots():
@@ -56,6 +90,7 @@ def test_hot_news_page_boots():
     assert not at.exception, at.exception
 
 
+@pytest.mark.e2e
 @pytest.mark.skipif(os.environ.get("KCI_E2E") != "1",
                     reason="E2E cần mạng (Naver/DART/FRED): chạy  KCI_E2E=1 pytest")
 def test_full_screen_run():
@@ -80,6 +115,7 @@ def test_full_screen_run():
         assert not at.exception, at.exception
 
 
+@pytest.mark.e2e
 @pytest.mark.skipif(os.environ.get("KCI_E2E") != "1",
                     reason="Backtest gọi DART/Naver/FRED thật: chạy  KCI_E2E=1 pytest")
 def test_backtest_dart_runs_in_app():
@@ -93,7 +129,7 @@ def test_backtest_dart_runs_in_app():
     assert any("Điểm có lợi suất" in m.label for m in at.metric)
 
 
-def test_screening_page_boots():
+def test_screening_page_boots(fake_market):
     """Trang 🔍 chỉ gọi mạng khi bấm Lọc rẻ."""
     page = next(p for p in PAGES if "Sang_loc" in p)
     at = AppTest.from_file(page, default_timeout=120).run()
@@ -114,19 +150,30 @@ def test_navigation_names_and_order():
         assert os.path.exists(os.path.join(ROOT, p.args[0].value))
 
 
-def test_home_page_boots():
-    """Trang chủ chạy thật (Naver realtime): có chỉ số, bảng mega trend, mã dẫn dắt."""
-    at = AppTest.from_file(APP, default_timeout=180).run()     # trang mặc định = Trang chủ
+def test_home_page_boots(fake_market):
+    """Trang chủ (dữ liệu giả, không mạng): có chỉ số, bảng mega trend đủ 11 dòng, tóm tắt phiên."""
+    at = AppTest.from_file(APP, default_timeout=120).run()     # trang mặc định = Trang chủ
     assert not at.exception, at.exception
+    assert not at.error, [e.value for e in at.error]
+    assert {m.label for m in at.metric} >= {"KOSPI", "KOSDAQ"}
     frames = [d.value for d in at.dataframe]
-    if not frames:                       # mất mạng → trang báo lỗi rõ ràng, không văng
-        assert at.error
-        return
-    mt = next(f for f in frames if "Xu hướng" in f.columns)
+    mt = next(f for f in frames if "Xu hướng" in getattr(f, "columns", []))
     assert len(mt) == 11
+    assert any(s.value.startswith("📝 Tóm tắt phiên") for s in at.subheader)
+    post = next(c.value for c in at.code if "CHỨNG KHOÁN HÀN QUỐC" in c.value)
+    assert "KOSPI" in post and "NHÓM DẪN DẮT" in post
 
 
-def test_tong_hop_view_boots():
+def test_home_page_shows_error_when_naver_down(monkeypatch, fake_market):
+    """Naver không trả chủ đề → trang báo lỗi rõ ràng, không văng."""
+    import hotnews as H
+    monkeypatch.setattr(H, "theme_ranking", lambda max_pages=4: ([], ""))
+    at = AppTest.from_file(APP, default_timeout=120).run()
+    assert not at.exception, at.exception
+    assert any("Không lấy được danh sách chủ đề" in e.value for e in at.error)
+
+
+def test_tong_hop_view_boots(fake_market):
     at = AppTest.from_file(VIEW, default_timeout=120).run()
     assert not at.exception, at.exception
 
@@ -177,6 +224,7 @@ def test_reload_guard_first_sight_after_process_start(tmp_path):
         reg.pop("kci_mod_c", None)
 
 
+@pytest.mark.e2e
 @pytest.mark.skipif(os.environ.get("KCI_E2E") != "1",
                     reason="Bot săn gọi Naver/DART thật: chạy  KCI_E2E=1 pytest")
 def test_home_bot_hunt_by_industry():

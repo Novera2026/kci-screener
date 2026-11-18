@@ -200,13 +200,16 @@ def test_dart_year_cache_skips_repeat_requests(monkeypatch, tmp_path):
     def raw(cc, y):
         calls.append((cc, y))
         return {"period": f"{y}12", "revenue": 1.0} if y < 2026 else None
+    import datetime as _dtm
+    import guard
+    monkeypatch.setattr(guard, "_now_utc", lambda: _dtm.datetime(2026, 11, 18, 3, tzinfo=_dtm.timezone.utc))
     monkeypatch.setattr(D, "_fetch_year_raw", raw)
     monkeypatch.setattr(D, "_YEAR_CACHE", {})
     monkeypatch.setattr(D, "YEAR_CACHE_DIR", str(tmp_path))      # không ghi vào .cache thật của dự án
     for _ in range(3):
         D._fetch_year("X", 2025)
-        D._fetch_year("X", 2026)                    # chưa nộp → không nhớ, lần sau hỏi lại
-    assert calls.count(("X", 2025)) == 1 and calls.count(("X", 2026)) == 3
+        D._fetch_year("X", 2026)                    # năm 2026 chưa kết thúc (18/11/2026) → không hỏi DART (I32)
+    assert calls.count(("X", 2025)) == 1 and calls.count(("X", 2026)) == 0
     D._fetch_year("X", 2025)["revenue"] = 99        # sửa bản trả về không làm bẩn cache
     assert D._fetch_year("X", 2025)["revenue"] == 1.0
     # báo cáo năm đã nộp còn được nhớ trên đĩa: tiến trình mới (bộ nhớ trống) không gọi lại DART
@@ -331,15 +334,17 @@ def test_forecast_eps_on_current_share_count():
 
 # ---- đối chiếu DART ↔ Naver ----
 class _FakeDart:
-    def __init__(self, rows, errs=None):
-        self.rows, self.errs = rows, errs or []
+    def __init__(self, rows, errs=None, err_years=None):
+        self.rows, self.errs, self.err_years = rows, errs or [], err_years or []
 
     def available(self):
         return True
 
-    def annual_financials(self, ticker, years=6, errors=None):
+    def annual_financials(self, ticker, years=6, errors=None, err_years=None):
         if errors is not None:
             errors.extend(self.errs)
+        if err_years is not None:
+            err_years.extend(self.err_years)
         return [dict(r) for r in self.rows]
 
 
@@ -401,9 +406,9 @@ def test_merge_dart_reports_errors_instead_of_hiding_them(monkeypatch):
     out = F._merge_dart(NAVER3, "X")
     assert out[-1]["_src"]["dart"] == "error" and "ConnectionError" in out[-1]["_src"]["note"]
     assert out[0].get("_dart")                                  # năm lấy được vẫn dùng, nhưng đã gắn cờ không đầy đủ
-    # DART lỗi khi hỏi năm MỚI HƠN, các năm đã lưu phủ tới năm gần nhất → chuỗi đủ, chỉ ghi nhận "cached" (⚠️)
-    monkeypatch.setattr(F, "dart_api", _FakeDart([_dt(2024, 1100, 110), _dt(2025, 1200, 120)],
-                                                 errs=["lỗi kết nối DART (ConnectionError)"]))
+    # DART lỗi CHỈ ở năm MỚI HƠN năm Naver gần nhất (có thể chưa nộp), các năm đã lưu phủ mọi năm Naver → "cached" (⚠️)
+    monkeypatch.setattr(F, "dart_api", _FakeDart([_dt(2023, 1000, 100), _dt(2024, 1100, 110), _dt(2025, 1200, 120)],
+                                                 errs=["lỗi kết nối DART (ConnectionError)"], err_years=[2026]))
     out = F._merge_dart(NAVER3, "X")
     assert out[-1]["_src"]["dart"] == "cached" and "đã lưu" in out[-1]["_src"]["note"]
 

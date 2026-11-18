@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import collections
 import csv
-import datetime as _dt
 import os
 import sys
 
@@ -18,11 +17,12 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 import growth as G                                   # noqa: E402
 import guard as GD                                   # noqa: E402
-from financials import fetch_financials              # noqa: E402
+from financials import fetch_financials, fin_complete  # noqa: E402
 from screener import TickerRegistry                  # noqa: E402
 
 st.set_page_config(page_title="Siêu cổ phiếu — KCI", page_icon="🚀", layout="wide")
 st.title("🚀 Tìm siêu cổ phiếu tiềm năng")
+GD.owner_panel()                                     # ô 🔒 Chủ app (giá & cảnh báo Toss dùng khóa riêng)
 st.caption("Bấm **Tìm** khi cần. Kết quả: mã có cấu trúc tăng (biểu đồ + doanh thu/lợi nhuận "
            "+ tin tức), **chưa chạy quá xa**, ưu tiên mã thuộc **nhóm đang dẫn dắt (meta)**. "
            "Đây là bộ lọc theo quy tắc, không phải khuyến nghị mua.")
@@ -93,8 +93,8 @@ def _themes():
 
 reg = _reg()
 store = _store()
-_today = str(_dt.date.today())
-_hour = _dt.datetime.now().strftime("%Y%m%d%H")
+_today = str(GD.today_kst())                           # giờ Hàn Quốc (máy chủ Cloud chạy UTC)
+_hour = GD.now_kst().strftime("%Y%m%d%H")
 THEMES, THEMES_OF = _themes()
 
 
@@ -105,21 +105,32 @@ for _k in list(store.keys()):
         store.pop(_k, None)
 
 
-def _cached(kind, tk, key, fn):
+_D_MAX = 1500          # trần số chuỗi nến giữ trong bộ nhớ dùng chung (quét toàn sàn min_cap 100 ≈ 2.700 mã)
+
+
+def _cached(kind, tk, key, fn, ok=bool):
     k = (kind, tk, key)
     v = store.get(k)
     if v is None:
         v = fn(tk)
-        store[k] = v
+        if ok(v):              # không nhớ kết quả rỗng / lỗi (Naver lỗi → {} bị giữ cả ngày, trước 18/11/2026)
+            store[k] = v
+            if kind == "d" and len(store) > _D_MAX:
+                dk = [x for x in list(store) if x[0] == "d"]
+                for x in dk[:len(dk) - _D_MAX]:      # bỏ chuỗi cũ nhất
+                    store.pop(x, None)
+    elif kind == "d":
+        store[k] = store.pop(k, v)                    # vừa dùng → xuống cuối (bỏ sau cùng)
     return v
 
 
 def _daily(tk):
-    return _cached("d", tk, _today, G.fetch_daily)
+    return _cached("d", tk, _today, lambda t: G.pack_daily(G.fetch_daily(t)))
 
 
 def _fin(tk):
-    return _cached("f", tk, _today, fetch_financials)
+    # BCTC lỗi là dict có '_error' (truthy) → phải kiểm riêng, nếu không bị giữ cả ngày cho mọi người xem
+    return _cached("f", tk, _today, fetch_financials, ok=fin_complete)
 
 
 def _news(tk):
@@ -214,6 +225,8 @@ if run:
                                text=f"Bước 1/2 · Biểu đồ {d}/{n} mã"))
         mets = {tk: G.chart_metrics(d) for tk, d in daily.items() if d}
         mets = {tk: m for tk, m in mets.items() if m}
+        n_fail = sum(1 for d in daily.values() if not d)                   # Naver không trả nến
+        n_short = sum(1 for tk, d in daily.items() if d and tk not in mets)  # chưa đủ ~230 phiên
 
         ref = None if full else store.get(("rsdist", _today))
         G.assign_rs(mets, ref=ref)
@@ -315,8 +328,9 @@ if run:
         st.session_state["growth_scan"] = {
             "rows": rows, "details": details, "ext_rows": ext_rows, "meta_rows": meta_rows,
             "ind_rows": ind_rows, "meta_ok": meta_ok,
-            "at": _dt.datetime.now().strftime("%H:%M %d/%m"),
-            "n_uni": len(uni), "n_trend": len(trend), "n_ext": len(extended),
+            "at": GD.now_kst().strftime("%H:%M %d/%m"),
+            "n_uni": len(uni), "n_fail": n_fail, "n_short": n_short,
+            "n_trend": len(trend), "n_ext": len(extended),
             "n_cand": len(cand), "n_hidden_meta": len(hidden_meta),
             "hidden_meta": [f"{names.get(t, t)} ({mets[t]['meta'].get('why')})"
                             for t in sorted(hidden_meta, key=lambda t: -mets[t]['rs'])[:8]],
@@ -332,8 +346,19 @@ if res:
     k3.metric("🔥 Loại vì chạy xa", f"{res['n_ext']:,}")
     k4.metric("Ứng viên tiềm năng", f"{res['n_cand']:,}")
     k5.metric("Hạng A (chọn mạnh)", sum(1 for r in rows if r["Xếp loại"].startswith("A")))
-    st.caption(f"Tìm lúc {res['at']} · giá đóng cửa gần nhất (Naver) · "
+    st.caption(f"Tìm lúc {res['at']} KST · giá đóng cửa gần nhất (Naver) · "
                f"RS xếp hạng so với **{res['rs_basis']}**.")
+    # lỗi lấy dữ liệu không được hiện thành "không mã nào đạt" (rà soát 18/11/2026)
+    _n_fail, _n_short = res.get("n_fail", 0), res.get("n_short", 0)
+    _all_fail = res["n_uni"] > 0 and _n_fail >= res["n_uni"]
+    if _all_fail:
+        st.error(f"Không lấy được nến từ Naver cho mã nào ({_n_fail}/{res['n_uni']}) — kết quả bên dưới không dùng "
+                 "được. Thử lại sau ít phút.")
+    elif _n_fail:
+        st.warning(f"⚠️ {_n_fail}/{res['n_uni']} mã không lấy được nến từ Naver — các mã này không được chấm. "
+                   "Thử lại sau.")
+    if _n_short:
+        st.info(f"ℹ️ {_n_short} mã chưa đủ ~1 năm lịch sử giá (cần ≥ 230 phiên) nên không chấm biểu đồ.")
     if not res["meta_ok"]:
         st.info("ℹ️ Chưa xác định được meta (nhóm dẫn dắt) hôm nay. Chạy **Toàn sàn** một lần — "
                 "sau đó các danh sách ngắn sẽ dùng meta + RS của cả thị trường.")
@@ -347,15 +372,28 @@ if res:
                        "đạt xu hướng ≥ 6/8. Meta xoay vòng theo dòng tiền — kiểm lại mỗi ngày.")
 
     if not rows:
-        st.info("Không mã nào thỏa bộ lọc. Thử nới: bỏ 'Chỉ mã đúng meta', thêm giai đoạn "
-                "🌿, hoặc hạ 'Biểu đồ tối thiểu'.")
+        if not _all_fail:
+            st.info("Không mã nào thỏa bộ lọc. Thử nới: bỏ 'Chỉ mã đúng meta', thêm giai đoạn "
+                    "🌿, hoặc hạ 'Biểu đồ tối thiểu'.")
     else:
         df = pd.DataFrame(rows)
-        if st.checkbox("⚡ Cập nhật giá realtime + cảnh báo mã từ Toss", value=False):
-            with st.spinner("Đang gọi Toss…"):
-                prices, warns, err = G.toss_overlay(df["Mã"].tolist())
+        _toss = False
+        if not GD.owner_ok():           # khóa Toss của chủ app — khách trên bản công khai không dùng (18/11/2026)
+            GD.owner_gate("Giá & cảnh báo Toss")
+        else:
+            _toss = st.checkbox("⚡ Cập nhật giá realtime + cảnh báo mã từ Toss", value=False)
+        if _toss:
+            # nhớ theo (danh sách mã, phút): đổi ô khác trên trang không gọi lại Toss (2 + N lượt mỗi lần)
+            _tkey = (tuple(sorted(df["Mã"])), GD.now_kst().strftime("%Y%m%d%H%M"))
+            _memo = st.session_state.get("_toss_overlay")
+            if not _memo or _memo[0] != _tkey:
+                with st.spinner("Đang gọi Toss…"):
+                    _memo = (_tkey, G.toss_overlay(df["Mã"].tolist()))
+                if not _memo[1][2]:                      # không nhớ lỗi
+                    st.session_state["_toss_overlay"] = _memo
+            prices, warns, err = _memo[1]
             if err:
-                st.warning(f"Toss chưa dùng được ({err}). Nếu là 401: key trong `.env` "
+                st.warning(f"Toss chưa dùng được ({GD.redact(err)}). Nếu là 401: key trong `.env` "
                            "(TOSS_CLIENT_ID / TOSS_CLIENT_SECRET) đã hết hiệu lực — "
                            "phát hành key mới trong app Toss증권 → Open API.")
             else:
@@ -434,13 +472,12 @@ if res:
         st.markdown(f"**Giai đoạn: {m['stage']}** — {'; '.join(m['stage_why'])} · "
                     f"**Meta:** {'✓' if mt['in_meta'] else '✗'} {mt.get('why') or '—'}")
         if d:
-            px = pd.DataFrame({"Giá": d["close"]},
-                              index=pd.to_datetime(d["date"], format="%Y%m%d"))
+            _idx = pd.to_datetime([str(x) for x in d["date"]], format="%Y%m%d")   # nến gọn: ngày là số YYYYMMDD
+            px = pd.DataFrame({"Giá": list(d["close"])}, index=_idx)
             for n_ in (50, 150, 200):
                 px[f"MA{n_}"] = px["Giá"].rolling(n_).mean()
             st.line_chart(px.tail(260), height=320)
-            vol = pd.DataFrame({"Khối lượng": d["volume"]},
-                               index=pd.to_datetime(d["date"], format="%Y%m%d")).tail(120)
+            vol = pd.DataFrame({"Khối lượng": list(d["volume"])}, index=_idx).tail(120)
             st.bar_chart(vol, height=140)
 
         a1, a2, a3 = st.columns(3)
@@ -482,8 +519,11 @@ if res:
         st.markdown("**Tin gần nhất** (✅ tích cực · ⚠️ tiêu cực · · trung tính)")
         for it in nm["items"]:
             ic = "✅" if it.get("tag", 0) > 0 else "⚠️" if it.get("tag", 0) < 0 else "·"
-            st.markdown(f"{ic} `{it['dt'][4:6]}/{it['dt'][6:8]}` [{it['title']}]({it['url']}) "
-                        f"— {it['office']}")
+            # tiêu đề / tòa soạn từ Naver: thoát ký tự markdown, chỉ nhận liên kết http(s) (như trang 📰)
+            _t, _u = GD.md_escape(it.get("title")), GD.safe_url(it.get("url"))
+            _dt_ = str(it.get("dt") or "")
+            st.markdown(f"{ic} `{_dt_[4:6]}/{_dt_[6:8]}` " + (f"[{_t}]({_u})" if _u else _t)
+                        + f" — {GD.md_escape(it.get('office'))}")
 
 st.caption("⚠️ Bộ lọc theo quy tắc cố định — không phải khuyến nghị đầu tư. "
            "Luôn tự kiểm tra biểu đồ, BCTC gốc và tin tức trước khi quyết định.")

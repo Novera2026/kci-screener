@@ -59,7 +59,8 @@ def quarter_forecast(quarters: list[dict], fc: list[dict], shares: Optional[floa
         rest = [m for m in ("03", "06", "09", "12") if m not in months_done]
         for c in done:
             np_ = _n(c.get("net_profit"))
-            out.append({"Quý": f"{y}.{str(c['period'])[4:6]}", "Loại": "Thực", "DT (억)": _n(c.get("revenue")),
+            out.append({"Quý": f"{y}.{str(c['period'])[4:6]}",
+                        "Loại": "Thực (DART)" if c.get("_src") == "DART" else "Thực", "DT (억)": _n(c.get("revenue")),
                         "LN HĐ (억)": _n(c.get("op_profit")), "LN ròng (억)": np_,
                         "EPS": _n(c.get("eps")) if c.get("eps") is not None else (np_ * 1e8 / shares if np_ is not None else None)})
         if not rest:
@@ -192,8 +193,11 @@ def fcff_dcf(fc: list[dict], fs: dict, ke: float, rf: float, g: float, market_ca
 
 # ============================================================================ EV/EBIT forward
 def ev_ebit_of(market_cap: Optional[float], ebit_eok: Optional[float], fs: Optional[dict]) -> Optional[float]:
-    """EV/EBIT của 1 công ty: (vốn hóa + nợ ròng + thiểu số) / EBIT năm gần nhất. None nếu EBIT ≤ 0."""
+    """EV/EBIT của 1 công ty: (vốn hóa + nợ ròng + thiểu số) / EBIT năm gần nhất. None nếu EBIT ≤ 0, hoặc BCTC không
+    lập bằng KRW (Doosan Bobcat nộp USD: nợ ròng 억 USD cộng vào vốn hóa KRW → EV/EBIT sai, lọt vào trung vị đối thủ)."""
     if not market_cap or not ebit_eok or ebit_eok <= 0 or not fs:
+        return None
+    if str(fs.get("currency") or "KRW") != "KRW":
         return None
     br = bridge(fs)
     ev = market_cap / 1e8 + br["net_debt"] + br["minority"] - br["associates"]     # EV của phần tạo ra EBIT

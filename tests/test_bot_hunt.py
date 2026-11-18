@@ -69,6 +69,9 @@ def test_export_payload_has_sheet_fields():
     r = j["picks"][0]
     assert r["rank"] == 1 and r["ticker"] == "a" and r["upside_pct"] == 30 and r["F-score"] == 6
     assert r["presets"] and r["presets"][0].startswith("KCI")
+    # tác vụ Claude ghi Google Sheet đọc các trường này (rà soát 18/11/2026, I62) — bỏ trường nào là test đỏ
+    assert j["run_status"] == "ok" and j["rf_live"] is True and "rf_note" in j
+    assert all("Cảnh báo dữ liệu" in p for p in j["picks"])
 
 
 def test_low_confidence_and_data_errors_are_visible_in_the_list():

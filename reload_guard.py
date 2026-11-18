@@ -25,18 +25,35 @@ def _proc_start() -> float:
         return 0.0
 
 
+_SCAN: dict = {}                  # {root: (frozenset tên module, [tên module dự án])} — quét lại khi tập module đổi
+
+
+def _in_root(f: str, roots: tuple) -> bool:
+    """Lọc bằng so chuỗi trước (rẻ); chỉ realpath đường dẫn tương đối hoặc đường dẫn đã qua lọc."""
+    if os.sep + ".venv" + os.sep in f or "site-packages" in f:
+        return False
+    if os.path.isabs(f) and not f.startswith(roots):
+        return False
+    rf = os.path.realpath(f)
+    return rf.startswith(roots[-1]) and os.sep + ".venv" + os.sep not in rf and "site-packages" not in rf
+
+
 def project_modules(root: str) -> dict:
-    """{tên: module} của các module nằm trong `root` (bỏ thư viện ngoài, môi trường ảo)."""
-    root = os.path.realpath(root) + os.sep
-    out = {}
-    for name, m in list(sys.modules.items()):
-        f = getattr(m, "__file__", None)
-        if not f:
-            continue
-        rf = os.path.realpath(f)
-        if rf.startswith(root) and os.sep + ".venv" + os.sep not in rf and "site-packages" not in rf:
-            out[name] = m
-    return out
+    """{tên: module} của các module nằm trong `root` (bỏ thư viện ngoài, môi trường ảo).
+
+    Chạy ở MỖI lần chạy lại của mọi người: trước 18/11/2026 gọi realpath cho cả ~1.500 module (~34 ms CPU). Nay
+    loại bằng so chuỗi trước và nhớ kết quả theo tập (tên, id module) — quét lại khi có module mới nạp / bị bỏ / bị thay."""
+    roots = (os.path.abspath(root) + os.sep, os.path.realpath(root) + os.sep)
+    mods = sys.modules
+    # khóa gồm cả DANH TÍNH module: AppTest / Streamlit thay sys.modules['__main__'] bằng module khác cùng tên → tập
+    # tên không đổi nhưng module đã đổi (rà soát cuối 18/11/2026: trả '__main__' nằm ngoài dự án)
+    key = frozenset((n, id(m)) for n, m in list(mods.items()))
+    hit = _SCAN.get(roots)
+    if hit is None or hit[0] != key:
+        names = [n for n, m in list(mods.items())
+                 if getattr(m, "__file__", None) and _in_root(m.__file__, roots)]
+        hit = _SCAN[roots] = (key, names)
+    return {n: mods[n] for n in hit[1] if n in mods}
 
 
 def drop_stale(root: str, proc_start: float = None) -> list:

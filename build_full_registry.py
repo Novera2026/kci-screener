@@ -11,6 +11,7 @@ Chạy lại khi muốn cập nhật danh sách:  python build_full_registry.py
 """
 from __future__ import annotations
 import csv
+import os
 import re
 import time
 import requests
@@ -23,8 +24,11 @@ THEME_OUT = "themes_all.csv"
 PAGE_SIZE = 100
 PAUSE = 0.15
 
-# Lọc bỏ: ETF/ETN (stockEndType != stock), SPAC (스팩), cổ phiếu ưu đãi (우선주).
-_PREF_RE = re.compile(r"우[A-Z]?$")   # tên kết thúc 우 / 우B / 우C ...
+# Lọc bỏ: ETF/ETN (stockEndType != stock), SPAC (스팩 / 기업인수목적), cổ phiếu ưu đãi (우선주).
+_PREF_RE = re.compile(r"우[A-Z]?(\(전환\))?$")   # tên kết thúc 우 / 우B / 우C / 우(전환) (CJ4우(전환) 00104K)
+# SPAC: tên KẾT THÚC bằng 스팩[n호] / n호스팩 / 기업인수목적[주식회사]. Rà soát 18/11/2026: lọc chuỗi con '스팩' giữ
+# SPAC '…제14호기업인수목적' và loại nhầm công ty thật 아인스팩씨엔에스.
+_SPAC_RE = re.compile(r"(스팩\d*호?|\d+호스팩|기업인수목적(주식회사)?)$")
 
 
 def _excluded(name: str, code: str, end_type: str) -> bool:
@@ -32,7 +36,7 @@ def _excluded(name: str, code: str, end_type: str) -> bool:
         return True
     if not name:
         return True
-    if "스팩" in name:                              # SPAC (기업인수목적)
+    if _SPAC_RE.search(name):                       # SPAC (기업인수목적)
         return True
     # ưu đãi: tên kết thúc 우 VÀ ticker không tận cùng 0 (cổ phiếu thường tận cùng 0,
     # ưu đãi tận cùng 5/7/9/K) — chừa các công ty thường tên kết thúc 우 (성우, 이오플로우...)
@@ -150,11 +154,16 @@ def main():
         time.sleep(PAUSE)
     print(f"\nĐã loại (ETF/ETN/SPAC/ưu đãi): {skipped}")
 
+    # cột group (tập đoàn, gắn tay — peers.domestic_candidates loại đối thủ cùng tập đoàn) giữ nguyên khi dựng lại
+    groups = {}
+    if os.path.exists(OUT):
+        with open(OUT, encoding="utf-8", newline="") as f:
+            groups = {r["ticker"]: r.get("group") or "" for r in csv.DictReader(f)}
     with open(OUT, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["name_kr", "ticker", "industry_kr", "market"])
+        w.writerow(["name_kr", "ticker", "industry_kr", "market", "group"])
         for code in sorted(rows):
-            w.writerow(rows[code])
+            w.writerow(rows[code] + [groups.get(code, "")])
     print(f"\n[OK] Đã ghi {len(rows)} mã -> {OUT}")
     build_themes()
 

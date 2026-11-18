@@ -32,7 +32,7 @@ st.title("🔍 Sàng lọc cổ phiếu rẻ")
 st.caption("Chọn **bộ tiêu chuẩn** → bấm **Chạy**. App tự lọc danh sách gốc (tầng 1: giá, P/E, P/B, ROE, cổ tức), **định giá "
            "sâu** mọi mã qua lọc bằng đúng quy trình trang 🧮, kiểm tầng 2 bằng BCTC DART (F-score, thanh toán, năm lỗ, "
            "chất lượng tài sản) rồi xếp hạng. Mỗi mã định giá được lưu hồ sơ `dossiers/`.")
-MAX_DEEP = 30
+MAX_DEEP = GD.MAX_DEEP_PUBLIC           # trần chung với bot săn ở Trang chủ
 
 
 @st.cache_resource
@@ -143,6 +143,16 @@ if st.button("▶️ Chạy sàng lọc", type="primary"):
                 tks = [t for t in (reg.resolve(x) for x in GD.clip_queries(manual, 400)[0]) if t]
             tks = list(dict.fromkeys(tks))[:400]
             rows = _rows(tuple(tks)) if tks else []
+        # Naver lỗi → dòng không có số liệu: báo lỗi, không hiện "0 mã qua tầng 1" với lý do bịa (18/11/2026)
+        n_nodata = sum(1 for r in rows if SC.no_market_data(r))
+        if not rows:
+            st.error("Danh sách gốc trống — " + {"Nhập tay": "không có mã hợp lệ trong danh sách nhập.",
+                                                 "Top vốn hóa": "không lấy được xếp hạng vốn hóa từ Naver, thử lại sau "
+                                                                "ít phút."}.get(kind, "phạm vi này không có mã nào."))
+            st.stop()
+        if n_nodata == len(rows):
+            st.error(f"Không lấy được dữ liệu thị trường từ Naver ({n_nodata}/{len(rows)} mã) — thử lại sau ít phút.")
+            st.stop()
         st1 = SC.apply_preset(rows, key, ov1)
         passed = [r for r in st1 if r["Qua lọc"]][:n_deep]
         deep = []
@@ -155,9 +165,8 @@ if st.button("▶️ Chạy sàng lọc", type="primary"):
                                  preset=key, overrides2=ov2,
                                  feeds={} if _rfd["live"] else {"rf": {"ok": False, "note": _rfd["note"]}})
             bar.empty()
-        import datetime as _dt
-        st.session_state["sc"] = {"key": key, "st1": st1, "deep": deep, "n_univ": len(rows),
-                                  "n_pass": sum(1 for r in st1 if r["Qua lọc"]), "at": _dt.datetime.now(),
+        st.session_state["sc"] = {"key": key, "st1": st1, "deep": deep, "n_univ": len(rows), "n_nodata": n_nodata,
+                                  "n_pass": sum(1 for r in st1 if r["Qua lọc"]), "at": GD.now_kst(),
                                   "rf_note": "" if (not passed or _rfd["live"]) else _rfd["note"]}
 
 res = st.session_state.get("sc")
@@ -168,11 +177,14 @@ if res["key"] != key:
 
 deep = res["deep"]
 if res.get("at"):
-    st.caption(f"🕒 Kết quả tính lúc **{res['at']:%H:%M:%S %d/%m}** với giá, beta, Rf tại thời điểm đó. Bấm "
+    st.caption(f"🕒 Kết quả tính lúc **{res['at']:%H:%M:%S %d/%m} KST** với giá, beta, Rf tại thời điểm đó. Bấm "
                "**▶️ Chạy sàng lọc** để tính lại với số liệu mới — kết quả cũ không được dùng lại cho định giá.")
 if res.get("rf_note"):
     st.error(f"⚠️ {res['rf_note']}. Kết quả bên dưới tính trên giá trị dự phòng nên **độ tin cậy bị hạ xuống Low** — "
              "bấm **▶️ Chạy sàng lọc** lại sau ít phút.")
+if res.get("n_nodata"):
+    st.warning(f"⚠️ {res['n_nodata']}/{res['n_univ']} mã không lấy được dữ liệu thị trường từ Naver — bị loại ở tầng 1 "
+               "(lý do: *không lấy được dữ liệu*). Chạy lại sau ít phút để đủ danh sách.")
 _n_dw = sum(1 for r in deep if r.get("Cảnh báo dữ liệu"))
 if _n_dw:
     st.warning(f"⚠️ {_n_dw}/{len(deep)} mã có **lỗi dữ liệu** (DART không trả lời, hai nguồn lệch nhau, thiếu beta…) — xem cột "
@@ -191,7 +203,7 @@ if not deep:
 else:
     ddf = pd.DataFrame(deep)
     cols = ["Đạt tiêu chuẩn", "Mã", "Tên", "Ngành", "Giá", "Giá trị hợp lý", "Chênh %", "Độ tin cậy", "Chất lượng TS",
-            "F-score", "Tổng quan", "Kết luận", "Lý do chưa đạt", "Cảnh báo dữ liệu"]
+            "F-score", "Tổng quan", "Kết luận", "Lý do chưa đạt", "Cảnh báo dữ liệu", "Nguồn dữ liệu"]
     ddf = ddf[[c for c in cols if c in ddf.columns]]
 
     def _c(v):

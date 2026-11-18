@@ -16,6 +16,7 @@ import datetime as _dt
 import json
 import os
 import threading
+import time as _time
 from typing import Optional
 
 import dart_api
@@ -81,6 +82,17 @@ ACCOUNTS = [
                                "ifrs-full_InterestPaidClassifiedAsFinancingActivities"]),
 ]
 FIN_BUCKETS = {"Bank", "Brokerage", "Insurance"}
+# Chi phí ghi số DƯƠNG theo quy ước của app; một số DN nộp DART bằng số ÂM (이자의 지급, 금융비용, 배당금지급 — rà soát
+# 18/11/2026, I24: 파두 lỗ HĐ mà được ✅ 'Khả năng trả lãi', NC 'Tài chính ròng' bị cộng dồn, KCC 'Cổ tức/FCF' âm).
+_OUTFLOWS = ("interest_paid", "fin_cost", "dividends_paid")
+
+
+def _norm_signs(d: dict) -> dict:
+    """Đưa các khoản chi (lãi đã trả, chi phí tài chính, cổ tức đã trả) về số dương — tại chỗ, trả lại d."""
+    for k in _OUTFLOWS:
+        if d.get(k) is not None:
+            d[k] = abs(d[k])
+    return d
 
 
 def _n(s) -> Optional[float]:
@@ -184,6 +196,7 @@ def parse_statements(items: list[dict]) -> tuple[dict, dict]:
                 break
     for d, key in ((cur, "thstrm_amount"), (prev, "frmtrm_amount")):
         _fix_derived(d, _borrowings_by_name(items, key), _equity_income_by_name(items, key))
+        _norm_signs(d)
     return cur, prev
 
 
@@ -287,7 +300,7 @@ def decompose(fs: dict) -> dict:
               "ROE = tích ba thành phần %": (margin * turnover * lev * 100)
               if None not in (margin, turnover, lev) else None}
     pre = c.get("pretax")
-    fin_net = (c.get("fin_income") or 0.0) - (c.get("fin_cost") or 0.0) \
+    fin_net = (c.get("fin_income") or 0.0) - abs(c.get("fin_cost") or 0.0) \
         if (c.get("fin_income") is not None or c.get("fin_cost") is not None) else None
     eqi = c.get("equity_income")
     other = (pre - (c.get("op") or 0) - (fin_net or 0) - (eqi or 0)) if pre is not None else None
@@ -299,7 +312,7 @@ def decompose(fs: dict) -> dict:
     cash = {"CFO (억)": c.get("cfo"), "CFO / LN ròng": _div(c.get("cfo"), c.get("ni")),
             "Capex (억)": capex, "Capex / doanh thu %": _div(capex, rev) * 100 if _div(capex, rev) else None,
             "FCF = CFO − capex (억)": fcf, "Biên FCF %": _div(fcf, rev) * 100 if _div(fcf, rev) is not None else None,
-            "Cổ tức đã trả / FCF %": _div(c.get("dividends_paid"), fcf) * 100
+            "Cổ tức đã trả / FCF %": _div(abs(c["dividends_paid"]), fcf) * 100
             if (fcf and fcf > 0 and c.get("dividends_paid") is not None) else None,
             "Thuế suất thực tế %": _div(c.get("tax"), pre) * 100 if (pre and pre > 0 and c.get("tax") is not None) else None}
     dso = _div(c.get("receivables"), rev)
@@ -361,18 +374,33 @@ def parse_report(items: list[dict]) -> dict:
         sj.setdefault("equity_income", "IS")
     if "borrowings" in pt:              # nợ vay đọc theo tên dòng không qua vòng ACCOUNTS → phải tự ghi loại báo cáo,
         sj["borrowings"] = "BS"         # nếu không quarter_series bỏ nó khỏi CĐKT quý (nợ ròng quý = −tiền)
+    for d in (pt, ytd, yoy):
+        _norm_signs(d)
     return {"pt": pt, "ytd": ytd, "yoy": yoy, "sj": sj}
+
+
+def _cached_report(rep: dict) -> dict:
+    for k in ("pt", "ytd", "yoy"):          # bản lưu trước 18/11/2026 có thể còn chi phí ghi số âm
+        if isinstance(rep.get(k), dict):
+            _norm_signs(rep[k])
+    return rep
 
 
 def _fetch_report(cc: str, year: int, rc: str, fs_div_pref: Optional[str], cache_dir: str,
                   offline: bool = False) -> Optional[dict]:
     """1 báo cáo quý/năm (có cache đĩa). Lỗi DART → DartError: không ghi cache, không lùi sang loại báo cáo khác.
-    offline=True (DART đang lỗi): chỉ đọc cache, kể cả bản đời cũ; không có thì None."""
+    DART xác nhận không có (013 cả hai loại) → nhớ file {cc}_{năm}_{rc}.none.json có hạn (dart_api.none_ttl), lần chạy
+    lại không hỏi DART. offline=True (DART đang lỗi): chỉ đọc cache, kể cả bản đời cũ; không có thì None."""
     fp = os.path.join(cache_dir, f"{cc}_{year}_{rc}.json")
     cached = _read_json(fp)
     if cached and (cached.get("_v") == FULL_V or offline):
-        return cached
+        return _cached_report(cached)
     if offline:
+        return None
+    fp_none = os.path.join(cache_dir, f"{cc}_{year}_{rc}.none.json")
+    mark = _read_json(fp_none)
+    if (mark and mark.get("_v") == FULL_V
+            and 0 <= _time.time() - float(mark.get("at") or 0) < dart_api.none_ttl(year)):
         return None
     for fs_div in ([fs_div_pref] if fs_div_pref else []) + [d for d in ("CFS", "OFS") if d != fs_div_pref]:
         items = dart_api.fetch_statements(cc, year, rc, fs_div, timeout=20)
@@ -385,25 +413,32 @@ def _fetch_report(cc: str, year: int, rc: str, fs_div_pref: Optional[str], cache
                "_v": FULL_V, **rep}
         _write_json(fp, out)                                                    # báo cáo đã nộp không đổi
         return out
+    try:
+        _write_json(fp_none, {"at": _time.time(), "_v": FULL_V})
+    except Exception:
+        pass
     return None
 
 
 def fetch_quarter_reports(ticker: str, years: int = 2, cache_dir: str = Q_CACHE,
-                          errors: Optional[list] = None) -> list[dict]:
+                          errors: Optional[list] = None, offline: bool = False) -> list[dict]:
     """Báo cáo quý + năm của `years` năm gần nhất (+ năm trước đó để tính Q4/so cùng kỳ), cũ → mới.
-    Cùng loại hợp nhất/riêng với báo cáo đầu tiên lấy được. Không key DART → [].
+    Cùng loại hợp nhất/riêng với báo cáo đầu tiên lấy được. Không key DART → []. Bỏ kỳ chưa kết thúc (ngày Hàn Quốc).
     errors: list nhận thông báo khi DART lỗi giữa chừng. Sau lỗi đầu tiên hàm không gọi DART nữa mà đọc tiếp các kỳ đã
-    lưu trên đĩa (kết quả có thể thiếu các kỳ chưa từng lưu — không đầy đủ)."""
+    lưu trên đĩa (kết quả có thể thiếu các kỳ chưa từng lưu — không đầy đủ). offline=True: chỉ đọc bản đã lưu, không gọi
+    DART (Sàng lọc / bot / Tổng hợp — rà soát 18/11/2026, I05)."""
     if not dart_api.available():
         return []
     cc = dart_api.corp_code_of(ticker)
     if not cc:
         return []
     os.makedirs(cache_dir, exist_ok=True)
-    today = _dt.date.today()
-    out, fs_div, offline = [], None, False
+    today = dart_api._today()
+    out, fs_div = [], None
     for y in range(today.year - years, today.year + 1):
         for rc, _q in _RC_Q:
+            if dart_api.period_open(y, rc, today):          # kỳ chưa kết thúc → chắc chắn chưa có báo cáo
+                continue
             try:
                 rep = _fetch_report(cc, y, rc, fs_div, cache_dir, offline)
             except dart_api.DartError as e:
@@ -422,7 +457,8 @@ def _sub(a, b):
 
 
 RESTATE_TOL = 0.05        # doanh thu cùng quý mà báo cáo NĂM SAU ghi khác > 5% số đã nộp → năm đó đã điều chỉnh hồi tố
-Q4_BAND = (1 / 3, 3.0)    # doanh thu Q4 suy ra ÷ trung vị Q1–Q3 ngoài dải → phép trừ "năm − 9 tháng" không còn nghĩa
+# doanh thu Q4 suy ra ÷ trung vị Q1–Q3 ngoài dải → phép trừ "năm − 9 tháng" không còn nghĩa (cổng dùng chung quarter_ok)
+from financials import QUARTER_BAND as Q4_BAND, quarter_ok   # noqa: E402
 
 
 def quarter_series(reports: list[dict]) -> list[dict]:
@@ -489,9 +525,12 @@ def quarter_series(reports: list[dict]) -> list[dict]:
             q13 = sorted(v for v in ((flows.get((y, i)) or {}).get("revenue") for i in (1, 2, 3)) if v)
             if not q4_void and rev4 is not None and len(q13) == 3:
                 med = q13[1]
-                if rev4 <= 0 or not Q4_BAND[0] <= rev4 / med <= Q4_BAND[1]:
+                if not quarter_ok({"revenue": rev4, "net_profit": flow.get("ni")}, q13):
                     q4_void = True
-                    note = (f"Q4 suy ra phi lý (doanh thu {rev4:,.0f}억 so với trung vị Q1–Q3 {med:,.0f}억) — báo cáo năm "
+                    _ni = flow.get("ni")
+                    note = (f"Q4 suy ra phi lý (doanh thu {rev4:,.0f}억 so với trung vị Q1–Q3 {med:,.0f}억"
+                            + (f", LN thuần {_ni:,.0f}억 > doanh thu" if (_ni is not None and _ni > rev4) else "")
+                            + ") — báo cáo năm "
                             "khác cơ sở với 9 tháng đã nộp; không tách được Q4")
             if q4_void:
                 flow = {}
@@ -503,6 +542,7 @@ def quarter_series(reports: list[dict]) -> list[dict]:
         flow = {k: v for k, v in flow.items() if v is not None}
         flows[(y, q)] = flow
         out.append({"label": f"Q{q}.{str(y)[2:]}", "year": y, "q": q, "fs_div": r["fs_div"],
+                    "currency": r.get("currency") or "KRW",
                     "flow": flow, "cf": {k: v for k, v in cf.items() if v is not None},
                     "bs": {k: v for k, v in r["pt"].items() if sj.get(k) == "BS"},
                     "yoy": {k: v for k, v in yoy.items() if v is not None}, "note": note})
@@ -531,7 +571,7 @@ def decompose_quarters(qs: list[dict], n: int = 6) -> list[dict]:
         eq_c, eq_p = bs.get("equity_parent") or bs.get("equity"), pb.get("equity_parent") or pb.get("equity")
         avg_a, avg_e = _avg(bs.get("assets"), pb.get("assets")), _avg(eq_c, eq_p)
         margin, turn, lev = _div(ni, rev), _div(rev * 4 if rev is not None else None, avg_a), _div(avg_a, avg_e)
-        fin_net = ((f.get("fin_income") or 0.0) - (f.get("fin_cost") or 0.0)
+        fin_net = ((f.get("fin_income") or 0.0) - abs(f.get("fin_cost") or 0.0)
                    if (f.get("fin_income") is not None or f.get("fin_cost") is not None) else None)
         eqi = f.get("equity_income")
         other = (pre - (op or 0) - (fin_net or 0) - (eqi or 0)) if pre is not None else None
@@ -689,11 +729,12 @@ def quality(fs: dict, market_cap_eok: Optional[float] = None, bucket: Optional[s
         if z is not None:
             checks.append(_chk("Altman Z", f"{z:.2f}", _band(z, 2.99, 1.81), "> 2,99 ✅ · < 1,81 ❌",
                                "rủi ro kiệt quệ tài chính"))
-        ip = c.get("interest_paid") or c.get("fin_cost")
+        ip = abs(c.get("interest_paid") or c.get("fin_cost") or 0.0)      # bản cache cũ có thể còn số âm
         op = c.get("op")
         if op is not None and ip:
             cov = op / ip
-            checks.append(_chk("Khả năng trả lãi (LN HĐ / lãi)", f"{cov:.1f}×", _band(cov, 5, 2), "≥ 5× ✅ · < 2× ❌"))
+            checks.append(_chk("Khả năng trả lãi (LN HĐ / lãi)", f"{cov:.1f}×", FAIL if op <= 0 else _band(cov, 5, 2),
+                               "≥ 5× ✅ · < 2× ❌"))
         borrow = c.get("borrowings") or 0.0
         nd = borrow - (c.get("cash") or 0) - (c.get("st_deposits") or 0)
         if op is not None and op > 0:

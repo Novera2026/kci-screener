@@ -1,4 +1,5 @@
-"""Bảo vệ app công khai (guard.py) + hạn mức DART, dọn hồ sơ, tra mã — rà soát 15/11/2026, đợt 2. Không cần mạng."""
+"""Bảo vệ app công khai (guard.py) + hạn mức DART, dọn hồ sơ, tra mã — rà soát 15/11/2026, đợt 2.
+Không cần mạng: tests/conftest.py chặn mạng ra ngoài; test mở trang dùng dữ liệu giả fake_market."""
 import datetime as dt
 import os
 
@@ -143,7 +144,7 @@ def test_bot_session_freshness_handles_late_runs():
 
 
 # ---------------------------------------------------------------- trang chạy thật ở chế độ bản công khai
-def test_public_app_locks_owner_features(monkeypatch):
+def test_public_app_locks_owner_features(monkeypatch, fake_market):
     from streamlit.testing.v1 import AppTest
     monkeypatch.setenv("KCI_PUBLIC", "1")
     monkeypatch.setenv(G.OWNER_SECRET, "mat-khau-thu")
@@ -166,7 +167,7 @@ def test_public_app_locks_owner_features(monkeypatch):
     assert not any("chỉ mở cho chủ app" in i.value for i in at.info)
 
 
-def test_public_app_without_password_stays_locked(monkeypatch):
+def test_public_app_without_password_stays_locked(monkeypatch, fake_market):
     from streamlit.testing.v1 import AppTest
     monkeypatch.setenv("KCI_PUBLIC", "1")
     monkeypatch.delenv(G.OWNER_SECRET, raising=False)
@@ -176,7 +177,7 @@ def test_public_app_without_password_stays_locked(monkeypatch):
     assert any("chỉ mở cho chủ app" in i.value for i in at.info)
 
 
-def test_local_app_is_not_locked(monkeypatch):
+def test_local_app_is_not_locked(monkeypatch, fake_market):
     from streamlit.testing.v1 import AppTest
     monkeypatch.setenv("KCI_PUBLIC", "0")
     at = AppTest.from_file(os.path.join(ROOT, "views", "tong_hop.py"), default_timeout=120).run()

@@ -161,14 +161,40 @@ def ev_per_gwh_value(gwh: float, ev_per_gwh_eok: float, net_debt_eok: float, sha
     return eq * 1e8 / shares if eq > 0 else None
 
 
-def implied_ev_per_gwh(market_cap: Optional[float], net_debt_eok: Optional[float], gwh: float) -> Optional[float]:
-    """EV/GWh thị trường đang trả cho mã này (억원/GWh) — để người dùng so với bội số mình nhập."""
+def implied_ev_per_gwh(market_cap: Optional[float], net_debt_eok: Optional[float], gwh: float,
+                       shares: Optional[float] = None, price: Optional[float] = None) -> Optional[float]:
+    """EV/GWh thị trường đang trả cho mã này (억원/GWh) — để người dùng so với bội số mình nhập.
+    shares, price: có cả hai thì vốn hóa = shares × price (cùng cơ sở cp với ev_per_gwh_value — gồm cp ưu đãi)."""
+    if shares and shares > 0 and price and price > 0:
+        market_cap = shares * price
     if not (market_cap and gwh and gwh > 0):
         return None
     return (market_cap / 1e8 + (net_debt_eok or 0.0)) / gwh
 
 
 # ============================================================================ dược / biotech — rNPV
+RNPV_LAUNCH_MAX = 30             # năm ra mắt ≤ năm nay + 30
+_RNPV_REQUIRED = ("Doanh số đỉnh (억)", "Năm ra mắt", "Biên LN %", "Chi phí PT còn lại (억)")
+
+
+def _is_blank(x) -> bool:
+    if x is None:
+        return True
+    if isinstance(x, str):
+        return not x.strip()
+    try:
+        return bool(x != x)            # NaN
+    except TypeError:                  # pd.NA
+        return True
+
+
+def _cell(x) -> Optional[float]:
+    """Ô số của bảng nhập: chỉ nhận SỐ hữu hạn. Chữ ('2.000', '35,5'), ô trống, NaN → None."""
+    if isinstance(x, (str, bool)):
+        return None
+    return _num(x)
+
+
 def rnpv(assets: list[dict], r: float, shares: float, net_cash_eok: float = 0.0, this_year: int = 2026,
          ramp_years: int = 5, exclusivity: int = 10, overhead_eok: float = 0.0) -> dict:
     """assets: [{Tên, Pha, Doanh số đỉnh (억), Năm ra mắt, PoS %, Biên LN %, Chi phí PT còn lại (억)}].
@@ -183,11 +209,29 @@ def rnpv(assets: list[dict], r: float, shares: float, net_cash_eok: float = 0.0,
     for a in assets:
         nm = str(a.get("Tên") or "?")
         phase = a.get("Pha")
-        peak = _num(a.get("Doanh số đỉnh (억)")) or 0.0
-        launch = int(_num(a.get("Năm ra mắt")) or this_year)
-        pos_in = _num(a.get("PoS %"))
-        m = (_num(a.get("Biên LN %")) or 0.0) / 100
-        cost = _num(a.get("Chi phí PT còn lại (억)")) or 0.0
+        # ô trống / chữ ('2.000', '35,5') → ❌, không tự đổi thành 0 hay năm nay (rà soát 18/11/2026)
+        blank = [k for k in _RNPV_REQUIRED if _cell(a.get(k)) is None]
+        pos_raw = a.get("PoS %")
+        if _cell(pos_raw) is None and not _is_blank(pos_raw):
+            blank.append("PoS %")
+        if blank:
+            checks.append(_chk(f"{nm}: " + ", ".join(blank), "trống / không phải số", FAIL,
+                               "nhập số" + (" (chi phí PT = 0 nếu không còn)"
+                                            if "Chi phí PT còn lại (억)" in blank else "")))
+            continue
+        peak = _cell(a.get("Doanh số đỉnh (억)"))
+        launch_f = _cell(a.get("Năm ra mắt"))
+        pos_in = _cell(pos_raw)
+        m = _cell(a.get("Biên LN %")) / 100
+        cost = _cell(a.get("Chi phí PT còn lại (억)"))
+        if cost < 0:
+            checks.append(_chk(f"{nm}: chi phí PT", f"{cost:,.0f}억", FAIL, "chi phí phải ≥ 0"))
+            continue
+        if not this_year <= launch_f <= this_year + RNPV_LAUNCH_MAX:      # trước vòng lặp năm: chặn OverflowError
+            checks.append(_chk(f"{nm}: năm ra mắt", f"{launch_f:.0f}", FAIL,
+                               f"phải trong [{this_year}; {this_year + RNPV_LAUNCH_MAX}]"))
+            continue
+        launch = int(launch_f)
         base = POS_BY_PHASE.get(phase)
         pos = (pos_in / 100) if pos_in is not None else base
         if base is None:

@@ -26,6 +26,8 @@ from typing import Optional
 
 import pandas as pd
 
+import guard as GD
+
 
 # _quiet đổi stdout/stderr + logging ở mức TOÀN CỤC → không an toàn đa luồng.
 # Khóa này đảm bảo mỗi lúc chỉ 1 luồng ở trong vùng "im lặng" (chỉ ảnh hưởng
@@ -62,11 +64,11 @@ NAVER_TIMEOUT = 8  # giây
 # Tiện ích
 # ----------------------------------------------------------------------------
 def _today_kr() -> str:
-    return _dt.datetime.now().strftime("%Y%m%d")
+    return GD.today_kst().strftime("%Y%m%d")         # máy chủ Cloud chạy UTC
 
 
 def _last_n_days(n: int = 400) -> tuple[str, str]:
-    end = _dt.date.today()
+    end = GD.today_kst()
     start = end - _dt.timedelta(days=n)
     return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
@@ -151,8 +153,9 @@ class TickerRegistry:
         allp = pd.read_csv(full_path, dtype={"ticker": str})
         allp["ticker"] = allp["ticker"].astype(str).str.zfill(6)
         allp = allp.rename(columns={"name_kr": "_name_all", "market": "_market_all"})
+        extra = ["group"] if "group" in allp.columns and "group" not in cur.columns else []   # tập đoàn (I21)
         m = cur.drop(columns=["industry_kr"]).merge(
-            allp[["ticker", "_name_all", "industry_kr", "_market_all"]],
+            allp[["ticker", "_name_all", "industry_kr", "_market_all"] + extra],
             on="ticker", how="outer")
         # mã chỉ có ở full -> điền tên/sàn từ full, sector/theme để trống
         m["name_kr"] = m["name_kr"].fillna(m["_name_all"])
@@ -165,6 +168,8 @@ class TickerRegistry:
     # --- toàn bộ danh sách KRX để resolve cả mã ngoài registry ---
     def _load_krx_names(self):
         if self._krx_loaded:
+            return
+        if GD.is_cloud() and not GD.owner_ok():   # tài khoản KRX của chủ app: khách bỏ tra mờ toàn KRX (không lỗi)
             return
         try:
             d = _today_kr()
@@ -331,6 +336,8 @@ class StockRow:
     net_income: Optional[float] = None     # ước từ market_cap/PER hoặc EPS*shares
     source: str = ""
     note: str = ""
+    industry_code: Optional[str] = None    # mã ngành KRX của Naver (industryCode) — cho mã chưa có trong danh mục
+    fetch_ok: bool = True                  # False = nguồn chỉ số lỗi (P/E trống vì LỖI, không phải vì lỗ)
 
     def to_dict(self):
         return asdict(self)
@@ -338,6 +345,7 @@ class StockRow:
 
 def _fetch_pykrx(ticker: str) -> StockRow:
     """Primary: pykrx (KRX official)."""
+    GD.require_owner("Nguồn KRX (pykrx)")      # tài khoản KRX của chủ app — fetch_one bắt lỗi, chuyển sang Naver
     row = StockRow(ticker=ticker, source="pykrx")
     s, e = _last_n_days(400)
 
@@ -401,23 +409,12 @@ def _fetch_naver(ticker: str) -> StockRow:
         row.dps = _to_num(totals.get("dividend"))
         row.high_52w = _to_num(totals.get("highPriceOf52Weeks"))
         row.low_52w = _to_num(totals.get("lowPriceOf52Weeks"))
+        ic = j.get("industryCode")
+        row.industry_code = str(ic) if ic not in (None, "") else None
     except Exception as ex:
-        row.note = f"naver integration fail: {str(ex)[:60]}"
-
-    # itemSummary bổ sung giá nếu thiếu
-    if row.price is None:
-        try:
-            url2 = f"https://api.finance.naver.com/service/itemSummary.naver?itemcode={ticker}"
-            r2 = requests.get(url2, headers=headers, timeout=NAVER_TIMEOUT)
-            j2 = r2.json()
-            row.price = _to_num(j2.get("now"))
-            row.per = row.per or _to_num(j2.get("per"))
-            row.pbr = row.pbr or _to_num(j2.get("pbr"))
-            row.eps = row.eps or _to_num(j2.get("eps"))
-            row.bps = row.bps or _to_num(j2.get("bps"))
-            row.market_cap = row.market_cap or _to_num(j2.get("marketSum"))
-        except Exception:
-            pass
+        row.note = f"naver integration fail: {GD.err(ex, 60)}"
+        row.fetch_ok = False
+    # (đường dự phòng itemSummary đã bỏ 18/11/2026: API trả HTTP 200 thân rỗng — không còn dữ liệu)
 
     _derive_net_income(row)
     return row
@@ -444,7 +441,7 @@ def _fetch_toss(ticker: str) -> StockRow:
         p = cli.get_price(ticker)
         row.price = p.get("price")
     except Exception as e:
-        row.note = f"toss price fail: {str(e)[:60]}"
+        row.note = f"toss price fail: {GD.err(e, 60)}"
     return row
 
 
@@ -452,6 +449,7 @@ _TOSS_SINGLETON = None
 def _toss_client():
     """Tái dùng 1 TossClient (cache token) cho cả batch."""
     global _TOSS_SINGLETON
+    GD.require_owner("Nguồn giá Toss")         # bản đã tạo (của chủ app) cũng không cho khách dùng lại
     if _TOSS_SINGLETON is None:
         from toss_api import TossClient
         _TOSS_SINGLETON = TossClient()
@@ -460,7 +458,8 @@ def _toss_client():
 
 _FETCHERS = {"pykrx": _fetch_pykrx, "naver": _fetch_naver, "toss": _fetch_toss}
 _MERGE_FIELDS = ("price", "high_52w", "low_52w", "market_cap", "shares",
-                 "per", "pbr", "eps", "bps", "div_yield", "dps")
+                 "per", "pbr", "eps", "bps", "div_yield", "dps", "industry_code")
+_FUND_SOURCES = ("pykrx", "naver")      # nguồn chỉ số cơ bản (P/E, P/B, EPS…) — Toss chỉ có giá
 
 
 def fetch_live_prices(tickers: list[str]) -> dict[str, float]:
@@ -514,13 +513,20 @@ def fetch_one(ticker: str, registry: Optional[TickerRegistry] = None,
 
     row = StockRow(ticker=ticker)
     used = []
+    fund_tried = fund_ok = False
     for src in order:
+        fund_tried = fund_tried or src in _FUND_SOURCES
         try:
             r = _FETCHERS[src](ticker)
         except Exception as ex:
             if not row.note:
-                row.note = f"{src} error: {str(ex)[:50]}"
+                row.note = f"{src} error: {GD.err(ex, 50)}"
             continue
+        failed = (not r.fetch_ok) or "fail" in (r.note or "")
+        if failed and not row.note:
+            row.note = r.note           # lỗi nguồn phải đi theo dòng (trước 18/11/2026 bị bỏ → trông như mã lỗ)
+        if src in _FUND_SOURCES and not failed:
+            fund_ok = True
         got = False
         for f in _MERGE_FIELDS:
             v = getattr(r, f)
@@ -533,6 +539,7 @@ def fetch_one(ticker: str, registry: Optional[TickerRegistry] = None,
         if row.price is not None and row.per is not None and row.market_cap is not None:
             break
     row.source = "+".join(used)
+    row.fetch_ok = fund_ok or not fund_tried
     if live:
         _overlay_live([row])
     _derive_net_income(row)
@@ -540,6 +547,12 @@ def fetch_one(ticker: str, registry: Optional[TickerRegistry] = None,
         row.name = registry.name_of(ticker) or row.name
         row.sector = registry.sector_of(ticker)
         row.industry_kr = registry.industry_of(ticker)
+    if not row.industry_kr and row.industry_code:      # mã mới niêm yết chưa có trong danh mục → ngành theo Naver
+        try:
+            from pipeline import industry_name
+            row.industry_kr = industry_name(row.industry_code)
+        except Exception:
+            pass
     return row
 
 
@@ -588,6 +601,24 @@ def fetch_batch(queries: list[str], registry: Optional[TickerRegistry] = None,
     return df
 
 
+def _with_session(fn):
+    """Cho luồng phụ thấy phiên Streamlit của lời gọi: owner_ok() đọc session_state — luồng không có ScriptRunContext
+    luôn thấy 'khách', nên chủ app đã mở khóa vẫn bị chặn Toss/KRX trong fetch_many (rà soát 18/11/2026).
+    Ngoài Streamlit (CLI, test) → giữ nguyên fn."""
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        ctx = get_script_run_ctx(suppress_warning=True)
+    except Exception:
+        return fn
+    if ctx is None:
+        return fn
+
+    def run(*a, **k):
+        add_script_run_ctx(threading.current_thread(), ctx)
+        return fn(*a, **k)
+    return run
+
+
 def fetch_many(queries: list[str], registry: Optional[TickerRegistry] = None,
                prefer: str = "naver", max_workers: int = 5, retries: int = 1,
                progress=None, resolutions: Optional[list] = None,
@@ -634,15 +665,16 @@ def fetch_many(queries: list[str], registry: Optional[TickerRegistry] = None,
                     return r
                 last = r
             except Exception as ex:
-                last = StockRow(ticker=tk, note=f"err: {str(ex)[:40]}")
+                last = StockRow(ticker=tk, note=f"err: {GD.err(ex, 40)}", fetch_ok=False)
             if attempt < retries:
                 time.sleep(RETRY_WAIT)         # nghỉ rồi thử lại mã bị rỗng
-        return last or StockRow(ticker=tk, note="no data")
+        return last or StockRow(ticker=tk, note="no data", fetch_ok=False)
 
     done = 0
     total = len(resolved)
     with _cf.ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
-        futs = {ex.submit(_work, tk): idx for idx, tk in resolved}
+        work = _with_session(_work)            # quyền chủ app xét theo phiên gọi, không theo luồng phụ
+        futs = {ex.submit(work, tk): idx for idx, tk in resolved}
         for fut in _cf.as_completed(futs):
             rows[futs[fut]] = fut.result()
             done += 1
@@ -814,12 +846,17 @@ def sector_aggregates(df: pd.DataFrame) -> pd.DataFrame:
 # ----------------------------------------------------------------------------
 def export_excel(df: pd.DataFrame, agg: pd.DataFrame, path: str,
                  val: Optional[pd.DataFrame] = None,
-                 table_df: Optional[pd.DataFrame] = None):
-    """Xuất bảng + aggregate (+ định giá + bảng hiển thị nếu có) ra Excel formatted."""
+                 table_df: Optional[pd.DataFrame] = None,
+                 conclusion: Optional[pd.DataFrame] = None):
+    """Xuất bảng + aggregate (+ định giá + bảng hiển thị nếu có) ra Excel formatted.
+    conclusion = bảng Định giá đúng như màn hình (Giá trị hợp lý/Chênh %/Độ tin cậy/Trạng thái của quy trình)
+    → sheet 'Định giá' đứng đầu. Sheet 'Valuation' (val) là lõi KCI — chỉ tham khảo, cột mang tiền tố loi_kci_."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
+        if conclusion is not None and not conclusion.empty:
+            conclusion.to_excel(xl, sheet_name="Định giá", index=False)
         if table_df is not None and not table_df.empty:    # bảng đúng như màn hình
             table_df.to_excel(xl, sheet_name="Bảng", index=False)
         d = df.copy()
@@ -828,7 +865,10 @@ def export_excel(df: pd.DataFrame, agg: pd.DataFrame, path: str,
         if not agg.empty:
             agg.to_excel(xl, sheet_name="Sector", index=False)
         if val is not None and not val.empty:
-            val.to_excel(xl, sheet_name="Valuation", index=False)
+            # tên trung tính fair_value… từng bị đọc nhầm là kết luận (số tham khảo, IC thấp) — 18/11/2026
+            val.rename(columns={c: "loi_kci_" + c for c in ("fair_value", "upside_%", "confidence", "status",
+                                                              "fwd_fair", "fwd_upside_%", "fair_raw")}
+                       ).to_excel(xl, sheet_name="Valuation", index=False)
 
         wb = xl.book
         head_fill = PatternFill("solid", fgColor="1F3864")

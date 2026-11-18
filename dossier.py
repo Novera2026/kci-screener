@@ -12,6 +12,8 @@ import math
 import os
 from typing import Optional
 
+import guard as _G
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIR = os.path.join(ROOT, "dossiers")
 
@@ -33,7 +35,7 @@ def _clean(x):
 
 
 def path_for(ticker: str, day: Optional[_dt.date] = None, base: str = DIR) -> str:
-    day = day or _dt.date.today()
+    day = day or _G.today_kst()          # ngày Hàn Quốc (máy chủ Cloud chạy UTC)
     return os.path.join(base, f"{ticker}_{day:%Y%m%d}.json")
 
 
@@ -59,7 +61,7 @@ def prune(base: str = DIR, keep_days: int = KEEP_DAYS, max_files: int = MAX_FILE
     thư mục chỉ lớn lên. Trả số file đã xóa."""
     if not os.path.isdir(base):
         return 0
-    today = today or _dt.date.today()
+    today = today or _G.today_kst()
     files = []
     for fn in os.listdir(base):
         if not fn.endswith(".json") or "_" not in fn:
@@ -93,7 +95,7 @@ def save_section(ticker: str, section: str, data, day: Optional[_dt.date] = None
         prune(base)
     d = load(ticker, day, base)
     d.setdefault("ticker", ticker)
-    d.setdefault("sections", {})[section] = {"saved_at": _dt.datetime.now().isoformat(timespec="seconds"),
+    d.setdefault("sections", {})[section] = {"saved_at": _G.now_kst_naive().isoformat(timespec="seconds"),
                                               "data": _clean(data)}
     if meta:
         d.setdefault("meta", {}).update(_clean(meta))

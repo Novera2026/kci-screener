@@ -2,13 +2,16 @@
 Backtest tăng trưởng giai đoạn đầu (g_high) của "DCF earnings" / DDM 2 giai đoạn: 8% cố định cho mọi mã (hiện tại)
 so với các cách tính RIÊNG từng mã, point-in-time (chỉ dữ liệu ≤ Y−1).
 
-  fixed8      : 8%/năm (hiện tại)
+  current     : đúng như App (Assumptions mặc định, g_high_mode='sustainable' — g tính trong value_stock)
+  fixed8      : 8%/năm cố định (cách cũ trước 10/11)
   sustainable : ROE × (1 − tỷ lệ cổ tức) năm gần nhất — tăng trưởng bền vững (sách định giá chuẩn), kẹp [0; 15%]
   hist_cagr   : CAGR doanh thu các năm thực ≤ Y−1, kẹp [0; 15%]
   forecast    : trung bình tăng trưởng doanh thu trong bảng dự phóng mặc định của quy trình, kẹp [0; 15%]
   no_excess   : bằng g dài hạn (không tăng trưởng vượt trội) — thận trọng nhất
 
-Chấm IC (upside ↔ lợi suất vượt KOSPI 12 tháng) của KẾT LUẬN quy trình và của LÕI KCI.
+Chấm IC (upside ↔ lợi suất vượt KOSPI 12 tháng) của KẾT LUẬN quy trình và của LÕI KCI. Mọi phương án trừ 'current'
+chạy với g_high_mode='fixed' (backtest_pipeline ép khi có g_high_fn) — trước 18/11/2026 mode 'sustainable' bỏ qua
+g_high nên 5 phương án ra kết quả giống hệt. Cột 'g trung vị' là g THỰC dùng.
 """
 from __future__ import annotations
 
@@ -48,8 +51,12 @@ def g_no_excess(row, hist, drv):
     return V.Assumptions().g_term_capped()
 
 
-VARIANTS = {"fixed8": None, "sustainable": g_sustainable, "hist_cagr": g_hist_cagr, "forecast": g_forecast,
-            "no_excess": g_no_excess}
+def g_fixed8(row, hist, drv):
+    return 0.08
+
+
+VARIANTS = {"current": None, "fixed8": g_fixed8, "sustainable": g_sustainable, "hist_cagr": g_hist_cagr,
+            "forecast": g_forecast, "no_excess": g_no_excess}
 
 
 def run(points: list[dict], a: Optional[V.Assumptions] = None) -> dict:
