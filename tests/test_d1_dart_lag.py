@@ -151,17 +151,26 @@ def test_fetch_quarter_reports_offline_reads_cache_only(monkeypatch, tmp_path):
     assert AN.quarter_series(out)[0]["currency"] == "USD"          # đơn vị tiền đi theo quý → cổng KRW
 
 
-def test_screen_and_summary_pass_cached_dart_quarters(monkeypatch):
+def test_screen_and_summary_fetch_dart_quarters_like_valuation_page(monkeypatch):
+    """Sàng lọc / bot / Tổng hợp lấy quý DART như trang 🧮 (kỳ chưa lưu thì gọi DART) — trước đây chỉ đọc bản lưu nên sau
+    khi Cloud khởi động lại cùng một mã cho giá trị hợp lý khác 🧮 (Samsung 177.264 vs 185.243)."""
     seen = []
     monkeypatch.setattr(AN, "fetch_quarter_reports", lambda tk, **k: seen.append(k) or [])
     assert P.cached_dart_quarters("000001") == [] and seen == [{"offline": True}]
+    seen.clear()
+    assert P.dart_quarters("000001") == [] and seen == [{}]                 # gọi được DART (không offline)
+    monkeypatch.setattr(AN, "fetch_quarter_reports", lambda tk, **k: 1 / 0)
+    assert P.dart_quarters("000001") == []                                   # lỗi lạ → không làm hỏng định giá
     import inspect
 
     import screen
     src = inspect.getsource(screen.analyze_one)
-    assert "dart_quarters=P.cached_dart_quarters(tk)" in src
+    assert "dart_quarters=P.dart_quarters(tk)" in src
     with open(os.path.join(os.path.dirname(P.__file__), "views", "tong_hop.py"), encoding="utf-8") as f:
-        assert f.read().count("dart_quarters=_P.cached_dart_quarters(") == 2
+        tsrc = f.read()
+    pre = tsrc[tsrc.index("def _prefetch_pipeline"):tsrc.index("_DART_NONE_S =")]
+    assert "_P.dart_quarters(r[\"ticker\"])" in pre                        # nạp sẵn ở bước tải dữ liệu (luồng phụ)
+    assert tsrc.count("dart_quarters=_P.cached_dart_quarters(") == 2         # bảng & chi tiết đọc bản vừa nạp
 
 
 # ---------------------------------------------------------------------------- I14: năm chỉ có ở DART

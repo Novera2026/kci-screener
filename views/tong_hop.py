@@ -398,9 +398,11 @@ def _prefetch_pipeline(rows: list[dict], fins: dict, on_prog=None) -> tuple[dict
     Trả (chuỗi năm theo mã, {mã: [dòng thị trường của đối thủ]})."""
     import concurrent.futures as _cf
     import peers as _PR
+    import pipeline as _P
 
     def _ser(r):
         f = fins.get(r["ticker"]) or _fin(r["ticker"])
+        _P.dart_quarters(r["ticker"])      # nạp sẵn quý DART vào bộ lưu (như trang 🧮) — bảng & chi tiết đọc bản lưu
         try:
             return r["ticker"], build_annual_series(r["ticker"], f.get("annual", []), r.get("market_cap"),
                                                     r.get("price"), years=6, quarters=f.get("quarter"))

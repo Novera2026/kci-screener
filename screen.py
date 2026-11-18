@@ -153,7 +153,7 @@ def analyze_one(tk: str, row: dict, universe_rows: list[dict], a: V.Assumptions,
         fs = None
         fs_err.append("lỗi đọc BCTC đầy đủ")
     ctx = P.assess(tk, row, fin, a, peers, beta, fs_full=fs, feeds=feeds,
-                   dart_quarters=P.cached_dart_quarters(tk),      # quý DART đã lưu (không gọi DART thêm) — I05
+                   dart_quarters=P.dart_quarters(tk),             # quý DART như trang 🧮 (đã nộp → lưu) — I05
                    src_info={"beta_weeks": beta_w})
     rec, idn, series, row = ctx["rec"], ctx["idn"], ctx["series"], ctx["row"]
     mc = row.get("market_cap")

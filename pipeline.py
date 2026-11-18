@@ -1369,10 +1369,22 @@ def prepare(tk: str, row: dict, fin: Optional[dict], a: V.Assumptions, peers: Op
 
 
 def cached_dart_quarters(tk: str) -> list[dict]:
-    """Quý DART ĐÃ LƯU trên đĩa (không gọi DART) cho prepare(dart_quarters=) ở Sàng lọc / bot / Tổng hợp. Lỗi → []."""
+    """Quý DART ĐÃ LƯU trên đĩa (không gọi DART) cho prepare(dart_quarters=). Lỗi → []."""
     try:
         import analysis as AN
         return AN.quarter_series(AN.fetch_quarter_reports(tk, offline=True))
+    except Exception:
+        return []
+
+
+def dart_quarters(tk: str) -> list[dict]:
+    """Quý DART cho prepare(dart_quarters=) ở Sàng lọc / bot / Tổng hợp — CÙNG cách lấy với trang 🧮: kỳ đã nộp đọc
+    bản lưu, kỳ chưa lưu thì gọi DART (lưu lại, lần sau 0 lượt). Trước đây các trang này chỉ đọc bản lưu → sau khi Cloud
+    khởi động lại (bộ lưu trống) cùng một mã cho giá trị hợp lý khác trang 🧮 tới khi có người mở 🧮 (rà soát 18/11).
+    DART lỗi giữa chừng → dùng phần đã lưu (như trang 🧮); lỗi khác → []."""
+    try:
+        import analysis as AN
+        return AN.quarter_series(AN.fetch_quarter_reports(tk))
     except Exception:
         return []
 
